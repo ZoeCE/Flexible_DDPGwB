@@ -1,179 +1,137 @@
 import torch
-from kuka import KukaCamEnv1, KukaCamEnv2, KukaCamEnv3
-from agent import base1, base2, base3, np_to_tensor, opt_cuda, base2_ensemble
-import matplotlib.pyplot as plt
 import numpy as np
-import random
-import time
 import argparse
+import time
+import os
+import sys
 
-def test_critic(task, log, base_ratio=1.0, label='', render=False, n_episodes=1, mode='de', use_fast=True, mean=True):
-    log_dir = 'saves/t' + str(task) + label + '/' + str(log)
-    with open(log_dir + '/critic.pt', 'rb') as fc:
-        critic = torch.load(fc, map_location=torch.device('cpu'))
-    with open(log_dir + '/actor.pt', 'rb') as fa:
-        actor = torch.load(fa, map_location=torch.device('cpu'))
-    if task == 1:
-        env = KukaCamEnv1(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base1
-    elif task == 2:
-        env = KukaCamEnv2(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base2
-    else:
-        env = KukaCamEnv3(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base3
-    for n in range(n_episodes):
-        o, s = env.reset()
-        frame = 0
-        R = 0
-        q_a_record = []
-        q_b_record = []
-        while True:
-            a = base(s)
-            if not use_fast:
-                o_t = torch.tensor(o).type(torch.FloatTensor).unsqueeze(dim=0)
-                s_t = torch.tensor(s[:8]).type(torch.FloatTensor).unsqueeze(dim=0)
-            s = torch.tensor(s).type(torch.FloatTensor).unsqueeze(dim=0)
-            with torch.no_grad():
-                if not use_fast:
-                    action = actor(o_t, s_t, mean=mean)
-                else:
-                    action = actor(s, mean=mean)
-                q_a_record.append(critic(s, action).item())
-                q_b_record.append(critic(s, torch.tensor(a).type(torch.FloatTensor).unsqueeze(dim=0)))
-                action = action.squeeze().numpy()
-                print(action)
-            if np.random.uniform(0, 1) < base_ratio:
-                o_next, s_next, r, done = env.step(a)
-            else:
-                o_next, s_next, r, done = env.step(action)
-            s = s_next
-            o = o_next
-            R += r
-            frame += 1
-            if done or frame >= 100:
-                print('episode', n + 1, 'ends in', frame, 'frames, return =', R)
-                plt.plot(q_a_record, label='agent')
-                plt.plot(q_b_record, c='gray', alpha=0.5, label='base')
-                plt.legend()
-                plt.show()
-                break
+# 引入环境和控制器
+from mujoco_env import CableRobotEnv
+from nmpc_controller import NMPCController
+# 引入 Agent 网络定义 (必须，否则 torch.load 报错)
+from agent import FastActor 
 
+def get_device(gpu_id):
+    if torch.cuda.is_available() and gpu_id >= 0:
+        return torch.device(f"cuda:{gpu_id}")
+    return torch.device("cpu")
 
-def test_actor(task, log, n_episodes=100, label='', base_ratio=1.0, render=False, mode='de', use_fast=True):
-    with open('save_w/t' + str(task) + label + '/' + str(log) + '/actor_best.pt', 'rb') as fa:
-        actor = opt_cuda(torch.load(fa, map_location=torch.device('cpu')), 1)
-    if task == 1:
-        env = KukaCamEnv1(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base1
-    elif task == 2:
-        env = KukaCamEnv2(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base2
-    else:
-        env = KukaCamEnv3(renders=render, image_output=not use_fast, mode=mode, width=128)
-        base = base3
+def run_test(mode, log_dir, n_episodes, render, device_id=0):
+    """
+    统一的测试主循环
+    """
+    # 1. 初始化环境
+    env = CableRobotEnv(render=render)
+    
+    # 2. 初始化策略 (Actor 或 Base)
+    actor_model = None
+    nmpc_controller = None
+    
+    if mode == 'actor':
+        print(f"Loading Actor model from {log_dir}/actor.pt ...")
+        device = get_device(device_id)
+        model_path = os.path.join(log_dir, 'actor.pt')
+        if not os.path.exists(model_path):
+            print(f"Error: Model not found at {model_path}")
+            return
+        try:
+            # weights_only=False 解决 PyTorch 2.6+ 兼容性
+            actor_model = torch.load(model_path, map_location=device, weights_only=False)
+            actor_model.eval()
+        except Exception as e:
+            print(f"Error loading model: {e}")
+            return
+    elif mode == 'base':
+        print("Initializing NMPC Controller (Base)...")
+        nmpc_controller = NMPCController()
+    
+    # 3. 开始测试循环
     success_count = 0
-    sum_L = 0
-    misbehavior_count = 0
+    total_steps_success = 0
+    
     print("*******************************************")
-    for n in range(n_episodes):
-        o, s = env.reset()
-        frame = 0
-        R = 0
+    print(f"Start Testing [{mode.upper()}] for {n_episodes} episodes...")
+    print(f"Render: {'ON' if render else 'OFF'}")
+    print("*******************************************")
+    
+    start_time = time.time()
+    
+    for i in range(n_episodes):
+        obs = env.reset()
+        target_pos = env.target_pos # 仅 Base 需要用到绝对坐标
+        step = 0
+        episode_reward = 0
+        
         while True:
-            if np.random.uniform(0, 1) < base_ratio:
-                o_next, s_next, r, done = env.step(base(s))
-            else:
-                if not use_fast:
-                    o_t = np_to_tensor(o, 1).unsqueeze(dim=0)
-                    s_t = np_to_tensor(s[:8], 1).unsqueeze(dim=0)
-                s = np_to_tensor(s, 1).unsqueeze(dim=0)
+            # --- 策略决策 ---
+            if mode == 'actor':
+                # RL Agent: 输入 State -> 输出 2D Action
+                s_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
                 with torch.no_grad():
-                    if not use_fast:
-                        a = actor(o_t, s_t)
-                    else:
-                        a = actor(s)
-                a = a.cpu().squeeze().numpy()
-                o_next, s_next, r, done = env.step(a)
-            s = s_next
-            o = o_next
-            R += r
-            frame += 1
-            #if frame == 1 or frame == 30 or done:
-            #    time.sleep(10)
-            if done or frame >= 100:
-                #print('episode', n+1, 'ends in', frame, 'frames, return =', R)
-                if done:
-                    if R == 1:
-                        sum_L += frame
-                        success_count += 1
-                    else:
-                        misbehavior_count += 1
+                    action = actor_model(s_tensor).cpu().numpy()[0]
+            else:
+                # NMPC Base: 输入 State + Target -> 输出 2D Action
+                nmpc_state = obs[:8]
+                action = nmpc_controller.get_action(nmpc_state, target_pos)
+            
+            # --- 环境交互 ---
+            # 无论是 Actor 还是 Base，都发送 2D 动作
+            # 环境会自动判断是否满足下降条件
+            next_obs, reward, done, success = env.step(action)
+            
+            obs = next_obs
+            episode_reward += reward
+            step += 1
+            
+            # 渲染延时，方便肉眼观察
+            if render:
+                time.sleep(0.02)
+            
+            # --- 结束判定 ---
+            if done or step >= 200:
+                # 只有在渲染模式下才打印每一局的详情，避免刷屏
+                if render:
+                    print(f"Ep {i+1}: Steps={step}, R={reward:.2f}, Success={success}")
+                
+                if success: 
+                    success_count += 1
+                    total_steps_success += step
                 break
-    print('saves/t', task, label,log)
-    print('Average time in executing the task is', sum_L / success_count, ';\n'
-          'Success rate in', n_episodes, 'episodes is', success_count / n_episodes, ';\n'
-          'Misbehavior rate in', n_episodes, 'episodes is', misbehavior_count / n_episodes, ';\n')
-    print("*******************************************")
-    return sum_L / success_count, success_count / n_episodes, misbehavior_count / n_episodes
+        
+        # 进度条 (非渲染模式下显示)
+        if not render and (i+1) % 10 == 0:
+            print(f"Progress: {i+1}/{n_episodes} | Current SR: {success_count/(i+1)*100:.1f}%")
 
-
-def test_base(task = 1,n_episodes=1000, render=True, add_noise=False):
-    if task == 1:
-        env = KukaCamEnv1(renders=render,image_output = False)
-        base = base1
-    elif task == 2:
-        env = KukaCamEnv2(renders=render, image_output=False)
-        base = base2
-    elif task == 3:
-        env = KukaCamEnv3(renders=render, image_output=False)
-        base = base3
-
-    success_count = 0
-    sum_L = 0
-    misbehavior_count =0
-    print("*******************************************")
-    for n in range(n_episodes):
-        o, s = env.reset()
-        frame = 0
-        R = 0
-        while True:
-            print(s)
-            a = base(s)
-            if add_noise:
-                a += 0.1 * np.random.normal(0, 1, 5)
-            o_next, s_next, r, done = env.step(a)
-            s = s_next
-            frame += 1
-            R += r
-            if done or frame >= 100:
-                print('episode', n+1, 'ends in', frame, 'frames, return =', R)
-                if done:
-                    if R == 1:
-                        sum_L += frame
-                        success_count += 1
-                    else:
-                        misbehavior_count += 1
-                break
-
-    print('Average time in executing the task is', sum_L / success_count, ';\n'
-                                                                          'Success rate in', n_episodes,
-          'episodes is', success_count / n_episodes, ';\n'
-                                                     'Misbehavior rate in', n_episodes, 'episodes is',
-          misbehavior_count / n_episodes, ';\n')
-    print("*******************************************")
-            #return sum_L / success_count, success_count / n_episodes, misbehavior_count / n_episodes
-
-
-
+    end_time = time.time()
+    avg_steps = total_steps_success / success_count if success_count > 0 else 0
+    
+    print("\n" + "="*30)
+    print(f"Final Result [{mode.upper()}]:")
+    print(f"Total Episodes: {n_episodes}")
+    print(f"Success Rate:   {success_count}/{n_episodes} ({success_count/n_episodes*100:.2f}%)")
+    print(f"Avg Steps:      {avg_steps:.1f}")
+    print(f"Time Elapsed:   {end_time - start_time:.2f}s")
+    print("="*30 + "\n")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('-g', '--gpu', type=int, default=0)
-    parser.add_argument('-l', '--log', type=int, default=1)
-    parser.add_argument('-a', '--imitate', action='store_true')
-    parser.add_argument('-t', '--task', type=int, default=1)
-    parser.add_argument('-q', '--mixed_q', action='store_true')
-    parser.add_argument('-b', '--label', type=str, default='')
+    parser = argparse.ArgumentParser(description="Test RL Agent or NMPC Base Controller")
+    
+    # 1. 选择模式: actor (RL) 或 base (NMPC)
+    parser.add_argument('--mode', type=str, default='actor', choices=['actor', 'base'], 
+                        help='Choose policy to test: "actor" or "base"')
+    
+    # 2. 是否开启动画: 加上 --render 就开启，不加就关闭
+    parser.add_argument('--render', action='store_true', 
+                        help='Enable visualization (slows down testing)')
+    
+    # 3. 测试局数
+    parser.add_argument('--episodes', type=int, default=10, 
+                        help='Number of episodes to run')
+    
+    # 4. 模型路径 (仅 actor 模式需要)
+    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', 
+                        help='Directory containing actor.pt')
+    
     args = parser.parse_args()
-    test_actor(task=args.task, log=args.log, label=args.label, render=True, base_ratio=0.0, n_episodes=1000, mode='de',use_fast=True)
+    
+    run_test(args.mode, args.dir, args.episodes, args.render)

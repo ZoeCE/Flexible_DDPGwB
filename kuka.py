@@ -213,7 +213,7 @@ class KukaCamEnvBase:
         raise NotImplementedError
 
 
-class KukaCamEnv1(KukaCamEnvBase):
+class KukaCamEnv2(KukaCamEnvBase):
     def __init__(self, renders=False, image_output=True, mode='de', width=128):
         super().__init__("models/box_green.urdf", True,
                          "models/cup/cup.urdf", False,
@@ -230,7 +230,7 @@ class KukaCamEnv1(KukaCamEnvBase):
         return False, 0.0
 
 
-class KukaCamEnv2(KukaCamEnvBase):
+class KukaCamEnv1(KukaCamEnvBase):
     def __init__(self, renders=False, image_output=True, mode='de', width=128):
         super().__init__("models/box_green.urdf", True,
                          "models/box_purple.urdf", True,

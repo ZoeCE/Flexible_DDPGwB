@@ -1,156 +1,80 @@
-import matplotlib as mpl
+import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
+import os
+import argparse
 
+def smooth(data, window=50):
+    """对数据进行滑动平均平滑"""
+    return data.rolling(window=window, min_periods=1).mean()
 
-def plot(task, logs, n_seeds, l):
-    log_folder = ['t' + str(task), 't' + str(task) + 'nBB', 't' + str(task) + 'nMQ']
-    for label in log_folder:
-        m_r = []
-        for log, seeds in zip(logs, n_seeds):
-            for i in range(seeds):
-                df = pd.read_csv(log + label + '/' + str(i+1) + '/log.csv')
-                m = list(df[[l]].to_numpy().transpose(1, 0)[0])
-                m_r.append(sum(m)/len(m))
-        std = np.std(m_r, ddof=1)
-        mean = sum(m_r)/sum(n_seeds)
-        print(l, 'rate for', label, 'is', mean, 'std', std)
+def plot_training_results(log_dir):
+    log_path = os.path.join(log_dir, 'log.csv')
+    
+    if not os.path.exists(log_path):
+        print(f"Error: Log file not found at {log_path}")
+        return
 
+    # 读取数据
+    try:
+        df = pd.read_csv(log_path)
+    except Exception as e:
+        print(f"Error reading CSV: {e}")
+        return
 
-def cal_test(task, logs, n_seeds, l):
-    log_folder = ['t' + str(task), 't' + str(task) + 'nBB', 't' + str(task) + 'nMQ']#, 't' + str(task) + 'wBC']
-    for label in log_folder:
-        m = []
-        for log, seeds in zip(logs, n_seeds):
-            df = pd.read_csv(log + label + '/actor_performance.csv')
-            m += (list(df[[l]].to_numpy().transpose(1, 0)[0][:seeds]))
-        print(l, 'for', label, 'is', sum(m)/len(m), 'stde', np.std(m, ddof=1)/np.sqrt(len(m)))
+    # 设置绘图风格
+    plt.style.use('seaborn-v0_8')
+    fig, axes = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
 
+    # 1. 绘制 Success Rate (Return)
+    # 因为 Reward 是 0 或 1，滑动平均后就是成功率
+    window_size = 50
+    success_rate = smooth(df['return'], window=window_size)
+    
+    axes[0].plot(df['frames'], df['return'], alpha=0.2, color='gray', label='Raw Reward')
+    axes[0].plot(df['frames'], success_rate, color='royalblue', linewidth=2, label=f'Success Rate (MA-{window_size})')
+    axes[0].set_ylabel('Success Rate / Reward')
+    axes[0].set_title('Training Performance')
+    axes[0].legend()
+    axes[0].grid(True, alpha=0.3)
 
-def cal_episode(task, logs, n_seeds):
-    log_folder = ['t' + str(task), 't' + str(task) + 'nBB', 't' + str(task) + 'nMQ', 't' + str(task) + 'wBC']
-    for label in log_folder:
-        e = 0
-        for log, seeds in zip(logs, n_seeds):
-            for i in range(seeds):
-                df = pd.read_csv(log + label + '/' + str(i + 1) + '/log.csv')
-                m = list(df[['episode']].to_numpy().transpose(1, 0)[0])
-                e += len(m)
-        e /= sum(n_seeds)
-        print('n_episodes for', label, 'is', e)
+    # 2. 绘制 Ratio (Base Controller Usage) & Epsilon
+    # 注意：log.csv 里没有直接记 epsilon，但 ratio 反映了 epsilon 的效果
+    axes[1].plot(df['frames'], df['ratio'], color='crimson', linewidth=2, label='Base Controller Ratio')
+    axes[1].set_ylabel('Ratio')
+    axes[1].set_title('Base Controller Usage Ratio')
+    axes[1].legend()
+    axes[1].grid(True, alpha=0.3)
 
+    # 3. 绘制 Loss (Critic & Actor)
+    # 对 Loss 也做一点平滑，因为波动很大
+    loss_c_smooth = smooth(df['Lc'], window=20)
+    loss_a_smooth = smooth(df['La'], window=20)
+    loss_bc_smooth = smooth(df['Lbc'], window=20)
 
-def plot_test(log, seeds, polyak=0.01, train=False, task=1, ratio=False, loss=False, ensemble=False):
-    time = set([])
-    frame = []
-    data = []
-    for i in seeds:
-        df = pd.read_csv(log + '/' + str(i) + '/log.csv')
-        stamps = list(df[['frames']].to_numpy().transpose(1, 0)[0])
-        frame.append(stamps)
-        time = time | set(stamps)
-        if train:
-            rec = list(df[['return']].to_numpy().transpose(1, 0)[0])
-            if log == 'saves_R_1_2/t1' or log =='saves_R_1_2/t2' or log == 'saves_R_1_2/t3':
-                if task == 1:
-                    rec[0] = 0.30
-                elif task == 2:
-                    rec[0] = 0.45
-                else:
-                    rec[0] = 0.14
-            elif log == 'saves_2/t1wD' or log == 'saves_2/t2wD' or log == 'saves_2/t3wD' or log == 'save_w/t1' or log == 'save_w/t2' or log == 'save_w/t3':
-                rec[0] = 0
-            else:
-                if task == 1:
-                    rec[0] = 0.5766
-                elif task == 2:
-                    rec[0] = 0.8904
-                else:
-                    rec[0] = 0.2814
-        elif loss:
-            rec = list(df[['La']].to_numpy().transpose(1, 0)[0])
-        elif ratio:
-            rec = list(df[['ratio']].to_numpy().transpose(1, 0)[0])
-        else:
-            rec = list(df[['test']].to_numpy().transpose(1, 0)[0])
-        data.append(rec)
-    time = list(time)
-    time.sort()
-    for i in range(len(data)):
-        for j in range(len(data[i])-1):
-            data[i][j+1] = data[i][j] * (1-polyak) + data[i][j+1] * polyak
-    for i in range(len(data)):
-        count = 0
-        data_new = []
-        for time_step in time:
-            if time_step < frame[i][count]:
-                if count == 0:
-                    if train or loss:
-                        data_new.append(data[i][count])
-                    else:
-                        data_new.append(data[i][count] * time_step / frame[i][count])
-                else:
-                    data_new.append((data[i][count] - data[i][count-1]) * (time_step - frame[i][count-1])
-                                    / (frame[i][count] - frame[i][count-1]) + data[i][count-1])
-            elif time_step == frame[i][count]:
-                data_new.append(data[i][count])
-                if count < len(data[i]) - 1:
-                    count += 1
-            else:
-                if count == len(data[i]) - 1:
-                    data_new.append(data[i][count])
-                else:
-                    data_new.append((data[i][count+1] - data[i][count]) * (time_step - frame[i][count])
-                                    / (frame[i][count+1] - frame[i][count]) + data[i][count])
-                    if count < len(data[i]) - 1:
-                        count += 1
-        data[i] = data_new
-    data = np.array(data)
-    time = np.array(time)
-    stderr = np.std(data, axis=0, ddof=1)  # / np.sqrt(data.shape[0])
-    mean = np.mean(data, axis=0)
-    time /= 1e3
-    return time, mean, stderr
+    axes[2].plot(df['frames'], loss_c_smooth, label='Critic Loss', color='orange')
+    axes[2].plot(df['frames'], loss_bc_smooth, label='BC Loss', color='green')
+    # Actor Loss 通常是负的 Q 值，画在一起可能比例不对，可以考虑双轴，这里先画在一起
+    # axes[2].plot(df['frames'], loss_a_smooth, label='Actor Loss', color='purple', linestyle='--')
+    
+    axes[2].set_ylabel('Loss')
+    axes[2].set_xlabel('Environment Steps')
+    axes[2].set_title('Training Losses')
+    axes[2].legend()
+    axes[2].grid(True, alpha=0.3)
+    axes[2].set_yscale('log') # Loss 变化范围大，用对数坐标看细节
 
-
-def plot_result(task, logs, n_seeds, labels, colors, polyak=0.01,
-                train=False, ratio=False, loss=False, ensemble=False, image=False):
-    mpl.style.use('seaborn')
-    # color = ['royalblue', 'xkcd:green', 'xkcd:orange', 'crimson']
-    for log, seeds, label, color in zip(logs, n_seeds, labels, colors):
-        time, mean, stderr = plot_test(log=log, seeds=seeds, polyak=polyak,
-                                       train=train, task=task, ratio=ratio,
-                                       loss=loss, ensemble=ensemble)
-        plt.plot(time, mean, label=label, c=color, lw=1.)
-        plt.fill_between(time, mean - stderr, mean + stderr, color=color, alpha=0.15)
-    baseline_data = {'train': [0.5766, 0.8904, 0.2814], 'test': [0.5766, 0.8904, 0.2814]}
-    if train:
-        plt.axhline(baseline_data['train'][task-1], xmin=0, xmax=1, c='gray', ls='--', label='Base Controller')
-    if ensemble:
-        max_x = 1000
-    elif image:
-        max_x = 200
-    else:
-        max_x = 200
-    if not loss:
-        plt.axis([0, max_x, 0, 1.0])
-    plt.legend(prop={'size': 20})
-    plt.subplots_adjust(left=0.11, right=0.97, top=0.97, bottom=0.17)
-    plt.xlabel('Number of environment steps (x $\mathregular{10^3}$)', fontdict={'size': 25})
-    plt.xticks(size=20)
-    plt.yticks(size=20)
-    plt.ylabel('success rate', fontdict={'size': 25})
+    plt.tight_layout()
+    
+    # 保存图片
+    save_path = os.path.join(log_dir, 'training_curves.png')
+    plt.savefig(save_path, dpi=300)
+    print(f"Plot saved to {save_path}")
     plt.show()
 
-
 if __name__ == '__main__':
-     for t in range(3):
-         plot_result(task=t+1,
-                     logs=['saves/t'+str(t+1), 'saves/t'+str(t+1)+'nBB', 'saves/t'+str(t+1)+'nMQ',
-                           'saves/t'+str(t+1)+'wBC', 'saves/t'+str(t+1)+'wD'],
-                     n_seeds=[[1, 2, 3, 4, 5]] * 5,
-                     labels=['WB', 'WBnBB', 'WBnMQ', 'WBwBC', 'WBwD'],
-                     colors=['royalblue', 'xkcd:green', 'xkcd:orange', 'purple', 'crimson'],
-                     polyak=0.01,
-                     train=False, ratio=False, loss=False)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Path to log directory')
+    args = parser.parse_args()
+    
+    plot_training_results(args.dir)
