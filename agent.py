@@ -30,7 +30,6 @@ class FastActor(nn.Module):
             nn.Tanh()) 
 
     def forward(self, s):
-        # 【关键修正】输出乘以 max_action，使范围匹配环境 [-0.5, 0.5]
         return self.fc(s) * self.max_action
 
 class Critic(nn.Module):
@@ -90,7 +89,6 @@ class WBAgent:
 
         self.buffer = ReplayBufferFast(state_dim, action_dim, size=100000)
         
-        # 传入 max_action
         self.actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
         self.target_actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
         soft_update(self.target_actor, self.actor, 1)
@@ -105,8 +103,13 @@ class WBAgent:
         self.gamma = 0.99
         self.tau = 0.005
         self.epsilon = 1.0
-        self.delta = 5e-6
+        self.delta = 5e-6 
         self.batch_size = 256
+        
+        # 【关键修改】Q-Loss 的权重系数
+        # 原来是 0.02 (太小)，现在改为 0.5
+        # 这意味着 Agent 会更看重 "拿高分" 而不仅仅是 "模仿 NMPC"
+        self.lmbda = 0.5 
 
     def act(self, s, test=False):
         if self.base is not None:
@@ -116,7 +119,6 @@ class WBAgent:
 
         s_tensor = np_to_tensor(s, self.device).unsqueeze(dim=0)
         with torch.no_grad():
-            # 这里的 action_net 已经在 [-0.5, 0.5] 范围内了
             action_net = self.actor(s_tensor).squeeze().cpu().numpy()
 
         if test:
@@ -141,8 +143,11 @@ class WBAgent:
         self.buffer.store(state, action, base_action, next_state, [reward], [done])
 
     def train(self, frame):
+        steps = 2 
+        if self.buffer.size < self.batch_size:
+            return 0, 0, 0
+
         total_Lc = total_La = total_Lbc = 0
-        steps = min(int(frame), max((5 * self.buffer.size) // self.batch_size, 1))
         
         for i in range(steps):
             batch = self.buffer.sample_batch(batch_size=self.batch_size)
@@ -155,6 +160,7 @@ class WBAgent:
             base_action = np_to_tensor(batch['base_acts'], self.device)
             base_action_n = base_action 
 
+            # Critic Update
             self.optimizer_critic.zero_grad()
             with torch.no_grad():
                 a_next = self.target_actor(sn)
@@ -170,6 +176,7 @@ class WBAgent:
             soft_update(self.target_critic, self.critic, self.tau)
             total_Lc += Lc.item()
 
+            # Actor Update
             self.optimizer_actor.zero_grad()
             if self.behavior_clone:
                 with torch.no_grad():
@@ -178,8 +185,13 @@ class WBAgent:
                 q_a = self.critic(si, a)
                 with torch.no_grad():
                     xi = nn.ReLU()(torch.sign(q_base - q_a))
+                
+                # BC Loss: 模仿 NMPC
                 Lbc = (((a - base_action) ** 2).mean(dim=1, keepdim=True) * xi).sum() / max(xi.sum().item(), 1)
-                La = Lbc - 0.02 * q_a.mean()
+                
+                # 【关键修改】Total Loss = BC Loss - lambda * Q_Value
+                # 增大 lambda (0.5) 让 Agent 更想去最大化 Q 值
+                La = Lbc - self.lmbda * q_a.mean()
             else:
                 a = self.actor(si)
                 La = - self.critic(si, a).mean()

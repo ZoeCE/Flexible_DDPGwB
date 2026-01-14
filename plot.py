@@ -2,79 +2,108 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
+import glob
 import argparse
 
-def smooth(data, window=50):
-    """对数据进行滑动平均平滑"""
+def smooth(data, window=20):
+    """滑动平均"""
     return data.rolling(window=window, min_periods=1).mean()
 
-def plot_training_results(log_dir):
-    log_path = os.path.join(log_dir, 'log.csv')
-    
-    if not os.path.exists(log_path):
-        print(f"Error: Log file not found at {log_path}")
-        return
+def read_all_seeds(root_dir):
+    """读取所有 Seed 的日志并合并"""
+    all_files = glob.glob(os.path.join(root_dir, 'seed_*', 'log.csv'))
+    if not all_files:
+        print(f"No log files found in {root_dir}")
+        return None
 
-    # 读取数据
-    try:
-        df = pd.read_csv(log_path)
-    except Exception as e:
-        print(f"Error reading CSV: {e}")
+    data_list = []
+    for f in all_files:
+        try:
+            df = pd.read_csv(f)
+            # 只需要关键列
+            df = df[['frames', 'train_success', 'test_success_rate', 'ratio']]
+            data_list.append(df)
+        except Exception as e:
+            print(f"Error reading {f}: {e}")
+
+    return data_list
+
+def plot_paper_style(root_dir):
+    data_list = read_all_seeds(root_dir)
+    if not data_list:
         return
 
     # 设置绘图风格
     plt.style.use('seaborn-v0_8')
-    fig, axes = plt.subplots(3, 1, figsize=(10, 15), sharex=True)
+    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
 
-    # 1. 绘制 Success Rate (Return)
-    # 因为 Reward 是 0 或 1，滑动平均后就是成功率
-    window_size = 50
-    success_rate = smooth(df['return'], window=window_size)
-    
-    axes[0].plot(df['frames'], df['return'], alpha=0.2, color='gray', label='Raw Reward')
-    axes[0].plot(df['frames'], success_rate, color='royalblue', linewidth=2, label=f'Success Rate (MA-{window_size})')
-    axes[0].set_ylabel('Success Rate / Reward')
-    axes[0].set_title('Training Performance')
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
+    # 定义要画的指标
+    metrics = [
+        {'col': 'train_success', 'title': 'Training Performance (Interaction)', 'ylabel': 'Success Rate', 'smooth': 50},
+        {'col': 'test_success_rate', 'title': 'Test Performance (Eval)', 'ylabel': 'Success Rate', 'smooth': 1}, # Test 本身就是平均值，不用平滑
+        {'col': 'ratio', 'title': 'Base Controller Usage', 'ylabel': 'Ratio', 'smooth': 20}
+    ]
 
-    # 2. 绘制 Ratio (Base Controller Usage) & Epsilon
-    # 注意：log.csv 里没有直接记 epsilon，但 ratio 反映了 epsilon 的效果
-    axes[1].plot(df['frames'], df['ratio'], color='crimson', linewidth=2, label='Base Controller Ratio')
-    axes[1].set_ylabel('Ratio')
-    axes[1].set_title('Base Controller Usage Ratio')
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
+    # 统一 X 轴 (Frames)
+    # 创建一个公共的 X 轴网格
+    max_frames = min([df['frames'].max() for df in data_list])
+    common_x = np.linspace(0, max_frames, 200) # 插值成 200 个点
 
-    # 3. 绘制 Loss (Critic & Actor)
-    # 对 Loss 也做一点平滑，因为波动很大
-    loss_c_smooth = smooth(df['Lc'], window=20)
-    loss_a_smooth = smooth(df['La'], window=20)
-    loss_bc_smooth = smooth(df['Lbc'], window=20)
+    for idx, metric in enumerate(metrics):
+        ax = axes[idx]
+        col = metric['col']
+        
+        interpolated_y = []
+        for df in data_list:
+            # 处理 NaN (Test 数据是稀疏的)
+            if col == 'test_success_rate':
+                # 去掉 NaN 行
+                df_clean = df.dropna(subset=[col])
+                x = df_clean['frames']
+                y = df_clean[col]
+            else:
+                x = df['frames']
+                y = df[col]
+                if metric['smooth'] > 1:
+                    y = smooth(y, metric['smooth'])
+            
+            # 线性插值到公共 X 轴
+            if len(x) > 1:
+                y_interp = np.interp(common_x, x, y)
+                interpolated_y.append(y_interp)
 
-    axes[2].plot(df['frames'], loss_c_smooth, label='Critic Loss', color='orange')
-    axes[2].plot(df['frames'], loss_bc_smooth, label='BC Loss', color='green')
-    # Actor Loss 通常是负的 Q 值，画在一起可能比例不对，可以考虑双轴，这里先画在一起
-    # axes[2].plot(df['frames'], loss_a_smooth, label='Actor Loss', color='purple', linestyle='--')
-    
-    axes[2].set_ylabel('Loss')
-    axes[2].set_xlabel('Environment Steps')
-    axes[2].set_title('Training Losses')
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-    axes[2].set_yscale('log') # Loss 变化范围大，用对数坐标看细节
+        if not interpolated_y:
+            continue
+
+        # 计算 Mean 和 Std
+        y_matrix = np.array(interpolated_y)
+        y_mean = np.mean(y_matrix, axis=0)
+        y_std = np.std(y_matrix, axis=0)
+
+        # 绘图
+        ax.plot(common_x, y_mean, linewidth=2, color='royalblue', label='Ours (DDPG+Base)')
+        ax.fill_between(common_x, y_mean - y_std, y_mean + y_std, color='royalblue', alpha=0.2)
+
+        # 如果是成功率图，画 Base Controller 基线
+        if 'success' in col:
+            ax.axhline(y=0.605, color='gray', linestyle='--', label='Base Controller (60.5%)')
+            ax.set_ylim(0, 1.05)
+
+        ax.set_title(metric['title'])
+        ax.set_xlabel('Environment Steps')
+        ax.set_ylabel(metric['ylabel'])
+        ax.legend()
+        ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-    
-    # 保存图片
-    save_path = os.path.join(log_dir, 'training_curves.png')
+    save_path = os.path.join(root_dir, 'paper_result.png')
     plt.savefig(save_path, dpi=300)
     print(f"Plot saved to {save_path}")
-    plt.show()
+    # plt.show()
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Path to log directory')
+    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Root directory containing seed folders')
     args = parser.parse_args()
     
-    plot_training_results(args.dir)
+    plot_paper_style(args.dir)
