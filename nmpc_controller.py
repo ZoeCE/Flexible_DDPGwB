@@ -2,7 +2,17 @@ import numpy as np
 import casadi as ca
 
 class NMPCController:
-    def __init__(self, dt=0.02, N=20, L=0.6, u_max=0.5):
+    def __init__(self, dt=0.1, N=20, L=0.6, u_max=0.5):
+        """
+        NMPC Controller for Cable Robot
+        
+        Args:
+            dt: Control timestep (s), should match environment control_dt
+                Default 0.1s = 10Hz control frequency
+            N: Prediction horizon (steps)
+            L: Cable length (m)
+            u_max: Maximum acceleration (m/s^2)
+        """
         self.dt = dt
         self.N = N
         self.L = L
