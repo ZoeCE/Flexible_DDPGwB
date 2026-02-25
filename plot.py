@@ -86,7 +86,7 @@ def plot_paper_style(root_dir):
 
         # 如果是成功率图，画 Base Controller 基线
         if 'success' in col:
-            ax.axhline(y=0.605, color='gray', linestyle='--', label='Base Controller (60.5%)')
+            ax.axhline(y=0.527, color='gray', linestyle='--', label='Base Controller (52.7%)')
             ax.set_ylim(0, 1.05)
 
         ax.set_title(metric['title'])
