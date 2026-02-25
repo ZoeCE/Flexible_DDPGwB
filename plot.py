@@ -2,108 +2,79 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import numpy as np
 import os
-import glob
-import argparse
 
 def smooth(data, window=20):
-    """滑动平均"""
+    """滑动平均，让曲线更平滑好看"""
     return data.rolling(window=window, min_periods=1).mean()
 
-def read_all_seeds(root_dir):
-    """读取所有 Seed 的日志并合并"""
-    all_files = glob.glob(os.path.join(root_dir, 'seed_*', 'log.csv'))
-    if not all_files:
-        print(f"No log files found in {root_dir}")
-        return None
-
-    data_list = []
-    for f in all_files:
-        try:
-            df = pd.read_csv(f)
-            # 只需要关键列
-            df = df[['frames', 'train_success', 'test_success_rate', 'ratio']]
-            data_list.append(df)
-        except Exception as e:
-            print(f"Error reading {f}: {e}")
-
-    return data_list
-
-def plot_paper_style(root_dir):
-    data_list = read_all_seeds(root_dir)
-    if not data_list:
+def plot_main_result(log_dir='saves/nmpc_experiment/initRand_procNoise/seed_1'):
+    log_file = os.path.join(log_dir, 'log.csv')
+    if not os.path.exists(log_file):
+        print(f"找不到日志文件: {log_file}，请确认训练是否已经产生数据。")
         return
 
-    # 设置绘图风格
-    plt.style.use('seaborn-v0_8')
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
+    df = pd.read_csv(log_file)
+    
+    # NMPC 在完整扰动下的基线成功率 (根据你之前的测试结果是 46%)
+    NMPC_BASELINE_SR = 0.46 
 
-    # 定义要画的指标
-    metrics = [
-        {'col': 'train_success', 'title': 'Training Performance (Interaction)', 'ylabel': 'Success Rate', 'smooth': 50},
-        {'col': 'test_success_rate', 'title': 'Test Performance (Eval)', 'ylabel': 'Success Rate', 'smooth': 1}, # Test 本身就是平均值，不用平滑
-        {'col': 'ratio', 'title': 'Base Controller Usage', 'ylabel': 'Ratio', 'smooth': 20}
-    ]
+    # 设置学术论文风格
+    plt.style.use('seaborn-v0_8-whitegrid')
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    axes = axes.flatten()
 
-    # 统一 X 轴 (Frames)
-    # 创建一个公共的 X 轴网格
-    max_frames = min([df['frames'].max() for df in data_list])
-    common_x = np.linspace(0, max_frames, 200) # 插值成 200 个点
+    # ==========================================
+    # 图 1: Test Success Rate (闭卷考试)
+    # ==========================================
+    ax = axes[0]
+    df_test = df.dropna(subset=['test_success_rate']) # 过滤掉没有测试的回合
+    if not df_test.empty:
+        ax.plot(df_test['frames'], df_test['test_success_rate'], color='#d62728', linewidth=2.5, label='Ours (Test)')
+    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label=f'NMPC Baseline ({NMPC_BASELINE_SR*100:.0f}%)')
+    ax.set_title('Test Success Rate (Evaluation)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Success Rate', fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
 
-    for idx, metric in enumerate(metrics):
-        ax = axes[idx]
-        col = metric['col']
-        
-        interpolated_y = []
-        for df in data_list:
-            # 处理 NaN (Test 数据是稀疏的)
-            if col == 'test_success_rate':
-                # 去掉 NaN 行
-                df_clean = df.dropna(subset=[col])
-                x = df_clean['frames']
-                y = df_clean[col]
-            else:
-                x = df['frames']
-                y = df[col]
-                if metric['smooth'] > 1:
-                    y = smooth(y, metric['smooth'])
-            
-            # 线性插值到公共 X 轴
-            if len(x) > 1:
-                y_interp = np.interp(common_x, x, y)
-                interpolated_y.append(y_interp)
+    # ==========================================
+    # 图 2: Train Success Rate (平时作业)
+    # ==========================================
+    ax = axes[1]
+    train_sr_smooth = smooth(df['train_success'], window=50)
+    ax.plot(df['frames'], train_sr_smooth, color='#1f77b4', linewidth=2, alpha=0.8, label='Ours (Train)')
+    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label='NMPC Baseline')
+    ax.set_title('Train Success Rate (Interaction)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Success Rate', fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
 
-        if not interpolated_y:
-            continue
+    # ==========================================
+    # 图 3: Base Controller Usage Ratio (断奶过程)
+    # ==========================================
+    ax = axes[2]
+    ratio_smooth = smooth(df['ratio'], window=20)
+    ax.plot(df['frames'], ratio_smooth, color='#2ca02c', linewidth=2.5)
+    ax.set_title('Base Controller Usage Ratio', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Ratio (0 to 1)', fontsize=12)
+    ax.set_ylim(0, 1.05)
 
-        # 计算 Mean 和 Std
-        y_matrix = np.array(interpolated_y)
-        y_mean = np.mean(y_matrix, axis=0)
-        y_std = np.std(y_matrix, axis=0)
-
-        # 绘图
-        ax.plot(common_x, y_mean, linewidth=2, color='royalblue', label='Ours (DDPG+Base)')
-        ax.fill_between(common_x, y_mean - y_std, y_mean + y_std, color='royalblue', alpha=0.2)
-
-        # 如果是成功率图，画 Base Controller 基线
-        if 'success' in col:
-            ax.axhline(y=0.527, color='gray', linestyle='--', label='Base Controller (52.7%)')
-            ax.set_ylim(0, 1.05)
-
-        ax.set_title(metric['title'])
-        ax.set_xlabel('Environment Steps')
-        ax.set_ylabel(metric['ylabel'])
-        ax.legend()
-        ax.grid(True, alpha=0.3)
+    # ==========================================
+    # 图 4: Average Swing (你的创新点：平稳性证明)
+    # ==========================================
+    ax = axes[3]
+    swing_smooth = smooth(df['avg_swing'], window=50)
+    ax.plot(df['frames'], swing_smooth, color='#ff7f0e', linewidth=2.5)
+    ax.set_title('Average Swing Distance ($D_{swing}$)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Swing Distance (m)', fontsize=12)
 
     plt.tight_layout()
-    save_path = os.path.join(root_dir, 'paper_result.png')
-    plt.savefig(save_path, dpi=300)
-    print(f"Plot saved to {save_path}")
-    # plt.show()
+    save_path = os.path.join(log_dir, 'main_results.png')
+    plt.savefig(save_path, dpi=300, bbox_inches='tight')
+    print(f"✅ 绘图成功！图表已保存至: {save_path}")
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Root directory containing seed folders')
-    args = parser.parse_args()
-    
-    plot_paper_style(args.dir)
+    plot_main_result()

@@ -107,9 +107,9 @@ class WBAgent:
         self.batch_size = 256
         
         # 【关键修改】Q-Loss 的权重系数
-        # 原来是 0.02 (太小)，现在改为 0.5
+        # 原来是 0.02 (太小)，现在改为 0.5（爆炸性遗忘，适中到0.25）
         # 这意味着 Agent 会更看重 "拿高分" 而不仅仅是 "模仿 NMPC"
-        self.lmbda = 0.5 
+        self.lmbda = 0.25 
 
     def act(self, s, test=False):
         if self.base is not None:

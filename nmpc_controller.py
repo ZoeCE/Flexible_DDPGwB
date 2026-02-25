@@ -96,6 +96,14 @@ class NMPCController:
         
         self.last_sol = None
 
+    def reset(self):
+            """
+            重置控制器的内部状态。
+            在每个新的 Episode 开始时调用，清除上一个 Episode 的热启动解，
+            防止空间跳跃导致求解器崩溃。
+            """
+            self.last_sol = None
+            
     def get_action(self, state, target_pos):
         p_val = np.concatenate([state, target_pos])
         x0_guess = np.zeros(self.lbx.shape)
