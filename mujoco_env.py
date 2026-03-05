@@ -259,10 +259,10 @@ class CableRobotEnv:
         reward = -0.001  
         
         acc_xy = np.linalg.norm(self.last_action[:2])
-        acc_penalty_weight = 0.02
+        acc_penalty_weight = 0.04
         reward -= acc_penalty_weight * acc_xy
         
-        if dist_xy < 0.03 and payload_vel < 0.1 and q_z < 0.15:
+        if dist_xy < 0.03 and payload_vel < 0.05 and q_z < 0.15:
             reward += 1.0
             success = True
             

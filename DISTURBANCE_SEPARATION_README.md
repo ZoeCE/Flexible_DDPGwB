@@ -47,7 +47,7 @@ mjpython test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --epi
 
 ## 有渲染
 mjpython test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
-
+python test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
 
 ```
 
