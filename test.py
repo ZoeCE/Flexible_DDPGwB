@@ -6,8 +6,8 @@ import os
 import sys
 
 # 引入环境和控制器
-from mujoco_env import CableRobotEnv
-from nmpc_controller import NMPCController
+from mujoco_env import CableRobotEnv, CableRobotEnvWithObstacles
+from nmpc_controller import NMPCController, NMPCControllerObstacles
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
 from agent import FastActor 
 
@@ -113,25 +113,146 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
     print(f"Time Elapsed:   {end_time - start_time:.2f}s")
     print("="*30 + "\n")
 
+
+def run_test_obstacles(n_episodes=10, render=False, n_obstacles=3,
+                       obstacle_seed=42, save_paths_dir=None,
+                       payload_radius=0.06, planning_margin=0.02, planning_grid_res=0.02,
+                       default_start_xy=None, default_target_xy=None):
+    """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCControllerObstacles。"""
+    env = CableRobotEnvWithObstacles(
+        render=render,
+        latency_steps=1,
+        force_noise_level=0.08,
+        control_freq_hz=10,
+        init_velocity_scale=0.08,
+        init_position_range=0.06,
+        n_obstacles=n_obstacles,
+        obstacle_radius_range=(0.01, 0.02),
+        path_width=0.12,
+        obstacle_seed=obstacle_seed,
+        default_start_xy=default_start_xy or [0.2, 0.2],
+        default_target_xy=default_target_xy or [0.5, 0.5],
+        payload_radius=payload_radius,
+        planning_margin=planning_margin,
+        planning_grid_res=planning_grid_res,
+    )
+    nmpc = NMPCControllerObstacles(
+        dt=env.control_dt,
+        N=20,
+        L=0.6,
+        u_max=0.5,
+        n_obstacles_max=max(5, n_obstacles),
+        obstacle_margin=0.05,
+    )
+
+    if save_paths_dir is not None:
+        os.makedirs(save_paths_dir, exist_ok=True)
+
+    success_count = 0
+    total_steps_success = 0
+    collision_count = 0
+
+    print("*******************************************")
+    print("NMPC with Obstacle Avoidance")
+    print(f"Episodes: {n_episodes}, Render: {render}, Obstacles: {n_obstacles}")
+    print("*******************************************")
+
+    start_time = time.time()
+    for ep in range(n_episodes):
+        obs = env.reset()
+        obstacles = env.get_obstacles()
+        target_pos = env.target_pos
+        step = 0
+        episode_collision = False
+
+        if save_paths_dir is not None and hasattr(env, "get_planned_path"):
+            planned_path = env.get_planned_path()
+            if planned_path is not None and len(planned_path) > 0:
+                path_with_idx = np.column_stack(
+                    [np.arange(planned_path.shape[0]), planned_path]
+                )
+                out_path = os.path.join(save_paths_dir, f"path_ep{ep+1}.csv")
+                np.savetxt(out_path, path_with_idx, delimiter=",",
+                           header="idx,x,y", comments="")
+
+        while True:
+            nmpc_state = obs[:8]
+            action = nmpc.get_action(nmpc_state, target_pos, obstacles)
+            next_obs, reward, done, success = env.step(action)
+            obs = next_obs
+            step += 1
+
+            qx, qy = obs[4], obs[5]
+            for (ox, oy, r) in obstacles:
+                if np.hypot(qx - ox, qy - oy) < r:
+                    episode_collision = True
+                    break
+
+            if render:
+                time.sleep(0.02)
+
+            if done or step >= 200:
+                if episode_collision:
+                    collision_count += 1
+                if success:
+                    success_count += 1
+                    total_steps_success += step
+                if render:
+                    print(f"Ep {ep+1}: Steps={step}, Success={success}, Collision={episode_collision}")
+                break
+
+        if not render and (ep + 1) % 5 == 0:
+            print(f"Progress: {ep+1}/{n_episodes} | SR: {success_count/(ep+1)*100:.1f}% | Collisions: {collision_count}")
+
+    elapsed = time.time() - start_time
+    avg_steps = total_steps_success / success_count if success_count > 0 else 0
+    print("\n" + "="*40)
+    print("Result (NMPC + Obstacles):")
+    print(f"  Episodes:     {n_episodes}")
+    print(f"  Success:      {success_count} ({success_count/n_episodes*100:.2f}%)")
+    print(f"  Collisions:   {collision_count}")
+    print(f"  Avg steps:    {avg_steps:.1f}")
+    print(f"  Time:        {elapsed:.2f}s")
+    print("="*40 + "\n")
+
+
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description="Test RL Agent or NMPC Base Controller")
-    
-    # 1. 选择模式: actor (RL) 或 base (NMPC)
-    parser.add_argument('--mode', type=str, default='actor', choices=['actor', 'base'], 
-                        help='Choose policy to test: "actor" or "base"')
-    
-    # 2. 是否开启动画: 加上 --render 就开启，不加就关闭
-    parser.add_argument('--render', action='store_true', 
-                        help='Enable visualization (slows down testing)')
-    
+    parser = argparse.ArgumentParser(description="Test RL Agent, NMPC Base, or NMPC with Obstacles")
+
+    # 1. 选择模式: actor (RL)、base (NMPC)、obstacles (NMPC+障碍物)
+    parser.add_argument('--mode', type=str, default='actor', choices=['actor', 'base', 'obstacles'],
+                        help='Policy: "actor", "base", or "obstacles"')
+
+    # 2. 是否开启动画
+    parser.add_argument('--render', action='store_true', help='Enable visualization')
+
     # 3. 测试局数
-    parser.add_argument('--episodes', type=int, default=10, 
-                        help='Number of episodes to run')
-    
-    # 4. 模型路径 (仅 actor 模式需要)
-    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', 
-                        help='Directory containing actor.pt')
-    
+    parser.add_argument('--episodes', type=int, default=10, help='Number of episodes')
+
+    # 4. 模型路径 (仅 actor 模式)
+    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Directory with actor.pt')
+
+    # 5. 障碍物模式专用参数
+    parser.add_argument('--obstacles', type=int, default=3, help='[obstacles] Number of obstacles per episode')
+    parser.add_argument('--seed', type=int, default=42, help='[obstacles] Obstacle RNG seed')
+    parser.add_argument('--save_paths_dir', type=str, default=None,
+                        help='[obstacles] Save planned 2D paths as CSV to this dir')
+    parser.add_argument('--payload_radius', type=float, default=0.06, help='[obstacles] Payload safety radius (m)')
+    parser.add_argument('--planning_margin', type=float, default=0.02, help='[obstacles] Planning margin (m)')
+    parser.add_argument('--planning_grid_res', type=float, default=0.02, help='[obstacles] Grid resolution (m)')
+
     args = parser.parse_args()
-    
-    run_test(args.mode, args.dir, args.episodes, args.render)
+
+    if args.mode == 'obstacles':
+        run_test_obstacles(
+            n_episodes=args.episodes,
+            render=args.render,
+            n_obstacles=args.obstacles,
+            obstacle_seed=args.seed,
+            save_paths_dir=args.save_paths_dir,
+            payload_radius=args.payload_radius,
+            planning_margin=args.planning_margin,
+            planning_grid_res=args.planning_grid_res,
+        )
+    else:
+        run_test(args.mode, args.dir, args.episodes, args.render)

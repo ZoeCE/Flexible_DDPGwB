@@ -28,10 +28,10 @@ BCLearning_with_nmpc/
 ├── agent.py              # 智能体：Actor/Critic 网络、经验回放、WBAgent 逻辑
 ├── kuka.py               # PyBullet 版 Kuka 机械臂与环境（原论文实现，当前未用）
 ├── learn.py              # 训练入口：环境创建、NMPC 封装、训练循环、评估与保存
-├── mujoco_env.py         # MuJoCo 缆索机器人环境：状态、奖励、延迟与扰动
-├── nmpc_controller.py    # NMPC 基座控制器（CasADi + IPOPT）
+├── mujoco_env.py         # MuJoCo 缆索机器人环境（含 CableRobotEnvWithObstacles 与 2D 路径规划）
+├── nmpc_controller.py    # NMPC 基座控制器（含 NMPCControllerObstacles 避障版）
 ├── plot.py               # 读取 log.csv，绘制训练曲线（成功率、Base 使用比例等）
-├── test.py               # 测试脚本：加载 Actor 或仅用 NMPC，统计成功率
+├── test.py               # 测试脚本：Actor / NMPC base / NMPC+障碍物 三种模式
 ├── IMPLEMENTATION_GUIDE.md # 实现与参数修改说明（英文）
 ├── README.md             # 原版英文 README
 ├── README_CN.md          # 本文件：详细中文说明
@@ -195,6 +195,13 @@ BCLearning_with_nmpc/
 - 根据目标距离、负载速度、高度等判断是否“到达且稳定”，给出稀疏奖励（如成功 +1，否则小惩罚）和 `success` 布尔。
 - 与 NMPC 的目标定义一致，便于基座控制器与 RL 共用同一任务。
 
+#### 3.3.6 `CableRobotEnvWithObstacles` 与 2D 路径规划（同文件内）
+
+- **类**：`CableRobotEnvWithObstacles(CableRobotEnv)`，在 `mujoco_env.py` 中与基类同文件。
+- **功能**：每次 `reset()` 时在起点—目标路径附近采样若干圆形障碍物，生成带静态障碍物的临时 XML 并重新加载 MuJoCo 模型；同时在 XY 平面用栅格 A\* 做 2D 避障路径规划。
+- **关键参数**：`n_obstacles`、`obstacle_radius_range`、`path_width`、`payload_radius`、`planning_margin`、`planning_grid_res`、`default_start_xy`、`default_target_xy`。
+- **接口**：`get_obstacles()` 返回当前 episode 障碍物列表 `(x, y, radius)`；`get_planned_path()` 返回 2D 规划路径 `(N, 2)` 或 `None`。障碍物圆心与起点/终点的最小距离会考虑负载安全半径，避免障碍过于靠近起终点。
+
 ---
 
 ### 3.4 `nmpc_controller.py` — NMPC 基座控制器
@@ -222,6 +229,12 @@ BCLearning_with_nmpc/
 - **输出**：取解中第一段控制 `u_opt` 的 2 维，作为当前步的基座动作；若求解失败则返回零向量。
 
 `learn.py` 中通过 `nmpc_wrapper(state_input)` 调用：从 10 维状态里取前 8 维给 NMPC，目标由全局 `env_target_pos` 传入。
+
+#### 3.4.4 `NMPCControllerObstacles`（同文件内）
+
+- **类**：`NMPCControllerObstacles`，在 `nmpc_controller.py` 中与 `NMPCController` 同文件。
+- **用途**：带障碍物避碰的 NMPC，动力学与代价与基座版一致，额外在预测时域内对每一步、每个障碍物施加不等式约束：负载到障碍物中心距离 ≥ `r_safe = 障碍物半径 + obstacle_margin`。
+- **接口**：`get_action(state, target_pos, obstacles)`，其中 `obstacles` 为 `list of (x, y, radius)`。不足 `n_obstacles_max` 时用 `(0,0,0)` 填充，`r_safe=0` 表示该槽位不约束。
 
 ---
 
@@ -265,16 +278,20 @@ BCLearning_with_nmpc/
 
 ### 3.7 `test.py` — 测试脚本
 
-- **模式**：`--mode actor` 或 `--mode base`。  
+- **模式**：`--mode actor`、`--mode base` 或 `--mode obstacles`。  
   - **actor**：加载指定目录下的 `actor_best.pt`（若无则 `actor.pt`），用 `FastActor` 前向得到动作，每步 `env.step(action)`。  
-  - **base**：不加载网络，仅用 `NMPCController().get_action(obs[:8], target_pos)` 作为动作。
-- **环境**：与训练一致（`CableRobotEnv` 相同参数），包含延迟与扰动，保证可比性。
-- **统计**：运行 `n_episodes`（默认 10），统计成功次数、平均成功时步数、总耗时，打印最终成功率和平均步数。
+  - **base**：不加载网络，仅用 `NMPCController().get_action(obs[:8], target_pos)` 作为动作。  
+  - **obstacles**：使用 `CableRobotEnvWithObstacles` 与 `NMPCControllerObstacles`，路径上随机生成障碍物，NMPC 带避障约束；可统计成功率与碰撞次数，并可选择将每局 2D 规划路径导出为 CSV。
+- **环境**：actor/base 使用 `CableRobotEnv`；obstacles 使用 `CableRobotEnvWithObstacles`（同文件内），参数含延迟与扰动。
+- **障碍物模式专用参数**：`--obstacles`（每局障碍物数量）、`--seed`（障碍物随机种子）、`--save_paths_dir`（导出规划路径 CSV 的目录）、`--payload_radius`、`--planning_margin`、`--planning_grid_res`。
+- **统计**：运行 `n_episodes`（默认 10），统计成功次数、平均成功时步数、总耗时；obstacles 模式额外统计碰撞次数。
 
 使用示例：  
 - 测试 Actor：`python test.py --mode actor --dir saves/nmpc_experiment/seed_1 --episodes 100`  
 - 测试纯 NMPC：`python test.py --mode base --episodes 100`  
-- 可视化：加 `--render`。
+- 测试 NMPC+障碍物：`python test.py --mode obstacles --episodes 10 --obstacles 3 --render`  
+- 导出规划路径：`python test.py --mode obstacles --save_paths_dir saves/paths --episodes 5`  
+- 可视化：任意模式加 `--render`。
 
 ---
 
@@ -311,13 +328,80 @@ python test.py --mode actor --dir saves/nmpc_experiment/seed_1 --episodes 100
 # 仅测试 NMPC 基座
 python test.py --mode base --episodes 100
 
+# 测试 NMPC + 障碍物避碰（带渲染）
+python test.py --mode obstacles --episodes 10 --obstacles 3 --render
+
+# 障碍物模式并导出规划路径 CSV
+python test.py --mode obstacles --save_paths_dir saves/paths --episodes 5
+
 # 绘制训练曲线（多 seed 时会在同一目录下找 seed_*/log.csv）
 python plot.py --dir saves/nmpc_experiment
 ```
 
+### 5.3 `test.py` 完整命令行参数与示例
+
+`test.py` 支持三种模式，参数如下（未给出的选项使用默认值）。
+
+| 参数 | 类型 | 默认值 | 适用模式 | 说明 |
+|------|------|--------|----------|------|
+| `--mode` | str | `actor` | 全部 | 策略：`actor` / `base` / `obstacles` |
+| `--render` | flag | 关闭 | 全部 | 开启动画 |
+| `--episodes` | int | 10 | 全部 | 测试 episode 数 |
+| `--dir` | str | `saves/nmpc_experiment` | actor | 含 `actor.pt` 的目录 |
+| `--obstacles` | int | 3 | obstacles | 每局障碍物数量 |
+| `--seed` | int | 42 | obstacles | 障碍物随机种子 |
+| `--save_paths_dir` | str | None | obstacles | 规划路径 CSV 输出目录 |
+| `--payload_radius` | float | 0.06 | obstacles | 负载安全半径 (m) |
+| `--planning_margin` | float | 0.02 | obstacles | 规划裕度 (m) |
+| `--planning_grid_res` | float | 0.02 | obstacles | 规划栅格分辨率 (m) |
+
+**最完整调用示例**（按模式各举一例，参数写全）：
+
+```bash
+# actor：加载指定目录模型，100 局，开渲染
+python test.py --mode actor --dir saves/nmpc_experiment/seed_1 --episodes 100 --render
+
+# base：纯 NMPC，50 局，开渲染
+python test.py --mode base --episodes 50 --render
+
+# obstacles：障碍物模式，参数写全（20 局、5 个障碍、种子 123、导出路径、规划参数、开渲染）
+python test.py --mode obstacles --episodes 20 --obstacles 5 --seed 123 \
+  --save_paths_dir saves/planned_paths \
+  --payload_radius 0.06 --planning_margin 0.02 --planning_grid_res 0.02 \
+  --render
+```
+
+仅需默认行为时，可简写，例如：  
+`python test.py --mode base`、`python test.py --mode obstacles --render`。
+
 ---
 
-## 六、引用
+## 六、障碍物环境与 2D 路径规划
+
+本节内容合并自原 `README_obstacles.md`，说明带障碍物的环境与 NMPC 避障测试的用法。
+
+### 8.1 障碍物建模与 XML
+
+- 基础场景为 `assets2/demo_fourCable_withSteel_withSensor_cylinder.xml`。`CableRobotEnvWithObstacles` 在每次 `reset()` 时：
+  - 在起点—目标路径附近调用 `_sample_obstacles_on_path(...)` 采样若干**圆形障碍物** `(ox, oy, r)`，半径在 `obstacle_radius_range` 内；障碍物圆心与起、终点的距离不少于 `payload_radius + planning_margin + r`，避免过于靠近起终点。
+  - 调用 `_build_xml_with_obstacles(...)` 在 worldbody 中插入静态圆柱障碍物（与 `rebar_base` 同风格），并将 `rebar_base` 的 xy 设为当前目标点；临时 XML 写入 `assets2/` 后加载，用毕删除。
+- 障碍物在 MuJoCo 中为真实 3D 圆柱碰撞体，XY 投影为圆盘。
+
+### 8.2 2D 路径规划与安全半径
+
+- **payload_radius**：负载在 XY 平面的等效安全半径。**planning_margin**：规划层额外裕度。膨胀半径 \(r_{\text{eff}} = r_{\text{obstacle}} + \text{payload\_radius} + \text{planning\_margin}\)。
+- **plan_path_2d(start_xy, target_xy, obstacles, ...)**：栅格 A\*，8 邻接；起终点投影到最近可通行格；失败时退化为直线。
+- NMPC 避障约束：\((q_x - o_x)^2 + (q_y - o_y)^2 \ge r_{\text{safe}}^2\)，\(r_{\text{safe}} = r_{\text{obstacle}} + \text{obstacle\_margin}\)。通常 `planning_margin >= obstacle_margin`，规划更保守。
+
+### 8.3 环境接口与测试
+
+- **get_obstacles()**：当前 episode 障碍物列表 `(x, y, radius)`。**get_planned_path()**：当前 2D 规划路径 `(N, 2)` 或 `None`。
+- 测试：`python test.py --mode obstacles --episodes 10 --obstacles 3`；加 `--save_paths_dir DIR` 可把每局规划路径导出为 `path_ep1.csv` 等（列：idx, x, y）。
+- 可调参数：`--payload_radius`、`--planning_margin`、`--planning_grid_res`（以及环境侧的 `default_start_xy` / `default_target_xy` 需在代码中传入，见 `run_test_obstacles`）。
+
+---
+
+## 七、引用
 
 若在研究中使用了本代码或原论文方法，请引用：
 
@@ -333,6 +417,6 @@ python plot.py --dir saves/nmpc_experiment
 
 ---
 
-## 七、与实现指南的对应关系
+## 八、与实现指南的对应关系
 
 更细的参数含义、Frame Skip / Action Buffer 原理、随机化设计及调参建议见 **`IMPLEMENTATION_GUIDE.md`**。本 README_CN 侧重“每个文件做什么、关键函数与数据流”，便于快速理解整体和定位到具体代码。
