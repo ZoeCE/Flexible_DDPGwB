@@ -55,6 +55,9 @@ class CableRobotEnv:
         self.current_init_dist = 0.0
         self.accumulated_swing = 0.0
         self.swing_steps = 0
+        
+        # 【新增】Z轴平滑状态机，初始高度为 1.0
+        self.target_z_state = 1.0
 
         self.render_mode = render
         self.viewer = None
@@ -118,6 +121,9 @@ class CableRobotEnv:
         self.current_init_dist = np.linalg.norm([start_x - self.target_pos[0], start_y - self.target_pos[1]])
         self.accumulated_swing = 0.0
         self.swing_steps = 0
+        
+        # 【重置】Z轴状态机
+        self.target_z_state = 1.0
 
         self.action_buffer.clear()
         for _ in range(self.latency_steps + 1):
@@ -148,15 +154,27 @@ class CableRobotEnv:
         if len(action) == 2:
             action = np.clip(action, -self.action_space_high, self.action_space_high)
             ax, ay = action
+            
+            # ==========================================
+            # 【核心修复】平滑的 Z 轴状态机控制
+            # ==========================================
             if dist_xy < 0.05 and vel_xy < 0.15:
-                target_vz = -0.2
-                current_vz = self.current_mocap_vel[2]
-                az = 2.0 * (target_vz - current_vz)
+                # 满足条件，期望高度设为装配高度 (假设为 0.6)
+                desired_z = 0.6
             else:
-                target_z = 1.0
-                current_z = self.current_mocap_pos[2]
-                current_vz = self.current_mocap_vel[2]
-                az = 5.0 * (target_z - current_z) - 2.0 * current_vz
+                # 不满足条件，期望高度保持在运输高度 (1.0)
+                desired_z = 1.0
+                
+            # 限制目标高度的变化率 (每步最多变 0.02m，实现平滑下降/上升)
+            dz = np.clip(desired_z - self.target_z_state, -0.02, 0.02)
+            self.target_z_state += dz
+            
+            # 使用统一的 PD 控制器追踪平滑的 target_z_state
+            current_z = self.current_mocap_pos[2]
+            current_vz = self.current_mocap_vel[2]
+            # 增大 PD 参数让它跟得更紧，因为 target_z_state 是平滑的，所以不会突变
+            az = 10.0 * (self.target_z_state - current_z) - 4.0 * current_vz
+            
             az = np.clip(az, -5.0, 5.0) 
             processed_action = np.array([ax, ay, az])
         else:
@@ -181,22 +199,16 @@ class CableRobotEnv:
         self.current_mocap_pos[1] = np.clip(self.current_mocap_pos[1], -1.0, 1.0)
         self.current_mocap_pos[2] = np.clip(self.current_mocap_pos[2], 0.4, 1.5)
 
-        # ---------------------------------------------------------
-        # 【防爆网 1：主动防御】检测拉扯距离，阻断非法状态进入引擎计算
-        # ---------------------------------------------------------
         q_idx = self.prefab_jnt_id
         payload_pos = self.data.qpos[q_idx:q_idx+2]
         mocap_pos = self.current_mocap_pos[:2]
         
         if np.linalg.norm(payload_pos - mocap_pos) > 0.4:
-            # 物理碰撞预警，强行终止
             safe_obs = self._get_obs()
-            # 返回标准的 Gym info 字典，标记 physics_crash 为 True
             return safe_obs, -5.0, True, {"success": False, "physics_crash": True}
 
         self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
         
-        # 步进物理引擎
         for sim_step in range(self.frame_skip):
             if self.enable_process_noise:
                 noise = np.random.normal(0, self.force_noise_level, 3)
@@ -212,14 +224,10 @@ class CableRobotEnv:
         self.current_step += 1
         obs = self._get_obs()
         
-        # ---------------------------------------------------------
-        # 【防爆网 2：被动防御】即使经过引擎模拟，如果仍出现 NaN，拦截并打回
-        # ---------------------------------------------------------
         if np.isnan(obs).any() or np.isinf(obs).any():
             safe_obs = np.zeros_like(obs)
             return safe_obs, -5.0, True, {"success": False, "physics_crash": True}
 
-        # 正常业务逻辑
         qx, qy = obs[4], obs[5]
         px, py = obs[0], obs[1]
         self.accumulated_swing += np.linalg.norm([qx - px, qy - py])
@@ -229,10 +237,9 @@ class CableRobotEnv:
         if self.current_step >= self.max_steps:
             done = True
             
-        # 标准化返回值，使用 info 字典承载额外信息
         info = {
             "success": success,
-            "physics_crash": False # 正常结束，没有发生物理崩溃
+            "physics_crash": False 
         }
             
         return obs, reward, done, info
@@ -259,10 +266,12 @@ class CableRobotEnv:
         reward = -0.001  
         
         acc_xy = np.linalg.norm(self.last_action[:2])
-        acc_penalty_weight = 0.04
+        # 【修复】改回 0.02
+        acc_penalty_weight = 0.02
         reward -= acc_penalty_weight * acc_xy
         
-        if dist_xy < 0.03 and payload_vel < 0.05 and q_z < 0.15:
+        # 【修复】改回 0.1
+        if dist_xy < 0.03 and payload_vel < 0.1 and q_z < 0.15:
             reward += 1.0
             success = True
             
