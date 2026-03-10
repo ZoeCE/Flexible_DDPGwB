@@ -359,7 +359,7 @@ python plot.py --dir saves/nmpc_experiment
 
 ```bash
 # actor：加载指定目录模型，100 局，开渲染
-python test.py --mode actor --dir saves/nmpc_experiment/seed_1 --episodes 100 --render
+python test.py --mode actor --dir saves/nmpc_experiment --episodes 100
 
 # base：纯 NMPC，50 局，开渲染
 python test.py --mode base --episodes 50 --render
