@@ -4,63 +4,85 @@ import numpy as np
 import os
 
 def smooth(data, window=20):
+    """滑动平均，让曲线更平滑好看"""
     return data.rolling(window=window, min_periods=1).mean()
 
-def plot_ablation_study(root_dir='saves/nmpc_experiment'):
-    # 定义四种消融实验的文件夹名称和图例标签
-    conditions = {
-        'Full Disturbance': 'initRand_procNoise',
-        'Init Rand Only': 'initRand_noProcNoise',
-        'Process Noise Only': 'noInitRand_procNoise',
-        'Ideal (No Disturbance)': 'noInitRand_noProcNoise'
-    }
+def plot_large_range_result(log_dir='saves/nmpc_experiment/initRand_noProcNoise/seed_1'):
+    # 注意上面的路径：因为你关了过程噪声，所以文件夹变成了 initRand_noProcNoise
     
-    colors =['#d62728', '#ff7f0e', '#2ca02c', '#1f77b4'] # 红, 橙, 绿, 蓝
+    log_file = os.path.join(log_dir, 'log.csv')
+    if not os.path.exists(log_file):
+        print(f"找不到日志文件: {log_file}，请确认训练是否已经产生数据。")
+        return
+
+    df = pd.read_csv(log_file)
     
+    # ==========================================
+    # 【关键修改】这里填入你刚才用 test.py 测试 NMPC 得到的真实成功率！
+    # 假设 NMPC 在地狱难度下只有 15% 的成功率，你就改成 0.15
+    # ==========================================
+    NMPC_BASELINE_SR = 0.34
+
+    # 设置学术论文风格
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     axes = axes.flatten()
 
-    metrics =[
-        {'col': 'test_success_rate', 'title': 'Test Success Rate (Evaluation)', 'ylabel': 'Success Rate', 'smooth': 1},
-        {'col': 'train_success', 'title': 'Train Success Rate (Interaction)', 'ylabel': 'Success Rate', 'smooth': 50},
-        {'col': 'avg_swing', 'title': 'Process Disturbance: Average Swing ($D_{swing}$)', 'ylabel': 'Swing Distance (m)', 'smooth': 50},
-        {'col': 'ratio', 'title': 'Base Controller Usage Ratio', 'ylabel': 'Ratio', 'smooth': 20}
-    ]
+    # ==========================================
+    # 图 1: Test Success Rate (闭卷考试)
+    # ==========================================
+    ax = axes[0]
+    df_test = df.dropna(subset=['test_success_rate']) # 过滤掉没有测试的回合
+    if not df_test.empty:
+        # 加上轻微平滑，消除毛刺
+        y_smooth = smooth(df_test['test_success_rate'], window=3)
+        ax.plot(df_test['frames'], y_smooth, color='#d62728', linewidth=2.5, label='RL Agent (Test)')
+    
+    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label=f'NMPC Baseline ({NMPC_BASELINE_SR*100:.0f}%)')
+    ax.set_title('Test Success Rate (Large Init Range)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Success Rate', fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
 
-    for idx, metric in enumerate(metrics):
-        ax = axes[idx]
-        col = metric['col']
-        
-        for c_idx, (label, folder) in enumerate(conditions.items()):
-            # 假设我们读取 seed_1 的数据 (如果有多个seed可以扩展求平均)
-            file_path = os.path.join(root_dir, folder, 'seed_1', 'log.csv')
-            if not os.path.exists(file_path):
-                print(f"Warning: File not found {file_path}")
-                continue
-                
-            df = pd.read_csv(file_path)
-            
-            if col == 'test_success_rate':
-                df_clean = df.dropna(subset=[col])
-                x = df_clean['frames']
-                y = df_clean[col]
-            else:
-                x = df['frames']
-                y = smooth(df[col], metric['smooth'])
-                
-            ax.plot(x, y, linewidth=2.5, color=colors[c_idx], label=label, alpha=0.85)
+    # ==========================================
+    # 图 2: Train Success Rate (平时作业)
+    # ==========================================
+    ax = axes[1]
+    train_sr_smooth = smooth(df['train_success'], window=50)
+    ax.plot(df['frames'], train_sr_smooth, color='#1f77b4', linewidth=2, alpha=0.8, label='RL Agent (Train)')
+    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label='NMPC Baseline')
+    ax.set_title('Train Success Rate (Interaction)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Success Rate', fontsize=12)
+    ax.set_ylim(0, 1.05)
+    ax.legend(fontsize=11)
 
-        ax.set_title(metric['title'], fontsize=14, fontweight='bold')
-        ax.set_xlabel('Environment Steps', fontsize=12)
-        ax.set_ylabel(metric['ylabel'], fontsize=12)
-        ax.legend(fontsize=10)
-        ax.tick_params(axis='both', which='major', labelsize=10)
+    # ==========================================
+    # 图 3: Base Controller Usage Ratio (断奶过程)
+    # ==========================================
+    ax = axes[2]
+    ratio_smooth = smooth(df['ratio'], window=20)
+    ax.plot(df['frames'], ratio_smooth, color='#2ca02c', linewidth=2.5)
+    ax.set_title('Base Controller Usage Ratio', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Ratio (0 to 1)', fontsize=12)
+    ax.set_ylim(0, 1.05)
+
+    # ==========================================
+    # 图 4: Average Swing (平稳性证明)
+    # ==========================================
+    ax = axes[3]
+    swing_smooth = smooth(df['avg_swing'], window=50)
+    ax.plot(df['frames'], swing_smooth, color='#ff7f0e', linewidth=2.5)
+    ax.set_title('Average Swing Distance ($D_{swing}$)', fontsize=14, fontweight='bold')
+    ax.set_xlabel('Environment Steps', fontsize=12)
+    ax.set_ylabel('Swing Distance (m)', fontsize=12)
 
     plt.tight_layout()
-    save_path = os.path.join(root_dir, 'ablation_results.png')
+    save_path = os.path.join(log_dir, 'large_range_results.png')
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"Plot successfully saved to {save_path}")
+    print(f"✅ 绘图成功！图表已保存至: {save_path}")
 
 if __name__ == '__main__':
-    plot_ablation_study()
+    plot_large_range_result()

@@ -33,13 +33,16 @@ mjpython test.py --mode actor \
     --dir saves/nmpc_experiment/initRand_procNoise/seed_1 \
     --enable_init_rand 1 --enable_process_noise 1 --episodes 100
 
+# 注意：因为你关闭了过程噪声，所以模型保存在 initRand_noProcNoise 文件夹下
+python test.py --mode actor --dir saves/nmpc_experiment/initRand_noProcNoise/seed_1 --enable_init_rand 1 --enable_process_noise 0 --episodes 100
+
 ## 有渲染
 mjpython test.py --mode actor \
     --dir saves/nmpc_experiment/initRand_procNoise/seed_1 \
     --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
 
 
-
+python test.py --mode actor --dir saves/nmpc_experiment/initRand_noProcNoise/seed_1 --enable_init_rand 1 --enable_process_noise 0 --render --episodes 10
 
 # 测试 NMPC 基线
 ## 无渲染

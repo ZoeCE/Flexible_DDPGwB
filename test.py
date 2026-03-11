@@ -14,20 +14,34 @@ def get_device(gpu_id):
         return torch.device(f"cuda:{gpu_id}")
     return torch.device("cpu")
 
-# 【修复 1】在函数定义中加入 enable_init_rand 和 enable_process_noise 参数
 def run_test(mode, log_dir, n_episodes, render, enable_init_rand=True, enable_process_noise=True, device_id=0):
     
-    # 【修复 2】将这两个参数传递给环境，确保测试时的扰动配置与命令行一致
+    # 【核心修改】确保测试环境的难度与 learn.py 完全一致！
     env = CableRobotEnv(
         render=render,
         latency_steps=1,
-        force_noise_level=0.08,
+        force_noise_level=0.0,          # <--- 改为 0.0 (关闭过程噪声)
         control_freq_hz=10,
-        init_velocity_scale=0.08,
-        init_position_range=0.06,
+        init_velocity_scale=0.05,       # <--- 改为 0.05
+        init_position_range=0.35,       # <--- 改为 0.35 (极大的初始范围)
         enable_init_randomization=enable_init_rand,
         enable_process_noise=enable_process_noise
     )
+
+# 【修复 1】在函数定义中加入 enable_init_rand 和 enable_process_noise 参数
+# def run_test(mode, log_dir, n_episodes, render, enable_init_rand=True, enable_process_noise=True, device_id=0):
+    
+#     # 【修复 2】将这两个参数传递给环境，确保测试时的扰动配置与命令行一致
+#     env = CableRobotEnv(
+#         render=render,
+#         latency_steps=1,
+#         force_noise_level=0.08,
+#         control_freq_hz=10,
+#         init_velocity_scale=0.08,
+#         init_position_range=0.06,
+#         enable_init_randomization=enable_init_rand,
+#         enable_process_noise=enable_process_noise
+#     )
     
     actor_model = None
     nmpc_controller = None

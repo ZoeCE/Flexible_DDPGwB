@@ -83,19 +83,45 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
     
+    # 【核心修改】设置极大的初始随机范围，关闭过程噪声
+    # ==========================================
+    HUGE_INIT_RANGE = 0.35  # 35厘米的随机半径（原来是0.06）。这意味着起点和终点最远可能相距近 1 米！
+    
     with silence_stderr():
         env = CableRobotEnv(
-            render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
-            init_velocity_scale=0.08, init_position_range=0.06,
+            render=False, 
+            latency_steps=1, 
+            force_noise_level=0.0, # 既然不加过程扰动，直接设为0
+            control_freq_hz=10,
+            init_velocity_scale=0.05, # 初始晃动速度稍微给一点点即可
+            init_position_range=HUGE_INIT_RANGE, # <--- 极大的初始位置随机化
             enable_init_randomization=enable_init_rand,
-            enable_process_noise=enable_process_noise
+            enable_process_noise=False # <--- 强制关闭过程噪声
         )
         eval_env = CableRobotEnv(
-            render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
-            init_velocity_scale=0.08, init_position_range=0.06,
+            render=False, 
+            latency_steps=1, 
+            force_noise_level=0.0, 
+            control_freq_hz=10,
+            init_velocity_scale=0.05, 
+            init_position_range=HUGE_INIT_RANGE, # <--- 极大的初始位置随机化
             enable_init_randomization=enable_init_rand,
-            enable_process_noise=enable_process_noise
+            enable_process_noise=False # <--- 强制关闭过程噪声
         )
+  
+    # with silence_stderr():
+    #     env = CableRobotEnv(
+    #         render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
+    #         init_velocity_scale=0.08, init_position_range=0.06,
+    #         enable_init_randomization=enable_init_rand,
+    #         enable_process_noise=enable_process_noise
+    #     )
+    #     eval_env = CableRobotEnv(
+    #         render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
+    #         init_velocity_scale=0.08, init_position_range=0.06,
+    #         enable_init_randomization=enable_init_rand,
+    #         enable_process_noise=enable_process_noise
+    #     )
     
     nmpc_instance = NMPCController()
     MAX_ACTION = 0.5
