@@ -116,7 +116,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
 
 def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
                        obstacle_seed=42, save_paths_dir=None,
-                       payload_radius=0.06, planning_margin=0.02, planning_grid_res=0.02,
+                       payload_radius=0.2, planning_margin=0.2, planning_grid_res=0.02,
                        default_start_xy=None, default_target_xy=None):
     """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCControllerObstacles。"""
     env = CableRobotEnvWithObstacles(
