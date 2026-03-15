@@ -125,7 +125,7 @@ def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
         force_noise_level=0.08,
         control_freq_hz=10,
         init_velocity_scale=0.08,
-        init_position_range=0.06,
+        init_position_range=0.00,
         n_obstacles=n_obstacles,
         obstacle_radius_range=(0.01, 0.02),
         path_width=0.12,
@@ -253,8 +253,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=42, help='[obstacles] Obstacle RNG seed')
     parser.add_argument('--save_paths_dir', type=str, default=None,
                         help='[obstacles] Save planned 2D paths as CSV to this dir')
-    parser.add_argument('--payload_radius', type=float, default=0.06, help='[obstacles] Payload safety radius (m)')
-    parser.add_argument('--planning_margin', type=float, default=0.02, help='[obstacles] Planning margin (m)')
+    parser.add_argument('--payload_radius', type=float, default=0.10, help='[obstacles] Payload safety radius (m)')
+    parser.add_argument('--planning_margin', type=float, default=0.10, help='[obstacles] Planning margin (m)')
     parser.add_argument('--planning_grid_res', type=float, default=0.02, help='[obstacles] Grid resolution (m)')
 
     args = parser.parse_args()

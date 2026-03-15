@@ -188,7 +188,7 @@ class CableRobotEnv:
 # 带路径障碍物的环境：临时 XML、2D 路径规划、CableRobotEnvWithObstacles
 # ---------------------------------------------------------------------------
 
-OBSTACLE_Z_CENTER = 0.45
+OBSTACLE_Z_CENTER = 0.25
 OBSTACLE_HALFHEIGHT = 0.2
 
 
@@ -249,7 +249,7 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
     for i, (x, y, r) in enumerate(obstacles):
         body = (
             f'    <!-- 路径障碍物 {i} (静态) -->\n'
-            f'    <body name="obstacle_{i}" pos="{x} {y} {OBSTACLE_Z_CENTER-0.2}">\n'
+            f'    <body name="obstacle_{i}" pos="{x} {y} {OBSTACLE_Z_CENTER}">\n'
             f'      <geom type="cylinder" size="{r} {OBSTACLE_HALFHEIGHT}" pos="0 0 0" '
             f'material="obstacle" contype="1" conaffinity="1"/>\n'
             f'    </body>\n\n'
