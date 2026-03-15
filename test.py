@@ -7,7 +7,7 @@ import sys
 
 # 引入环境和控制器
 from mujoco_env import CableRobotEnv, CableRobotEnvWithObstacles
-from nmpc_controller import NMPCController, NMPCControllerObstacles
+from nmpc_controller import NMPCController, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
 from agent import FastActor 
 
@@ -88,7 +88,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
                 time.sleep(0.02)
             
             # --- 结束判定 ---
-            if done or step >= 200:
+            if done or step >= 300:
                 # 只有在渲染模式下才打印每一局的详情，避免刷屏
                 if render:
                     print(f"Ep {i+1}: Steps={step}, R={reward:.2f}, Success={success}")
@@ -114,7 +114,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
     print("="*30 + "\n")
 
 
-def run_test_obstacles(n_episodes=10, render=False, n_obstacles=3,
+def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
                        obstacle_seed=42, save_paths_dir=None,
                        payload_radius=0.06, planning_margin=0.02, planning_grid_res=0.02,
                        default_start_xy=None, default_target_xy=None):
@@ -136,14 +136,13 @@ def run_test_obstacles(n_episodes=10, render=False, n_obstacles=3,
         planning_margin=planning_margin,
         planning_grid_res=planning_grid_res,
     )
-    nmpc = NMPCControllerObstacles(
-        dt=env.control_dt,
-        N=20,
-        L=0.6,
-        u_max=0.5,
-        n_obstacles_max=max(5, n_obstacles),
-        obstacle_margin=0.05,
-    )
+
+    if mode == 'obstacles_base':
+        print("Initializing Basic NMPC Controller (Blindly aiming for target)...")
+        nmpc_controller = NMPCController()
+    else:
+        print("Initializing NMPC Trajectory Tracker (Following A* path)...")
+        nmpc_controller = NMPCTrajectoryTracker()
 
     if save_paths_dir is not None:
         os.makedirs(save_paths_dir, exist_ok=True)
@@ -160,28 +159,40 @@ def run_test_obstacles(n_episodes=10, render=False, n_obstacles=3,
     start_time = time.time()
     for ep in range(n_episodes):
         obs = env.reset()
-        obstacles = env.get_obstacles()
-        target_pos = env.target_pos
         step = 0
         episode_collision = False
 
-        if save_paths_dir is not None and hasattr(env, "get_planned_path"):
+        target_pos = env.target_pos # 获取绝对终点
+
+        # 【修复3】每局开始时，必须获取当前环境生成的障碍物列表，用于后续碰撞统计
+        obstacles = env.get_obstacles()
+
+        
+        if mode == 'obstacles' and hasattr(env, "get_planned_path"):
             planned_path = env.get_planned_path()
             if planned_path is not None and len(planned_path) > 0:
-                path_with_idx = np.column_stack(
-                    [np.arange(planned_path.shape[0]), planned_path]
-                )
-                out_path = os.path.join(save_paths_dir, f"path_ep{ep+1}.csv")
-                np.savetxt(out_path, path_with_idx, delimiter=",",
-                           header="idx,x,y", comments="")
+                nmpc_controller.set_trajectory(planned_path)
+                
+                if save_paths_dir is not None:
+                    path_with_idx = np.column_stack([np.arange(planned_path.shape[0]), planned_path])
+                    out_path = os.path.join(save_paths_dir, f"path_ep{ep+1}.csv")
+                    np.savetxt(out_path, path_with_idx, delimiter=",", header="idx,x,y", comments="")
+            else:
+                nmpc_controller.set_trajectory([])
 
         while True:
             nmpc_state = obs[:8]
-            action = nmpc.get_action(nmpc_state, target_pos, obstacles)
+            if mode == 'obstacles_base':
+                # 瞎子模式：直接把终点 target_pos 喂给它
+                action = nmpc_controller.get_action(nmpc_state, target_pos)
+            else:
+                # 跟踪模式：沿路径前瞻行驶
+                action = nmpc_controller.get_tracking_action(nmpc_state)
             next_obs, reward, done, success = env.step(action)
             obs = next_obs
             step += 1
 
+            # 碰撞检测 (仅用于统计，不干涉 NMPC 动作)
             qx, qy = obs[4], obs[5]
             for (ox, oy, r) in obstacles:
                 if np.hypot(qx - ox, qy - oy) < r:
@@ -206,8 +217,13 @@ def run_test_obstacles(n_episodes=10, render=False, n_obstacles=3,
 
     elapsed = time.time() - start_time
     avg_steps = total_steps_success / success_count if success_count > 0 else 0
+    # 【新增】：根据模式定制专属的输出标题
+    if mode == 'obstacles_base':
+        title = "Result [OBSTACLES_BASE] (Blind NMPC Baseline):"
+    else:
+        title = "Result [OBSTACLES] (NMPC Trajectory Tracker):"
     print("\n" + "="*40)
-    print("Result (NMPC + Obstacles):")
+    print(title)
     print(f"  Episodes:     {n_episodes}")
     print(f"  Success:      {success_count} ({success_count/n_episodes*100:.2f}%)")
     print(f"  Collisions:   {collision_count}")
@@ -220,8 +236,8 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description="Test RL Agent, NMPC Base, or NMPC with Obstacles")
 
     # 1. 选择模式: actor (RL)、base (NMPC)、obstacles (NMPC+障碍物)
-    parser.add_argument('--mode', type=str, default='actor', choices=['actor', 'base', 'obstacles'],
-                        help='Policy: "actor", "base", or "obstacles"')
+    parser.add_argument('--mode', type=str, default='actor', choices=['actor', 'base', 'obstacles', 'obstacles_base'],
+                        help='Policy: "actor", "base", "obstacles", or "obstacles_base"')
 
     # 2. 是否开启动画
     parser.add_argument('--render', action='store_true', help='Enable visualization')
@@ -243,8 +259,9 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    if args.mode == 'obstacles':
+    if args.mode in ['obstacles', 'obstacles_base']:
         run_test_obstacles(
+            mode=args.mode,  # <--- 新增透传 mode
             n_episodes=args.episodes,
             render=args.render,
             n_obstacles=args.obstacles,
