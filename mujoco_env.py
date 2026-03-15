@@ -575,6 +575,11 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             self._obstacles, self._planned_path, start_xy=start_xy, goal_xy=target_xy,
         )
         obs = super().reset()
+
+        # 覆盖父类 reset() 中的目标随机化，确保 rebar_base 与 path_goal 的 XY 一致
+        self.target_pos = target_xy.copy()
+        self.model.body_pos[self.target_body_id][:2] = target_xy
+
         rng = self._obstacle_rng
         start_x = self.default_start_xy[0] + rng.uniform(-self.init_position_range, self.init_position_range)
         start_y = self.default_start_xy[1] + rng.uniform(-self.init_position_range, self.init_position_range)
