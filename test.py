@@ -88,7 +88,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
                 time.sleep(0.02)
             
             # --- 结束判定 ---
-            if done or step >= 1000:
+            if done or step >= 500:
                 # 只有在渲染模式下才打印每一局的详情，避免刷屏
                 if render:
                     print(f"Ep {i+1}: Steps={step}, R={reward:.2f}, Success={success}")
@@ -202,7 +202,7 @@ def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
             if render:
                 time.sleep(0.02)
 
-            if done or step >= 1000:
+            if done or step >= 500:
                 if episode_collision:
                     collision_count += 1
                 if success:
