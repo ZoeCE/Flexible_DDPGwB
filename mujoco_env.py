@@ -47,7 +47,7 @@ class CableRobotEnv:
         self.start_pos_mocap = np.array([0.2, 0.3, 1.0])
         self.default_target = np.array([-0.2, 0.3])
         self.target_pos = self.default_target.copy()
-        self.max_steps = 200 
+        self.max_steps = 1000 
         self.current_step = 0
         
         # --- 6. 渲染 ---
@@ -211,7 +211,7 @@ def _sample_obstacles_on_path(start_xy, target_xy, n_obstacles, radius_range,
         direction = delta / length
     normal = np.array([-direction[1], direction[0]])
     obstacles = []
-    max_attempts = 200
+    max_attempts = 1000
     for _ in range(n_obstacles):
         for _ in range(max_attempts):
             t = rng.uniform(0.15, 0.85)
@@ -491,7 +491,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.default_start_xy = _start
         self.default_target = _target
         self.target_pos = self.default_target.copy()
-        self.max_steps = 200
+        self.max_steps = 1000
         self.current_step = 0
 
         self.latency_steps = kwargs.get("latency_steps", 1)
