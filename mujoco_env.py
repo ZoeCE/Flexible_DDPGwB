@@ -180,9 +180,14 @@ class CableRobotEnv:
         else:
             processed_action = np.clip(action, -self.action_space_high, self.action_space_high)
         
-        self.last_action = processed_action.copy()
+ 
+        current_action = processed_action.copy()
+        self.action_diff = np.linalg.norm(current_action[:2] - self.last_action[:2])
+        self.last_action = current_action # 更新 last_action
+        
         self.action_buffer.append(processed_action)
         ax_exec, ay_exec, az_exec = self.action_buffer[0]
+        
 
         self.current_mocap_vel[0] += ax_exec * self.dt
         self.current_mocap_vel[1] += ay_exec * self.dt
@@ -265,12 +270,17 @@ class CableRobotEnv:
         success = False
         reward = -0.001  
         
+        # 1. 加速度大小惩罚 (限制绝对力量)
         acc_xy = np.linalg.norm(self.last_action[:2])
-        # 【修复】改回 0.02
         acc_penalty_weight = 0.02
         reward -= acc_penalty_weight * acc_xy
         
-        # 【修复】改回 0.1
+        # 2. 【新增】动作平滑度惩罚 (限制高频抖动/Jerk)
+        # 权重可以设为 0.05，强迫智能体输出连续平滑的动作
+        smoothness_weight = 0.05
+        if hasattr(self, 'action_diff'):
+            reward -= smoothness_weight * self.action_diff
+        
         if dist_xy < 0.03 and payload_vel < 0.1 and q_z < 0.15:
             reward += 1.0
             success = True

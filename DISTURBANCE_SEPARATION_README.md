@@ -38,9 +38,12 @@ python test.py --mode actor --dir saves/nmpc_experiment/initRand_noProcNoise/see
 
 ## 有渲染
 mjpython test.py --mode actor \
-    --dir saves/nmpc_experiment/initRand_procNoise/seed_1 \
-    --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
+    --dir saves/nmpc_experiment/initRand_noProcNoise/seed_1 \
+    --enable_init_rand 1 --enable_process_noise 0 --render --episodes 10
 
+python test.py --mode actor \
+    --dir saves/ours_experiment/initRand_procNoise/seed_1 \
+    --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
 
 python test.py --mode actor --dir saves/nmpc_experiment/initRand_noProcNoise/seed_1 --enable_init_rand 1 --enable_process_noise 0 --render --episodes 10
 
@@ -48,9 +51,10 @@ python test.py --mode actor --dir saves/nmpc_experiment/initRand_noProcNoise/see
 ## 无渲染
 mjpython test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --episodes 100
 
+python test.py --mode base --enable_init_rand 1 --enable_process_noise 0 --episodes 100
 ## 有渲染
 mjpython test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
-python test.py --mode base --enable_init_rand 1 --enable_process_noise 1 --render --episodes 10
+python test.py --mode base --enable_init_rand 1 --enable_process_noise 0 --render --episodes 10
 
 ```
 

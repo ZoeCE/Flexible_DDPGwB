@@ -7,82 +7,74 @@ def smooth(data, window=20):
     """滑动平均，让曲线更平滑好看"""
     return data.rolling(window=window, min_periods=1).mean()
 
-def plot_large_range_result(log_dir='saves/nmpc_experiment/initRand_noProcNoise/seed_1'):
-    # 注意上面的路径：因为你关了过程噪声，所以文件夹变成了 initRand_noProcNoise
+def plot_comparison():
+    # 定义两个实验的日志路径 (注意：这里是无过程噪声的地狱难度)
+    baseline_log = 'saves/nmpc_experiment/initRand_noProcNoise/seed_1/log.csv'
+    ours_log = 'saves/ours_experiment/initRand_noProcNoise/seed_1/log.csv'
     
-    log_file = os.path.join(log_dir, 'log.csv')
-    if not os.path.exists(log_file):
-        print(f"找不到日志文件: {log_file}，请确认训练是否已经产生数据。")
-        return
+    # 【请修改】填入你之前测试 NMPC 在地狱难度下的真实成功率 (比如 0.15)
+    NMPC_BASELINE_SR = 0.15 
 
-    df = pd.read_csv(log_file)
-    
-    # ==========================================
-    # 【关键修改】这里填入你刚才用 test.py 测试 NMPC 得到的真实成功率！
-    # 假设 NMPC 在地狱难度下只有 15% 的成功率，你就改成 0.15
-    # ==========================================
-    NMPC_BASELINE_SR = 0.34
-
-    # 设置学术论文风格
     plt.style.use('seaborn-v0_8-whitegrid')
-    fig, axes = plt.subplots(2, 2, figsize=(14, 10))
+    fig, axes = plt.subplots(2, 2, figsize=(16, 12))
     axes = axes.flatten()
 
-    # ==========================================
-    # 图 1: Test Success Rate (闭卷考试)
-    # ==========================================
-    ax = axes[0]
-    df_test = df.dropna(subset=['test_success_rate']) # 过滤掉没有测试的回合
-    if not df_test.empty:
-        # 加上轻微平滑，消除毛刺
-        y_smooth = smooth(df_test['test_success_rate'], window=3)
-        ax.plot(df_test['frames'], y_smooth, color='#d62728', linewidth=2.5, label='RL Agent (Test)')
-    
-    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label=f'NMPC Baseline ({NMPC_BASELINE_SR*100:.0f}%)')
-    ax.set_title('Test Success Rate (Large Init Range)', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Environment Steps', fontsize=12)
-    ax.set_ylabel('Success Rate', fontsize=12)
-    ax.set_ylim(0, 1.05)
-    ax.legend(fontsize=11)
+    # 读取数据
+    df_base = pd.read_csv(baseline_log) if os.path.exists(baseline_log) else None
+    df_ours = pd.read_csv(ours_log) if os.path.exists(ours_log) else None
 
-    # ==========================================
-    # 图 2: Train Success Rate (平时作业)
-    # ==========================================
-    ax = axes[1]
-    train_sr_smooth = smooth(df['train_success'], window=50)
-    ax.plot(df['frames'], train_sr_smooth, color='#1f77b4', linewidth=2, alpha=0.8, label='RL Agent (Train)')
-    ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label='NMPC Baseline')
-    ax.set_title('Train Success Rate (Interaction)', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Environment Steps', fontsize=12)
-    ax.set_ylabel('Success Rate', fontsize=12)
-    ax.set_ylim(0, 1.05)
-    ax.legend(fontsize=11)
+    if df_ours is None:
+        print("找不到 Ours 的日志文件，请检查路径！")
+        return
 
-    # ==========================================
-    # 图 3: Base Controller Usage Ratio (断奶过程)
-    # ==========================================
-    ax = axes[2]
-    ratio_smooth = smooth(df['ratio'], window=20)
-    ax.plot(df['frames'], ratio_smooth, color='#2ca02c', linewidth=2.5)
-    ax.set_title('Base Controller Usage Ratio', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Environment Steps', fontsize=12)
-    ax.set_ylabel('Ratio (0 to 1)', fontsize=12)
-    ax.set_ylim(0, 1.05)
+    metrics =[
+        {'col': 'test_success_rate', 'title': 'Test Success Rate (Evaluation)', 'ylabel': 'Success Rate', 'smooth': 3},
+        {'col': 'train_success', 'title': 'Train Success Rate (Interaction)', 'ylabel': 'Success Rate', 'smooth': 50},
+        {'col': 'avg_swing', 'title': 'Process Disturbance: Average Swing ($D_{swing}$)', 'ylabel': 'Swing Distance (m)', 'smooth': 50},
+        {'col': 'ratio', 'title': 'Base Controller Usage Ratio', 'ylabel': 'Ratio', 'smooth': 20}
+    ]
 
-    # ==========================================
-    # 图 4: Average Swing (平稳性证明)
-    # ==========================================
-    ax = axes[3]
-    swing_smooth = smooth(df['avg_swing'], window=50)
-    ax.plot(df['frames'], swing_smooth, color='#ff7f0e', linewidth=2.5)
-    ax.set_title('Average Swing Distance ($D_{swing}$)', fontsize=14, fontweight='bold')
-    ax.set_xlabel('Environment Steps', fontsize=12)
-    ax.set_ylabel('Swing Distance (m)', fontsize=12)
+    colors = {'Baseline': '#1f77b4', 'Ours': '#d62728'} # 蓝 vs 红
+
+    for idx, metric in enumerate(metrics):
+        ax = axes[idx]
+        col = metric['col']
+        
+        # 画 Baseline (普通 RL)
+        if df_base is not None and col in df_base.columns:
+            if col == 'test_success_rate':
+                df_clean = df_base.dropna(subset=[col])
+                ax.plot(df_clean['frames'], smooth(df_clean[col], metric['smooth']), 
+                        color=colors['Baseline'], linewidth=2.5, alpha=0.6, label='Baseline (DDPG+BC)')
+            else:
+                ax.plot(df_base['frames'], smooth(df_base[col], metric['smooth']), 
+                        color=colors['Baseline'], linewidth=2.5, alpha=0.6, label='Baseline (DDPG+BC)')
+
+        # 画 Ours (预测网络 RL)
+        if col in df_ours.columns:
+            if col == 'test_success_rate':
+                df_clean = df_ours.dropna(subset=[col])
+                ax.plot(df_clean['frames'], smooth(df_clean[col], metric['smooth']), 
+                        color=colors['Ours'], linewidth=3.0, label='Ours (Latent Forward Dynamics)')
+            else:
+                ax.plot(df_ours['frames'], smooth(df_ours[col], metric['smooth']), 
+                        color=colors['Ours'], linewidth=3.0, label='Ours (Latent Forward Dynamics)')
+
+        # 画 NMPC 基准线
+        if 'success' in col:
+            ax.axhline(y=NMPC_BASELINE_SR, color='gray', linestyle='--', linewidth=2, label=f'NMPC Baseline ({NMPC_BASELINE_SR*100:.0f}%)')
+            ax.set_ylim(0, 1.05)
+
+        ax.set_title(metric['title'], fontsize=15, fontweight='bold')
+        ax.set_xlabel('Environment Steps', fontsize=12)
+        ax.set_ylabel(metric['ylabel'], fontsize=12)
+        ax.legend(fontsize=11)
+        ax.tick_params(axis='both', which='major', labelsize=10)
 
     plt.tight_layout()
-    save_path = os.path.join(log_dir, 'large_range_results.png')
+    save_path = 'saves/comparison_results.png'
     plt.savefig(save_path, dpi=300, bbox_inches='tight')
-    print(f"✅ 绘图成功！图表已保存至: {save_path}")
+    print(f"✅ 完美对比图已生成！保存在: {save_path}")
 
 if __name__ == '__main__':
-    plot_large_range_result()
+    plot_comparison()

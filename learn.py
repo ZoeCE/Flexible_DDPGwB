@@ -10,10 +10,6 @@ from agent import WBAgent
 from mujoco_env import CableRobotEnv
 from nmpc_controller import NMPCController
 
-# ==========================================
-# 【黑魔法】OS 级别屏蔽 C++ stderr 输出
-#  用于拦截 MuJoCo 底层的非致命警告，保护进度条界面不被破坏
-# ==========================================
 @contextlib.contextmanager
 def silence_stderr():
     fd = sys.stderr.fileno()
@@ -35,14 +31,11 @@ def nmpc_wrapper(state_input):
     is_batch = len(state_input.shape) > 1
     states = state_input if is_batch else [state_input]
 
-    actions = []
+    actions =[]
     for s in states:
         nmpc_state = s[:8]
-        # 屏蔽 NMPC 内部可能触发的警告
         with silence_stderr():
             act = nmpc_instance.get_action(nmpc_state, env_target_pos)
-            
-        # 安全防护
         if np.isnan(act).any() or np.isinf(act).any():
             act = np.zeros(2)
         actions.append(act)
@@ -63,15 +56,12 @@ def evaluate_policy(env, agent, n_eval_episodes=100):
             action = np.clip(action, -agent.max_action, agent.max_action)
             
             with silence_stderr():
-                # 注意这里适配了新的环境返回值 (obs, reward, done, info)
                 state, reward, done, info = env.step(action)
                 
             step += 1
             if info.get("success", False):
                 success_count += 1
                 done = True
-                
-            # 测试时如果发生崩溃也直接结束当前测试回合
             if info.get("physics_crash", False):
                 done = True
                 
@@ -83,45 +73,22 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
     torch.manual_seed(seed)
     np.random.seed(seed)
     
-    # 【核心修改】设置极大的初始随机范围，关闭过程噪声
-    # ==========================================
-    HUGE_INIT_RANGE = 0.35  # 35厘米的随机半径（原来是0.06）。这意味着起点和终点最远可能相距近 1 米！
+    # 【保持地狱难度】0.35m 初始范围，无过程噪声
+    HUGE_INIT_RANGE = 0.25
     
     with silence_stderr():
         env = CableRobotEnv(
-            render=False, 
-            latency_steps=1, 
-            force_noise_level=0.0, # 既然不加过程扰动，直接设为0
-            control_freq_hz=10,
-            init_velocity_scale=0.05, # 初始晃动速度稍微给一点点即可
-            init_position_range=HUGE_INIT_RANGE, # <--- 极大的初始位置随机化
+            render=False, latency_steps=1, force_noise_level=0.0, control_freq_hz=10,
+            init_velocity_scale=0.05, init_position_range=HUGE_INIT_RANGE,
             enable_init_randomization=enable_init_rand,
-            enable_process_noise=False # <--- 强制关闭过程噪声
+            enable_process_noise=False
         )
         eval_env = CableRobotEnv(
-            render=False, 
-            latency_steps=1, 
-            force_noise_level=0.0, 
-            control_freq_hz=10,
-            init_velocity_scale=0.05, 
-            init_position_range=HUGE_INIT_RANGE, # <--- 极大的初始位置随机化
+            render=False, latency_steps=1, force_noise_level=0.0, control_freq_hz=10,
+            init_velocity_scale=0.05, init_position_range=HUGE_INIT_RANGE,
             enable_init_randomization=enable_init_rand,
-            enable_process_noise=False # <--- 强制关闭过程噪声
+            enable_process_noise=False
         )
-  
-    # with silence_stderr():
-    #     env = CableRobotEnv(
-    #         render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
-    #         init_velocity_scale=0.08, init_position_range=0.06,
-    #         enable_init_randomization=enable_init_rand,
-    #         enable_process_noise=enable_process_noise
-    #     )
-    #     eval_env = CableRobotEnv(
-    #         render=False, latency_steps=1, force_noise_level=0.08, control_freq_hz=10,
-    #         init_velocity_scale=0.08, init_position_range=0.06,
-    #         enable_init_randomization=enable_init_rand,
-    #         enable_process_noise=enable_process_noise
-    #     )
     
     nmpc_instance = NMPCController()
     MAX_ACTION = 0.5
@@ -134,19 +101,18 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
     os.makedirs(log_dir, exist_ok=True)
     log_file = os.path.join(log_dir, 'log.csv')
     
+    # 【新增】记录 pred_loss
     with open(log_file, "w", newline='') as csvfile:
         writer = csv.writer(csvfile)
-        writer.writerow(['episode', 'frames', 'train_return', 'train_success', 'test_success_rate', 'ratio', 'epsilon', 'init_dist', 'avg_swing'])
+        writer.writerow(['episode', 'frames', 'train_return', 'train_success', 'test_success_rate', 'ratio', 'epsilon', 'init_dist', 'avg_swing', 'pred_loss'])
 
     max_frames_total = int(2e5)
     frames_total = 0
     episode = 0
     best_test_sr = -1.0
     
-    # 【华丽且高效的 rich 进度条】
-    # 开启 auto_refresh=True，交由 rich 的后台线程管理刷新，既不闪烁也不拖慢训练速度
     progress = Progress(
-        TextColumn("[bold blue]{task.description}"),
+        TextColumn("[bold magenta]Training OURS (Predictor)..."),
         BarColumn(bar_width=40),
         "[progress.percentage]{task.percentage:>3.1f}%",
         "•",
@@ -157,7 +123,7 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
     )
     
     with progress:
-        task_id = progress.add_task("Training RL Agent...", total=max_frames_total)
+        task_id = progress.add_task("Training...", total=max_frames_total)
         
         while frames_total < max_frames_total:
             with silence_stderr():
@@ -168,6 +134,7 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
             episode_reward = 0
             step_count = 0
             ratio_count = 0
+            ep_pred_loss = 0 # 记录本回合的平均预测误差
             
             while True:
                 action, is_network, base_action_val = agent.act(state)
@@ -180,17 +147,12 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
                 
                 action_exec = np.clip(action_exec, -MAX_ACTION, MAX_ACTION)
                 
-                # 核心物理步进，屏蔽 C++ 报错，解包 info 字典
                 with silence_stderr():
                     next_state, reward, done, info = env.step(action_exec)
                 
-                # ====================================================
-                # 【防污染核心逻辑】：一旦发生物理崩溃，直接丢弃该步并结束回合
-                # ====================================================
                 if info.get("physics_crash", False) or np.isnan(next_state).any() or np.isinf(next_state).any():
-                    break # 跳过 agent.remember，直接结束当前失败的 episode
+                    break 
                 
-                # 正常状态存入经验池
                 agent.remember(state, action_exec, base_action_val, next_state, reward, done)
                 
                 state = next_state
@@ -198,37 +160,40 @@ def train(log_dir, seed=0, enable_init_rand=True, enable_process_noise=True):
                 step_count += 1
                 frames_total += 1
                 
-                agent.train(2)
+                # 接收预测器的 Loss
+                _, _, _, l_pred = agent.train(2)
+                ep_pred_loss += l_pred
                 
-                # 仅更新进度数值，不再手动调用 refresh()，避免性能瓶颈
                 progress.update(task_id, completed=frames_total)
                 
-                # 环境 done 或者达到步数上限则结束回合
                 if done or step_count >= 150:
                     break
             
             episode += 1
-            # 判断训练回合是否成功（可根据你的业务逻辑调整）
             is_success = 1 if episode_reward > 0.5 else 0 
             current_ratio = ratio_count / max(1, step_count)
+            avg_pred_loss = ep_pred_loss / max(1, step_count)
             
             init_dist = env.current_init_dist
             avg_swing = env.get_avg_swing()
             test_sr = np.nan
             
-            # 每 30 回合进行测试并打印
             if episode % 30 == 0:
                 test_sr = evaluate_policy(eval_env, agent, n_eval_episodes=100)
                 if test_sr > best_test_sr:
                     best_test_sr = test_sr
-                    torch.save(agent.actor, os.path.join(log_dir, 'actor_best.pt'))
-                    progress.console.print(f"[bold green]Ep {episode:4d} | Frames {frames_total:6d} | New Best SR: {test_sr*100:.1f}% | Saved![/bold green]")
+                    # 【请替换为新代码】：把双核大脑一起打包保存！
+                    torch.save({
+                        'actor': agent.actor,
+                        'predictor': agent.predictor
+                    }, os.path.join(log_dir, 'model_best.pt'))
+                    progress.console.print(f"[bold green]Ep {episode:4d} | Frames {frames_total:6d} | New Best SR: {test_sr*100:.1f}% | PredLoss: {avg_pred_loss:.4f}[/bold green]")
                 else:
-                    progress.console.print(f"[bold yellow]Ep {episode:4d} | Frames {frames_total:6d} | Test SR: {test_sr*100:.1f}% (Best: {best_test_sr*100:.1f}%)[/bold yellow]")
+                    progress.console.print(f"[bold yellow]Ep {episode:4d} | Frames {frames_total:6d} | Test SR: {test_sr*100:.1f}% (Best: {best_test_sr*100:.1f}%) | PredLoss: {avg_pred_loss:.4f}[/bold yellow]")
             
             with open(log_file, "a+", newline='') as csvfile:
                 writer = csv.writer(csvfile)
-                writer.writerow([episode, frames_total, episode_reward, is_success, test_sr, current_ratio, agent.epsilon, init_dist, avg_swing])
+                writer.writerow([episode, frames_total, episode_reward, is_success, test_sr, current_ratio, agent.epsilon, init_dist, avg_swing, avg_pred_loss])
 
 if __name__ == '__main__':
     import argparse
@@ -240,6 +205,8 @@ if __name__ == '__main__':
     
     init_str = 'initRand' if args.enable_init_rand else 'noInitRand'
     noise_str = 'procNoise' if args.enable_process_noise else 'noProcNoise'
-    log_dir = f'saves/nmpc_experiment/{init_str}_{noise_str}/seed_{args.seed}'
+    
+    # 【核心修改】保存到 ours_experiment 文件夹，与 baseline 区分开！
+    log_dir = f'saves/ours_experiment/{init_str}_{noise_str}/seed_{args.seed}'
     
     train(log_dir, seed=args.seed, enable_init_rand=bool(args.enable_init_rand), enable_process_noise=bool(args.enable_process_noise))
