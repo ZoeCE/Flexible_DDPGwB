@@ -544,18 +544,12 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.model.opt.timestep = self.physics_dt
         self.sim_steps = int(self.dt / self.model.opt.timestep)
         self._reresolve_ids()
-        if self.render_mode and self.viewer is not None:
-            try:
+
+        if self.render_mode:
+            if self.viewer is not None and self.viewer.is_running():
                 self.viewer.close()
-            except Exception:
-                pass
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-        try:
-            if os.path.exists(path):
-                os.remove(path)
-        except Exception:
-            pass
-        self._temp_xml_path = None
+
 
     def reset(self):
         start_xy = self.default_start_xy.copy()
@@ -593,6 +587,8 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             mujoco.mj_step(self.model, self.data)
         self.current_mocap_pos = self.data.mocap_pos[self.mocap_id].copy()
         self.current_mocap_vel = np.zeros(3)
+        if self.render_mode and self.viewer and self.viewer.is_running():
+            self.viewer.sync()
         return self._get_obs()
 
     def step(self, action):
