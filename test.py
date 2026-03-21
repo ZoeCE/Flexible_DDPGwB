@@ -4,9 +4,16 @@ import argparse
 import time
 import os
 import sys
+import cv2
+import mujoco
 
 # 引入环境和控制器
-from mujoco_env import CableRobotEnv, CableRobotEnvWithObstacles
+from mujoco_env import (
+    CableRobotEnv,
+    CableRobotEnvWithObstacles,
+    apply_camera_config,
+    get_demo_camera_config,
+)
 from nmpc_controller import NMPCController, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
 from agent import FastActor 
@@ -16,12 +23,168 @@ def get_device(gpu_id):
         return torch.device(f"cuda:{gpu_id}")
     return torch.device("cpu")
 
-def run_test(mode, log_dir, n_episodes, render, device_id=0):
+
+def _build_video_writer(output_path, fps, width, height):
+    os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
+    if not writer.isOpened():
+        raise RuntimeError(f"Failed to open video writer for: {output_path}")
+    return writer
+
+
+def _render_rgb_frame(renderer, data, camera, camera_config, frame_idx, total_frames):
+    progress = 0.0 if total_frames <= 1 else frame_idx / float(total_frames - 1)
+    apply_camera_config(camera, camera_config, progress=progress)
+    renderer.update_scene(data, camera=camera)
+    return renderer.render()
+
+
+def export_obstacles_demo_video(output_path, mode="obstacles", n_obstacles=3, obstacle_seed=42,
+                                width=1920, height=1080, fps=24, duration_seconds=18.0,
+                                demo_episodes=3,
+                                playback_speed=1.25,
+                                post_success_hold_seconds=0.75,
+                                payload_radius=0.10, planning_margin=0.10, planning_grid_res=0.02,
+                                default_start_xy=None, default_target_xy=None):
+    camera_config = get_demo_camera_config()
+    env = CableRobotEnvWithObstacles(
+        render=False,
+        latency_steps=1,
+        force_noise_level=0.08,
+        control_freq_hz=10,
+        init_velocity_scale=0.08,
+        init_position_range=0.00,
+        n_obstacles=n_obstacles,
+        obstacle_radius_range=(0.01, 0.02),
+        path_width=0.12,
+        obstacle_seed=obstacle_seed,
+        default_start_xy=default_start_xy or [0.2, 0.2],
+        default_target_xy=default_target_xy or [0.5, 0.5],
+        payload_radius=payload_radius,
+        planning_margin=planning_margin,
+        planning_grid_res=planning_grid_res,
+        offscreen_width=width,
+        offscreen_height=height,
+        viewer_show_left_ui=camera_config["show_left_ui"],
+        viewer_show_right_ui=camera_config["show_right_ui"],
+        viewer_camera_config=camera_config,
+    )
+
+    if mode == "obstacles_base":
+        controller = NMPCController()
+    else:
+        controller = NMPCTrajectoryTracker()
+
+    frames_per_episode = max(1, int(round(duration_seconds * fps)))
+    frames_per_step = max(1, int(round(fps * getattr(env, "dt", 1.0 / fps))))
+    hold_frames_after_success = max(0, int(round(post_success_hold_seconds * fps)))
+    output_fps = float(fps) * float(playback_speed)
+    frame_count = 0
+    total_steps = 0
+    success = False
+    episode_collision = False
+    camera = mujoco.MjvCamera()
+    writer = None
+    episodes_recorded = 0
+
+    try:
+        writer = _build_video_writer(output_path, output_fps, width, height)
+        episodes_to_record = max(1, int(demo_episodes))
+
+        for ep_idx in range(episodes_to_record):
+            obs = env.reset()
+            obstacles = env.get_obstacles()
+            if mode == "obstacles" and hasattr(env, "get_planned_path"):
+                planned_path = env.get_planned_path()
+                controller.set_trajectory(planned_path if planned_path is not None else [])
+
+            try:
+                renderer = mujoco.Renderer(env.model, height=height, width=width)
+            except Exception as exc:
+                raise RuntimeError(
+                "Failed to create the offscreen MuJoCo renderer. On macOS, run this "
+                    "from a normal desktop Terminal session, preferably with `mjpython` "
+                    "inside the `robot_lab` environment. Original error: "
+                    f"{exc}"
+                ) from exc
+
+            try:
+                segment_frames = frames_per_episode
+                segment_frame_idx = 0
+                step = 0
+                last_rgb = None
+                success = False
+                episode_collision = False
+
+                while segment_frame_idx < segment_frames:
+                    nmpc_state = obs[:8]
+                    if mode == "obstacles_base":
+                        action = controller.get_action(nmpc_state, env.target_pos)
+                    else:
+                        action = controller.get_tracking_action(nmpc_state)
+                    obs, reward, done, success = env.step(action)
+                    step += 1
+                    total_steps += 1
+
+                    qx, qy = obs[4], obs[5]
+                    for ox, oy, r in obstacles:
+                        if np.hypot(qx - ox, qy - oy) < r:
+                            episode_collision = True
+                            break
+
+                    repeat = min(frames_per_step, segment_frames - segment_frame_idx)
+                    for _ in range(repeat):
+                        last_rgb = _render_rgb_frame(renderer, env.data, camera, camera_config, segment_frame_idx, segment_frames)
+                        writer.write(last_rgb[:, :, ::-1].copy())
+                        frame_count += 1
+                        segment_frame_idx += 1
+
+                    if success:
+                        break
+                    if done or step >= 500:
+                        break
+
+                if last_rgb is None:
+                    last_rgb = _render_rgb_frame(renderer, env.data, camera, camera_config, 0, segment_frames)
+
+                if success:
+                    remaining_frames = max(0, segment_frames - segment_frame_idx)
+                    hold_frames = min(hold_frames_after_success, remaining_frames)
+                    for _ in range(hold_frames):
+                        writer.write(last_rgb[:, :, ::-1].copy())
+                        frame_count += 1
+                        segment_frame_idx += 1
+            finally:
+                renderer.close()
+            episodes_recorded += 1
+    finally:
+        if writer is not None:
+            writer.release()
+
+    return {
+        "output_path": output_path,
+        "frames_written": frame_count,
+        "success": success,
+        "collision": episode_collision,
+        "steps": total_steps,
+        "episodes_recorded": episodes_recorded,
+        "output_fps": output_fps,
+    }
+
+
+def run_test(mode, log_dir, n_episodes, render, device_id=0,
+             viewer_show_left_ui=True, viewer_show_right_ui=True, viewer_camera_config=None):
     """
     统一的测试主循环
     """
     # 1. 初始化环境
-    env = CableRobotEnv(render=render)
+    env = CableRobotEnv(
+        render=render,
+        viewer_show_left_ui=viewer_show_left_ui,
+        viewer_show_right_ui=viewer_show_right_ui,
+        viewer_camera_config=viewer_camera_config,
+    )
     
     # 2. 初始化策略 (Actor 或 Base)
     actor_model = None
@@ -117,7 +280,9 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
 def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
                        obstacle_seed=42, save_paths_dir=None,
                        payload_radius=0.2, planning_margin=0.2, planning_grid_res=0.02,
-                       default_start_xy=None, default_target_xy=None):
+                       default_start_xy=None, default_target_xy=None,
+                       viewer_show_left_ui=True, viewer_show_right_ui=True,
+                       viewer_camera_config=None):
     """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCControllerObstacles。"""
     env = CableRobotEnvWithObstacles(
         render=render,
@@ -135,6 +300,9 @@ def run_test_obstacles(mode, n_episodes=10, render=False, n_obstacles=3,
         payload_radius=payload_radius,
         planning_margin=planning_margin,
         planning_grid_res=planning_grid_res,
+        viewer_show_left_ui=viewer_show_left_ui,
+        viewer_show_right_ui=viewer_show_right_ui,
+        viewer_camera_config=viewer_camera_config,
     )
 
     if mode == 'obstacles_base':
@@ -256,8 +424,50 @@ if __name__ == '__main__':
     parser.add_argument('--payload_radius', type=float, default=0.10, help='[obstacles] Payload safety radius (m)')
     parser.add_argument('--planning_margin', type=float, default=0.10, help='[obstacles] Planning margin (m)')
     parser.add_argument('--planning_grid_res', type=float, default=0.02, help='[obstacles] Grid resolution (m)')
+    parser.add_argument('--hide-ui', action='store_true', help='Hide MuJoCo viewer side panels and use demo camera')
+    parser.add_argument('--record-demo', action='store_true', help='Export a clean offscreen mp4 demo')
+    parser.add_argument('--output', type=str, default='outputs/demo_obstacles.mp4', help='Output path for demo video')
+    parser.add_argument('--fps', type=int, default=24, help='Demo video frame rate')
+    parser.add_argument('--width', type=int, default=1920, help='Demo video width')
+    parser.add_argument('--height', type=int, default=1080, help='Demo video height')
+    parser.add_argument('--demo-seconds', type=float, default=18.0, help='Per-episode max duration in seconds')
+    parser.add_argument('--demo-episodes', type=int, default=3, help='Number of obstacle episodes to stitch into one demo video')
+    parser.add_argument('--playback-speed', type=float, default=1.25, help='Playback speed multiplier written into the saved video')
 
     args = parser.parse_args()
+    viewer_camera_config = get_demo_camera_config() if args.hide_ui else None
+    viewer_show_left_ui = not args.hide_ui
+    viewer_show_right_ui = not args.hide_ui
+
+    if args.record_demo:
+        if args.mode not in ['obstacles', 'obstacles_base']:
+            raise ValueError('--record-demo currently supports only obstacles modes')
+        result = export_obstacles_demo_video(
+            output_path=args.output,
+            mode=args.mode,
+            n_obstacles=args.obstacles,
+            obstacle_seed=args.seed,
+            width=args.width,
+            height=args.height,
+            fps=args.fps,
+            duration_seconds=args.demo_seconds,
+            demo_episodes=args.demo_episodes,
+            playback_speed=args.playback_speed,
+            payload_radius=args.payload_radius,
+            planning_margin=args.planning_margin,
+            planning_grid_res=args.planning_grid_res,
+        )
+        print("*******************************************")
+        print("Demo Video Export Complete")
+        print(f"Output:      {result['output_path']}")
+        print(f"Frames:      {result['frames_written']}")
+        print(f"Episodes:    {result['episodes_recorded']}")
+        print(f"Steps:       {result['steps']}")
+        print(f"Video FPS:   {result['output_fps']:.2f}")
+        print(f"Success:     {result['success']}")
+        print(f"Collision:   {result['collision']}")
+        print("*******************************************")
+        sys.exit(0)
 
     if args.mode in ['obstacles', 'obstacles_base']:
         run_test_obstacles(
@@ -270,6 +480,17 @@ if __name__ == '__main__':
             payload_radius=args.payload_radius,
             planning_margin=args.planning_margin,
             planning_grid_res=args.planning_grid_res,
+            viewer_show_left_ui=viewer_show_left_ui,
+            viewer_show_right_ui=viewer_show_right_ui,
+            viewer_camera_config=viewer_camera_config,
         )
     else:
-        run_test(args.mode, args.dir, args.episodes, args.render)
+        run_test(
+            args.mode,
+            args.dir,
+            args.episodes,
+            args.render,
+            viewer_show_left_ui=viewer_show_left_ui,
+            viewer_show_right_ui=viewer_show_right_ui,
+            viewer_camera_config=viewer_camera_config,
+        )

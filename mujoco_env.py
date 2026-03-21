@@ -1,14 +1,93 @@
 import mujoco
 import mujoco.viewer
 import numpy as np
+import contextlib
 import os
 import re
 import tempfile
 import heapq
+import time
 from collections import deque
 
+
+def get_demo_camera_config():
+    """默认论文风格 demo 机位：全景稳定，带很轻的缓慢运镜。"""
+    return {
+        "name": "paper_orbit",
+        "lookat": np.array([0.22, 0.16, 0.62], dtype=float),
+        "distance": 1.85,
+        "azimuth": 140.0,
+        "elevation": -18.0,
+        "orbit_azimuth": 6.0,
+        "dolly_distance": -0.08,
+        "lookat_shift": np.array([0.04, 0.00, -0.03], dtype=float),
+        "show_left_ui": False,
+        "show_right_ui": False,
+    }
+
+
+def _camera_config_at_progress(camera_config, progress):
+    progress = float(np.clip(progress, 0.0, 1.0))
+    cfg = dict(camera_config)
+    cfg["lookat"] = np.array(camera_config["lookat"], dtype=float) + progress * np.array(
+        camera_config.get("lookat_shift", [0.0, 0.0, 0.0]),
+        dtype=float,
+    )
+    cfg["distance"] = float(camera_config["distance"]) + progress * float(
+        camera_config.get("dolly_distance", 0.0)
+    )
+    cfg["azimuth"] = float(camera_config["azimuth"]) + progress * float(
+        camera_config.get("orbit_azimuth", 0.0)
+    )
+    cfg["elevation"] = float(camera_config["elevation"])
+    return cfg
+
+
+def apply_camera_config(camera, camera_config, progress=0.0):
+    if camera is None or camera_config is None:
+        return camera
+    resolved = _camera_config_at_progress(camera_config, progress)
+    if hasattr(camera, "type") and hasattr(mujoco, "mjtCamera"):
+        camera.type = mujoco.mjtCamera.mjCAMERA_FREE
+    if hasattr(camera, "lookat"):
+        camera.lookat[:] = resolved["lookat"]
+    if hasattr(camera, "distance"):
+        camera.distance = resolved["distance"]
+    if hasattr(camera, "azimuth"):
+        camera.azimuth = resolved["azimuth"]
+    if hasattr(camera, "elevation"):
+        camera.elevation = resolved["elevation"]
+    return camera
+
+
+def _viewer_lock(viewer):
+    if viewer is None or not hasattr(viewer, "lock"):
+        return contextlib.nullcontext()
+    try:
+        return viewer.lock()
+    except Exception:
+        return contextlib.nullcontext()
+
+
+def launch_passive_viewer(model, data, show_left_ui=True, show_right_ui=True, camera_config=None):
+    try:
+        viewer = mujoco.viewer.launch_passive(
+            model,
+            data,
+            show_left_ui=show_left_ui,
+            show_right_ui=show_right_ui,
+        )
+    except TypeError:
+        viewer = mujoco.viewer.launch_passive(model, data)
+    if camera_config is not None:
+        with _viewer_lock(viewer):
+            apply_camera_config(viewer.cam, camera_config, progress=0.0)
+        viewer.sync()
+    return viewer
+
 class CableRobotEnv:
-    def __init__(self, render=False):
+    def __init__(self, render=False, viewer_show_left_ui=True, viewer_show_right_ui=True,
+                 viewer_camera_config=None):
         # --- 1. 加载模型 ---
         current_dir = os.path.dirname(os.path.abspath(__file__))
         xml_path = os.path.join(current_dir, "assets2/demo_fourCable_withSteel_withSensor_cylinder.xml")
@@ -49,15 +128,38 @@ class CableRobotEnv:
         self.target_pos = self.default_target.copy()
         self.max_steps = 500 
         self.current_step = 0
+        self.descent_active = False
+        self.descent_trigger_dist = 0.02
+        self.descent_trigger_vel = 0.08
+        self.descent_ready_counter = 0
+        self.descent_ready_steps_required = 5
+        self.success_qz_threshold = 0.01
+        self.descent_slow_qz = 0.08
+        self.descent_fast_vz = -0.10
+        self.descent_slow_vz = -0.03
+        self.descent_hold_z = 0.405
+        self.descent_pause_dist = 0.20
+        self.descent_pause_vel = 0.30
         
         # --- 6. 渲染 ---
         self.render_mode = render
+        self.viewer_show_left_ui = viewer_show_left_ui
+        self.viewer_show_right_ui = viewer_show_right_ui
+        self.viewer_camera_config = viewer_camera_config
         self.viewer = None
         if self.render_mode:
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            self.viewer = launch_passive_viewer(
+                self.model,
+                self.data,
+                show_left_ui=getattr(self, "viewer_show_left_ui", True),
+                show_right_ui=getattr(self, "viewer_show_right_ui", True),
+                camera_config=getattr(self, "viewer_camera_config", None),
+            )
 
     def reset(self):
         mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+        self.descent_active = False
+        self.descent_ready_counter = 0
         
         # 1. 随机化目标
         noise_target = np.random.uniform(-0.1, 0.1, size=2)
@@ -100,19 +202,8 @@ class CableRobotEnv:
             action = np.clip(action, -self.action_space_high, self.action_space_high)
             ax, ay = action
             
-            # 逻辑：如果水平对准了(<5cm) 且 摆动很小(<0.15m/s)，就开始下降
-            if dist_xy < 0.05 and vel_xy < 0.15:
-                # 简单的 P 控制向下
-                target_vz = -0.2
-                current_vz = self.current_mocap_vel[2]
-                az = 2.0 * (target_vz - current_vz)
-            else:
-                # 否则保持高度 Z=1.0
-                target_z = 1.0
-                current_z = self.current_mocap_pos[2]
-                current_vz = self.current_mocap_vel[2]
-                # PD 控制保持高度
-                az = 5.0 * (target_z - current_z) - 2.0 * current_vz
+            q_z = self.data.qpos[self.prefab_jnt_id + 2]
+            az = self._compute_auto_z_accel(dist_xy=dist_xy, vel_xy=vel_xy, q_z=q_z)
                 
         else:
             # Case B: NMPC 测试模式 (3D 动作)
@@ -145,11 +236,37 @@ class CableRobotEnv:
         self.current_step += 1
         obs = self._get_obs()
         reward, done, success = self._compute_reward(obs)
+        if success:
+            self.descent_active = False
         
         if self.current_step >= self.max_steps:
             done = True
             
         return obs, reward, done, success
+
+    def _compute_auto_z_accel(self, dist_xy, vel_xy, q_z):
+        if not self.descent_active:
+            if dist_xy < self.descent_trigger_dist and vel_xy < self.descent_trigger_vel:
+                self.descent_ready_counter += 1
+            else:
+                self.descent_ready_counter = 0
+            if self.descent_ready_counter >= self.descent_ready_steps_required:
+                self.descent_active = True
+
+        current_z = self.current_mocap_pos[2]
+        current_vz = self.current_mocap_vel[2]
+
+        if self.descent_active:
+            if current_z > self.descent_hold_z + 1e-6:
+                if dist_xy > self.descent_pause_dist or vel_xy > self.descent_pause_vel:
+                    return -2.0 * current_vz
+                target_vz = self.descent_fast_vz if q_z > self.descent_slow_qz else self.descent_slow_vz
+                return 2.0 * (target_vz - current_vz)
+            target_z = self.descent_hold_z
+            return 5.0 * (target_z - current_z) - 2.0 * current_vz
+
+        target_z = 1.0
+        return 5.0 * (target_z - current_z) - 2.0 * current_vz
 
     def _get_obs(self):
         px, py = self.current_mocap_pos[0], self.current_mocap_pos[1]
@@ -177,7 +294,7 @@ class CableRobotEnv:
         reward = 0.0
         
         # 成功判据：XY对准 + 不摆 + Z到位
-        if dist_xy < 0.03 and payload_vel < 0.1 and q_z < 0.15:
+        if dist_xy < 0.03 and payload_vel < 0.1 and q_z < self.success_qz_threshold:
             reward = 1.0
             success = True
             
@@ -233,7 +350,9 @@ def _sample_obstacles_on_path(start_xy, target_xy, n_obstacles, radius_range,
 def _build_xml_with_obstacles(base_xml_content, obstacles,
                               path_points=None,
                               start_xy=None,
-                              goal_xy=None):
+                              goal_xy=None,
+                              offscreen_width=None,
+                              offscreen_height=None):
     """在基础 XML 中插入障碍物与路径可视化，并设置 rebar_base 的 xy 与 goal_xy 一致。"""
     if obstacles:
         material_line = '    <material name="steel" rgba="0.6 0.6 0.6 1"/>'
@@ -244,6 +363,39 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
         xml = base_xml_content.replace(material_line, insert, 1)
     else:
         xml = base_xml_content
+
+    if offscreen_width is not None or offscreen_height is not None:
+        width = int(offscreen_width or 640)
+        height = int(offscreen_height or 480)
+        visual_match = re.search(r"<visual>(.*?)</visual>", xml, flags=re.DOTALL)
+        if visual_match:
+            visual_block = visual_match.group(0)
+            global_match = re.search(r"<global\b([^>]*)/>", visual_block)
+            if global_match:
+                global_tag = global_match.group(0)
+                attrs = global_match.group(1)
+                if 'offwidth=' in attrs:
+                    global_tag = re.sub(r'offwidth="[^"]+"', f'offwidth="{width}"', global_tag, count=1)
+                else:
+                    global_tag = global_tag[:-2] + f' offwidth="{width}"/>'
+                if 'offheight=' in attrs:
+                    global_tag = re.sub(r'offheight="[^"]+"', f'offheight="{height}"', global_tag, count=1)
+                else:
+                    global_tag = global_tag[:-2] + f' offheight="{height}"/>'
+                visual_block = visual_block.replace(global_match.group(0), global_tag, 1)
+            else:
+                visual_block = visual_block.replace(
+                    "<visual>",
+                    f'<visual>\n    <global offwidth="{width}" offheight="{height}"/>',
+                    1,
+                )
+            xml = xml.replace(visual_match.group(0), visual_block, 1)
+        else:
+            xml = xml.replace(
+                "<worldbody>",
+                f'<visual>\n    <global offwidth="{width}" offheight="{height}"/>\n  </visual>\n\n  <worldbody>',
+                1,
+            )
 
     obstacle_bodies = []
     for i, (x, y, r) in enumerate(obstacles):
@@ -493,6 +645,18 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.target_pos = self.default_target.copy()
         self.max_steps = 500
         self.current_step = 0
+        self.descent_active = False
+        self.descent_trigger_dist = 0.02
+        self.descent_trigger_vel = 0.08
+        self.descent_ready_counter = 0
+        self.descent_ready_steps_required = 5
+        self.success_qz_threshold = 0.01
+        self.descent_slow_qz = 0.08
+        self.descent_fast_vz = -0.10
+        self.descent_slow_vz = -0.03
+        self.descent_hold_z = 0.405
+        self.descent_pause_dist = 0.20
+        self.descent_pause_vel = 0.30
 
         self.latency_steps = kwargs.get("latency_steps", 1)
         self.action_buffer = deque(maxlen=self.latency_steps + 1)
@@ -500,9 +664,10 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.init_velocity_scale = kwargs.get("init_velocity_scale", 0.15)
         self.init_position_range = kwargs.get("init_position_range", 0.08)
         self.render_mode = kwargs.get("render", False)
+        self.viewer_show_left_ui = kwargs.get("viewer_show_left_ui", True)
+        self.viewer_show_right_ui = kwargs.get("viewer_show_right_ui", True)
+        self.viewer_camera_config = kwargs.get("viewer_camera_config", None)
         self.viewer = None
-        if self.render_mode:
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
         self.n_obstacles = n_obstacles
         self.obstacle_radius_range = obstacle_radius_range
@@ -513,6 +678,8 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.payload_radius = float(payload_radius)
         self.planning_margin = float(planning_margin)
         self.planning_grid_res = float(planning_grid_res)
+        self.offscreen_width = int(kwargs.get("offscreen_width", 640))
+        self.offscreen_height = int(kwargs.get("offscreen_height", 480))
         self._planned_path = None
 
     def _reresolve_ids(self):
@@ -524,10 +691,35 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.prefab_body_id = self.model.body("prefab").id
         self.target_body_id = self.model.body("rebar_base").id
 
+    def _close_viewer_if_needed(self):
+        if self.viewer is None:
+            return
+        try:
+            self.viewer.close()
+        except Exception:
+            self.viewer = None
+            return
+
+        # On macOS/mjpython, close() only requests shutdown on the UI thread.
+        # Wait for the underlying simulate instance to be destroyed before reopening.
+        sim_ref = getattr(self.viewer, "_sim", None)
+        if callable(sim_ref):
+            deadline = time.time() + 2.0
+            while time.time() < deadline:
+                try:
+                    if sim_ref() is None:
+                        break
+                except Exception:
+                    break
+                time.sleep(0.01)
+        self.viewer = None
+
     def _reload_model_with_obstacles(self, obstacles, path_points=None, start_xy=None, goal_xy=None):
         xml_content = _build_xml_with_obstacles(
             self._base_xml_content, obstacles,
             path_points=path_points, start_xy=start_xy, goal_xy=goal_xy,
+            offscreen_width=getattr(self, "offscreen_width", 640),
+            offscreen_height=getattr(self, "offscreen_height", 480),
         )
         fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets2_dir, prefix="obstacles_")
         try:
@@ -546,9 +738,14 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self._reresolve_ids()
 
         if self.render_mode:
-            if self.viewer is not None and self.viewer.is_running():
-                self.viewer.close()
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            self._close_viewer_if_needed()
+            self.viewer = launch_passive_viewer(
+                self.model,
+                self.data,
+                show_left_ui=getattr(self, "viewer_show_left_ui", True),
+                show_right_ui=getattr(self, "viewer_show_right_ui", True),
+                camera_config=getattr(self, "viewer_camera_config", None),
+            )
 
 
     def reset(self):

@@ -1,0 +1,476 @@
+<mujoco model="iiwa14_lifting_scene_sensors_compatible">
+
+  <!-- 加载机械臂 -->
+  <include file="iiwa14.xml"/>
+
+  <option integrator="implicitfast" gravity="0 0 -9.81"/>
+
+  <asset>
+    <material name="groundplane" rgba="0.3 0.3 0.3 1"/>
+    <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
+    <material name="rope" rgba="0.2 0.2 0.2 1"/>
+    <material name="red" rgba="0.8 0 0 1"/>
+    <material name="steel" rgba="0.6 0.6 0.6 1"/>
+    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>
+
+    <mesh name="hollow_cylinder_convex_0"  file="hollow_cylinder_convex_0.stl"/>
+    <mesh name="hollow_cylinder_convex_1"  file="hollow_cylinder_convex_1.stl"/>
+    <mesh name="hollow_cylinder_convex_2"  file="hollow_cylinder_convex_2.stl"/>
+    <mesh name="hollow_cylinder_convex_3"  file="hollow_cylinder_convex_3.stl"/>
+    <mesh name="hollow_cylinder_convex_4"  file="hollow_cylinder_convex_4.stl"/>
+    <mesh name="hollow_cylinder_convex_5"  file="hollow_cylinder_convex_5.stl"/>
+    <mesh name="hollow_cylinder_convex_6"  file="hollow_cylinder_convex_6.stl"/>
+    <mesh name="hollow_cylinder_convex_7"  file="hollow_cylinder_convex_7.stl"/>
+    <mesh name="hollow_cylinder_convex_8"  file="hollow_cylinder_convex_8.stl"/>
+    <mesh name="hollow_cylinder_convex_9"  file="hollow_cylinder_convex_9.stl"/>
+    <mesh name="hollow_cylinder_convex_10"  file="hollow_cylinder_convex_10.stl"/>
+    <mesh name="hollow_cylinder_convex_11"  file="hollow_cylinder_convex_11.stl"/>
+    <mesh name="hollow_cylinder_convex_12"  file="hollow_cylinder_convex_12.stl"/>
+    <mesh name="hollow_cylinder_convex_13"  file="hollow_cylinder_convex_13.stl"/>
+    <mesh name="hollow_cylinder_convex_14"  file="hollow_cylinder_convex_14.stl"/>
+    <mesh name="hollow_cylinder_convex_15"  file="hollow_cylinder_convex_15.stl"/>
+    <mesh name="hollow_cylinder_convex_16"  file="hollow_cylinder_convex_16.stl"/>
+    <mesh name="hollow_cylinder_convex_17"  file="hollow_cylinder_convex_17.stl"/>
+    <mesh name="hollow_cylinder_convex_18"  file="hollow_cylinder_convex_18.stl"/>
+    <mesh name="hollow_cylinder_convex_19"  file="hollow_cylinder_convex_19.stl"/>
+    <mesh name="hollow_cylinder_convex_20"  file="hollow_cylinder_convex_20.stl"/>
+    <mesh name="hollow_cylinder_convex_21"  file="hollow_cylinder_convex_21.stl"/>
+    <mesh name="hollow_cylinder_convex_22"  file="hollow_cylinder_convex_22.stl"/>
+    <mesh name="hollow_cylinder_convex_23"  file="hollow_cylinder_convex_23.stl"/>
+    <mesh name="hollow_cylinder_convex_24"  file="hollow_cylinder_convex_24.stl"/>
+    <mesh name="hollow_cylinder_convex_25"  file="hollow_cylinder_convex_25.stl"/>
+    <mesh name="hollow_cylinder_convex_26"  file="hollow_cylinder_convex_26.stl"/>
+    <mesh name="hollow_cylinder_convex_27"  file="hollow_cylinder_convex_27.stl"/>
+    <mesh name="hollow_cylinder_convex_28"  file="hollow_cylinder_convex_28.stl"/>
+    <mesh name="hollow_cylinder_convex_29"  file="hollow_cylinder_convex_29.stl"/>
+    <mesh name="hollow_cylinder_convex_30"  file="hollow_cylinder_convex_30.stl"/>
+    <mesh name="hollow_cylinder_convex_31"  file="hollow_cylinder_convex_31.stl"/>
+    <mesh name="hollow_cylinder_convex_32"  file="hollow_cylinder_convex_32.stl"/>
+    <mesh name="hollow_cylinder_convex_33"  file="hollow_cylinder_convex_33.stl"/>
+    <mesh name="hollow_cylinder_convex_34"  file="hollow_cylinder_convex_34.stl"/>
+    <mesh name="hollow_cylinder_convex_35"  file="hollow_cylinder_convex_35.stl"/>
+    <mesh name="hollow_cylinder_convex_36"  file="hollow_cylinder_convex_36.stl"/>
+    <mesh name="hollow_cylinder_convex_37"  file="hollow_cylinder_convex_37.stl"/>
+    <mesh name="hollow_cylinder_convex_38"  file="hollow_cylinder_convex_38.stl"/>
+    <mesh name="hollow_cylinder_convex_39"  file="hollow_cylinder_convex_39.stl"/>
+    <mesh name="hollow_cylinder_convex_40"  file="hollow_cylinder_convex_40.stl"/>
+    <mesh name="hollow_cylinder_convex_41"  file="hollow_cylinder_convex_41.stl"/>
+    <mesh name="hollow_cylinder_convex_42"  file="hollow_cylinder_convex_42.stl"/>
+    <mesh name="hollow_cylinder_convex_43"  file="hollow_cylinder_convex_43.stl"/>
+    <mesh name="hollow_cylinder_convex_44"  file="hollow_cylinder_convex_44.stl"/>
+    <mesh name="hollow_cylinder_convex_45"  file="hollow_cylinder_convex_45.stl"/>
+    <mesh name="hollow_cylinder_convex_46"  file="hollow_cylinder_convex_46.stl"/>
+    <mesh name="hollow_cylinder_convex_47"  file="hollow_cylinder_convex_47.stl"/>
+    <mesh name="hollow_cylinder_convex_48"  file="hollow_cylinder_convex_48.stl"/>
+    <mesh name="hollow_cylinder_convex_49"  file="hollow_cylinder_convex_49.stl"/>
+    <mesh name="hollow_cylinder_convex_50"  file="hollow_cylinder_convex_50.stl"/>
+    <mesh name="hollow_cylinder_convex_51"  file="hollow_cylinder_convex_51.stl"/>
+    <mesh name="hollow_cylinder_convex_52"  file="hollow_cylinder_convex_52.stl"/>
+    <mesh name="hollow_cylinder_convex_53"  file="hollow_cylinder_convex_53.stl"/>
+    <mesh name="hollow_cylinder_convex_54"  file="hollow_cylinder_convex_54.stl"/>
+    <mesh name="hollow_cylinder_convex_55"  file="hollow_cylinder_convex_55.stl"/>
+    <mesh name="hollow_cylinder_convex_56"  file="hollow_cylinder_convex_56.stl"/>
+    <mesh name="hollow_cylinder_convex_57"  file="hollow_cylinder_convex_57.stl"/>
+    <mesh name="hollow_cylinder_convex_58"  file="hollow_cylinder_convex_58.stl"/>
+    <mesh name="hollow_cylinder_convex_59"  file="hollow_cylinder_convex_59.stl"/>
+    <mesh name="hollow_cylinder_convex_60"  file="hollow_cylinder_convex_60.stl"/>
+    <mesh name="hollow_cylinder_convex_61"  file="hollow_cylinder_convex_61.stl"/>
+    <mesh name="hollow_cylinder_convex_62"  file="hollow_cylinder_convex_62.stl"/>
+    <mesh name="hollow_cylinder_convex_63" file="hollow_cylinder_convex_63.stl"/>
+  </asset>
+
+  <visual>
+    <global offwidth="640" offheight="480"/>
+  </visual>
+
+  <worldbody>
+    <!-- 光照与地面 -->
+    <light pos="1.5 0 1.5" dir="1 0 -1" directional="true"/>
+    <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+    <!-- 路径障碍物 0 (静态) -->
+    <body name="obstacle_0" pos="0.27928701214210905 0.42733037189887246 0.25">
+      <geom type="cylinder" size="0.019771927299143573 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+
+    <!-- 路径障碍物 1 (静态) -->
+    <body name="obstacle_1" pos="0.41232924200253585 0.3046709687091812 0.25">
+      <geom type="cylinder" size="0.013207341189534516 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+
+    <!-- 路径障碍物 2 (静态) -->
+    <body name="obstacle_2" pos="0.2527273008846977 0.42067304463761485 0.25">
+      <geom type="cylinder" size="0.014862806126705819 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- 规划路径点 0 (可视化) -->
+    <body name="path_pt_0" pos="0.2078644947579919 0.20146362751964672 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 1 (可视化) -->
+    <body name="path_pt_1" pos="0.22786449475799186 0.1814636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 2 (可视化) -->
+    <body name="path_pt_2" pos="0.24786449475799188 0.16146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 3 (可视化) -->
+    <body name="path_pt_3" pos="0.2678644947579919 0.14146362751964672 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 4 (可视化) -->
+    <body name="path_pt_4" pos="0.2878644947579919 0.1214636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 5 (可视化) -->
+    <body name="path_pt_5" pos="0.30786449475799194 0.10146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 6 (可视化) -->
+    <body name="path_pt_6" pos="0.32786449475799184 0.10146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 7 (可视化) -->
+    <body name="path_pt_7" pos="0.34786449475799186 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 8 (可视化) -->
+    <body name="path_pt_8" pos="0.3678644947579919 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 9 (可视化) -->
+    <body name="path_pt_9" pos="0.3878644947579919 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 10 (可视化) -->
+    <body name="path_pt_10" pos="0.4078644947579919 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 11 (可视化) -->
+    <body name="path_pt_11" pos="0.42786449475799193 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 12 (可视化) -->
+    <body name="path_pt_12" pos="0.44786449475799184 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 13 (可视化) -->
+    <body name="path_pt_13" pos="0.46786449475799186 0.08146362751964667 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 14 (可视化) -->
+    <body name="path_pt_14" pos="0.4878644947579919 0.10146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 15 (可视化) -->
+    <body name="path_pt_15" pos="0.5078644947579919 0.10146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 16 (可视化) -->
+    <body name="path_pt_16" pos="0.5278644947579919 0.1214636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 17 (可视化) -->
+    <body name="path_pt_17" pos="0.5478644947579919 0.1214636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 18 (可视化) -->
+    <body name="path_pt_18" pos="0.5678644947579919 0.14146362751964672 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 19 (可视化) -->
+    <body name="path_pt_19" pos="0.5878644947579919 0.16146362751964669 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 20 (可视化) -->
+    <body name="path_pt_20" pos="0.5878644947579919 0.1814636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 21 (可视化) -->
+    <body name="path_pt_21" pos="0.6078644947579919 0.20146362751964672 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 22 (可视化) -->
+    <body name="path_pt_22" pos="0.6278644947579919 0.22146362751964668 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 23 (可视化) -->
+    <body name="path_pt_23" pos="0.6278644947579919 0.2414636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 24 (可视化) -->
+    <body name="path_pt_24" pos="0.6278644947579919 0.2614636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 25 (可视化) -->
+    <body name="path_pt_25" pos="0.6278644947579919 0.2814636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 26 (可视化) -->
+    <body name="path_pt_26" pos="0.6278644947579919 0.3014636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 27 (可视化) -->
+    <body name="path_pt_27" pos="0.6278644947579919 0.32146362751964674 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 28 (可视化) -->
+    <body name="path_pt_28" pos="0.6278644947579919 0.34146362751964676 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 29 (可视化) -->
+    <body name="path_pt_29" pos="0.6278644947579919 0.3614636275196468 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 30 (可视化) -->
+    <body name="path_pt_30" pos="0.6278644947579919 0.3814636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 31 (可视化) -->
+    <body name="path_pt_31" pos="0.6078644947579919 0.4014636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 32 (可视化) -->
+    <body name="path_pt_32" pos="0.6078644947579919 0.4214636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 33 (可视化) -->
+    <body name="path_pt_33" pos="0.5878644947579919 0.44146362751964674 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 34 (可视化) -->
+    <body name="path_pt_34" pos="0.5678644947579919 0.46146362751964676 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 35 (可视化) -->
+    <body name="path_pt_35" pos="0.5478644947579919 0.4814636275196468 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 36 (可视化) -->
+    <body name="path_pt_36" pos="0.5278644947579919 0.5014636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划路径点 37 (可视化) -->
+    <body name="path_pt_37" pos="0.5078644947579919 0.5014636275196467 0.47000000000000003">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- 规划起点 (可视化) -->
+    <body name="path_start" pos="0.2 0.2 0.47500000000000003">
+      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    <!-- 规划终点 (可视化) -->
+    <body name="path_goal" pos="0.5 0.5 0.47500000000000003">
+      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+    </body>
+
+    <!--  固定钢筋 -->
+    <body name="rebar_base" pos="0.5 0.5 0">
+      <geom type="cylinder" size="0.012 0.02" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- 吊装构件 -->
+    <body name="prefab" pos="0.2 0.3 0.3">
+      <joint type="free"/>
+      <!-- <geom type="mesh" mesh="cylinder_with_holes" material="concrete" mass="1.0" /> -->
+      <geom type="mesh" mesh="hollow_cylinder_convex_0" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_1" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_2" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_3" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_4" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_5" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_6" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_7" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_8" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_9" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_10" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_11" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_12" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_13" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_14" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_15" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_16" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_17" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_18" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_19" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_20" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_21" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_22" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_23" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_24" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_25" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_26" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_27" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_28" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_29" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_30" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_31" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_32" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_33" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_34" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_35" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_36" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_37" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_38" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_39" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_40" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_41" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_42" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_43" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_44" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_45" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_46" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_47" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_48" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_49" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_50" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_51" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_52" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_53" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_54" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_55" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_56" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_57" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_58" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_59" material="concrete" mass="1"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_60" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_61" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_62" material="concrete" mass="0.0156"/>
+      <geom type="mesh" mesh="hollow_cylinder_convex_63" material="concrete" mass="0.0156"/>
+
+      <!-- 四个吊点 -->
+      <site name="lift_fl" pos=" 0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>
+      <site name="lift_fr" pos=" 0.05 -0.05  0.1" size="0.01" rgba="1 0 0 1"/>
+      <site name="lift_rl" pos="-0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>
+      <site name="lift_rr" pos="-0.05 -0.05  0.1" size="0.01" rgba="1 0 0 1"/>
+
+      <!-- ✅ IMU 传感器安装点 -->
+      <site name="imu_site" pos="0 0 0" size="0.01" rgba="0 1 0 1"/>
+    </body>
+
+    <body mocap="true" name="mocap" pos="0.2 0.3 1.0" quat="0 0 1 0">
+      <geom type="box" size="0.01 0.01 0.1" rgba="0 0 1 1"/>
+    </body>
+
+  </worldbody>
+
+  <!-- 绑定挂点到机械臂末端 -->
+  <equality>
+      <weld body1="link7" body2="mocap" 
+            solimp="0.99 0.99 0.01"
+            solref="0.001 1"
+            relpose="0 0 0.045 1 0 0 0"/>
+  </equality>
+  
+  <!-- 四根吊索 -->
+  <tendon>
+    <spatial name="rope_fl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
+      <site site="attachment_site"/>
+      <site site="lift_fl"/>
+    </spatial>
+    <spatial name="rope_fr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
+      <site site="attachment_site"/>
+      <site site="lift_fr"/>
+    </spatial>
+    <spatial name="rope_rl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
+      <site site="attachment_site"/>
+      <site site="lift_rl"/>
+    </spatial>
+    <spatial name="rope_rr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
+      <site site="attachment_site"/>
+      <site site="lift_rr"/>
+    </spatial>
+  </tendon>
+
+  <sensor>
+    <framepos name="prefab/pos" objtype="site" objname="imu_site"/>
+    <framelinvel name="prefab/vel" objtype="site" objname="imu_site"/>
+    <framepos name="end/pos" objtype="site" objname="attachment_site"/>
+    <framelinvel name="end/vel" objtype="site" objname="attachment_site"/>
+  </sensor>
+
+  <keyframe>
+    <key name="home" qpos="0.955545 0.391462 -2.86463 0.00599717 2.97003 2.37487 7.3179 
+                                 0.2 0.3 0.3  1 0 0 0"/>
+  </keyframe>
+
+</mujoco>

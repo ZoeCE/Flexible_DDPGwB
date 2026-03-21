@@ -64,6 +64,10 @@ class ViewerReloadTests(unittest.TestCase):
         fake_numpy = types.ModuleType("numpy")
         fake_numpy.ndarray = tuple
         fake_numpy.float32 = float
+        fake_numpy.array = lambda value, dtype=None: list(value)
+        fake_numpy.random = types.SimpleNamespace(
+            default_rng=lambda seed=None: types.SimpleNamespace()
+        )
 
         fake_mujoco.MjModel = FakeModel
         fake_mujoco.MjData = FakeData
@@ -124,6 +128,16 @@ class ViewerReloadTests(unittest.TestCase):
         self.assertEqual(old_viewer.close_calls, 1)
         self.assertIsNot(env.viewer, old_viewer)
         self.assertEqual(len(self.launched_viewers), 1)
+
+    def test_obstacle_env_defers_initial_viewer_launch_until_reset(self):
+        env = self.mujoco_env.CableRobotEnvWithObstacles(
+            render=True,
+            default_start_xy=[0.2, 0.2],
+            default_target_xy=[0.5, 0.5],
+        )
+
+        self.assertIsNone(env.viewer)
+        self.assertEqual(len(self.launched_viewers), 0)
 
 
 if __name__ == "__main__":
