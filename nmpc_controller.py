@@ -126,6 +126,10 @@ class NMPCTrajectoryTracker:
         self.current_wp_idx = 0
         self.reached_final = False
 
+        # === 【新增】: 引入状态机模式，初始默认为巡航 ===
+        self.phase = 'CRUISE'
+        
+
         x = ca.SX.sym('x', self.nx)
         u = ca.SX.sym('u', self.nu)
         damping = 0.01
@@ -208,6 +212,13 @@ class NMPCTrajectoryTracker:
 
         self.last_sol = None
 
+    # === 【新增】: 状态机重置方法 ===
+    def reset_state_machine(self):
+        """每局环境 reset 时调用，重置状态机"""
+        self.current_wp_idx = 0
+        self.reached_final = False
+        self.phase = 'CRUISE'
+
     def get_action(self, state, target_pos):
         p_val = np.concatenate([state, target_pos])
 
@@ -232,47 +243,75 @@ class NMPCTrajectoryTracker:
     def set_trajectory(self, path_array):
         if path_array is None or len(path_array) == 0:
             self.trajectory_xy = []
-            self.current_wp_idx = 0
-            self.reached_final = False
+            # 【修改】: 清理轨迹时重置状态机
+            self.reset_state_machine()
             return
             
         self.trajectory_xy = path_array
-        self.current_wp_idx = 0
-        self.reached_final = False
+        # 【修改】: 设定新轨迹时重置状态机
+        self.reset_state_machine()
 
-    def get_tracking_action(self, state):
-        if self.trajectory_xy is None or len(self.trajectory_xy) == 0:
-            return self.get_action(state, state[4:6])
-
-        target_xy = self.trajectory_xy[self.current_wp_idx]
-        
-        # 【核心优化 2：改用台车(推车)的坐标进行距离判断】
-        # state[0], state[1] 分别对应物理系统的 p_x 和 p_y (即台车XY坐标)
+    # 【修改】: 增加 z 和 vz 作为输入参数
+    def get_tracking_action(self, state, z, vz):
         p_x, p_y = state[0], state[1]
-        
-        # 阻断正反馈：使用绝对刚性的台车位置判断，摆锤再怎么晃动，也不会引发系统误判而错误加速
-        dist = np.linalg.norm([p_x - target_xy[0], p_y - target_xy[1]])
-        total_wps = len(self.trajectory_xy)
-        rem_wps = (total_wps - 1) - self.current_wp_idx
-        brake_zone = 5  
+        v_qx, v_qy = state[6], state[7]
+        # 计算负载在平面的摆动速度，用于判断是否稳定
+        vel_xy = np.linalg.norm([v_qx, v_qy])
 
-        if not self.reached_final:
-            if rem_wps <= brake_zone:
-                look_ahead_dist = 0.02
-                max_step = 1
-            else:
-                # 巡航区使用更宽泛的判定，保证台车流畅拉着负载走
-                look_ahead_dist = 0.04
-                max_step = 1
+        # ---------------------------------------------------------
+        # 1. 轨迹跟踪与二维 NMPC 动作计算
+        # ---------------------------------------------------------
+        if self.trajectory_xy is None or len(self.trajectory_xy) == 0:
+            action_2d = self.get_action(state, state[4:6])
+            dist_xy = 0.0
+            is_at_final_wp = False
+        else:
+            target_xy = self.trajectory_xy[self.current_wp_idx]
+            dist_xy = np.linalg.norm([p_x - target_xy[0], p_y - target_xy[1]])
+            
+            total_wps = len(self.trajectory_xy)
+            rem_wps = (total_wps - 1) - self.current_wp_idx
+            brake_zone = 5  
 
-            if dist < look_ahead_dist:
-                step = min(max_step, rem_wps)
-                self.current_wp_idx += step
-                
-                if self.current_wp_idx >= total_wps - 1:
-                    self.current_wp_idx = total_wps - 1
-                    self.reached_final = True
-                
-                target_xy = self.trajectory_xy[self.current_wp_idx]
+            if not self.reached_final:
+                if rem_wps <= brake_zone:
+                    look_ahead_dist = 0.02
+                    max_step = 1
+                else:
+                    look_ahead_dist = 0.04
+                    max_step = 1
 
-        return self.get_action(state, target_xy)
+                if dist_xy < look_ahead_dist:
+                    step = min(max_step, rem_wps)
+                    self.current_wp_idx += step
+                    
+                    if self.current_wp_idx >= total_wps - 1:
+                        self.current_wp_idx = total_wps - 1
+                        self.reached_final = True
+                    
+                    target_xy = self.trajectory_xy[self.current_wp_idx]
+
+            action_2d = self.get_action(state, target_xy)
+            is_at_final_wp = self.reached_final or (self.current_wp_idx == total_wps - 1)
+
+        # ---------------------------------------------------------
+        # 2. 状态机流转判断（复刻原物理环境的降落判定）
+        # ---------------------------------------------------------
+        # 条件：到达终点附近，并且负载摆动速度极小
+        if is_at_final_wp and dist_xy < 0.05 and vel_xy < 0.15:
+            self.phase = 'DESCENT'
+
+        # ---------------------------------------------------------
+        # 3. Z 轴独立控制算法（剥离自原物理环境）
+        # ---------------------------------------------------------
+        if self.phase == 'DESCENT':
+            target_vz = -0.2
+            # P 控制向下，直到着陆
+            az = 2.0 * (target_vz - vz)
+        else:
+            target_z = 1.0
+            # PD 控制维持巡航高度
+            az = 5.0 * (target_z - z) - 2.0 * vz
+
+        # 将 2D NMPC 动作和 Z 轴 PD 动作合并为 3D 输出
+        return np.array([action_2d[0], action_2d[1], az], dtype=np.float32)

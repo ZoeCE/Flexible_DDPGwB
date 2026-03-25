@@ -482,8 +482,13 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.prefab_body_id = self.model.body("prefab").id
         self.target_body_id = self.model.body("rebar_base").id
 
-        self.state_dim = 10
-        self.action_dim = 2
+        self.n_obstacles = n_obstacles # Need to know this for state_dim
+        # 【Modification】: Increase state_dim by 3 for every obstacle (x, y, r)
+        # 增加 4 维：末端高度(mocap_z)、末端垂直速度(mocap_vz)、吊装物高度(payload_z)、吊装物垂直速度(payload_vz)
+        self.state_dim = 10 + (self.n_obstacles * 3) + 4 
+        # 动作维度彻底改为 3，接收 (ax, ay, az)
+        self.action_dim = 3
+
         self.action_space_high = 0.5
         self.start_pos_mocap = np.array([0.2, 0.3, 1.0])
         _start = np.array(default_start_xy if default_start_xy is not None else [0.2, 0.3])
@@ -491,7 +496,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.default_start_xy = _start
         self.default_target = _target
         self.target_pos = self.default_target.copy()
-        self.max_steps = 500
+        self.max_steps = 150
         self.current_step = 0
 
         self.latency_steps = kwargs.get("latency_steps", 1)
@@ -504,7 +509,6 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         if self.render_mode:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
-        self.n_obstacles = n_obstacles
         self.obstacle_radius_range = obstacle_radius_range
         self.path_width = path_width
         self._obstacle_rng = np.random.default_rng(obstacle_seed)
@@ -596,8 +600,97 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         return self._get_obs()
 
     def step(self, action):
-        return super().step(action)
+        # --- 1. 动作处理逻辑 (彻底改为纯 3D 控制) ---
+        action = np.clip(action, -self.action_space_high, self.action_space_high)
+        
+        # 兼容性防御：确保正确解包三维动作
+        if len(action) == 3:
+            ax, ay, az = action
+        elif len(action) == 2:
+            # 理论上不会走到这里，除非网络还没更新完
+            ax, ay = action
+            az = 0.0
+        else:
+            ax, ay, az = action[:3]
 
+        # --- 2. 动力学积分 (3D) ---
+        # 无论下降还是巡航，完全听从控制器或 RL Agent 输出的 az
+        self.current_mocap_pos[0] += self.current_mocap_vel[0] * self.dt + 0.5 * ax * self.dt**2
+        self.current_mocap_pos[1] += self.current_mocap_vel[1] * self.dt + 0.5 * ay * self.dt**2
+        self.current_mocap_pos[2] += self.current_mocap_vel[2] * self.dt + 0.5 * az * self.dt**2
+        
+        self.current_mocap_vel[0] += ax * self.dt
+        self.current_mocap_vel[1] += ay * self.dt
+        self.current_mocap_vel[2] += az * self.dt
+        
+        # 机械臂末端(mocap)地面碰撞保护（防止吊车本身砸到地面）
+        if self.current_mocap_pos[2] < 0.4: 
+             self.current_mocap_pos[2] = 0.4
+             self.current_mocap_vel[2] = 0
+
+        self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
+        
+        # --- 3. 物理引擎步进 ---
+        for _ in range(self.sim_steps):
+            mujoco.mj_step(self.model, self.data)
+            
+        if self.render_mode and hasattr(self, 'viewer') and self.viewer:
+            self.viewer.sync()
+            
+        self.current_step += 1
+        
+        # --- 4. 状态更新与基础奖励 ---
+        # 注意：这里调用 self._get_obs() 会自动执行当前类重写后的版本，包含 4 维 Z 轴数据
+        obs = self._get_obs()
+        reward, done, success = self._compute_reward(obs)
+        
+        # --- 5. 新增：吊装物触地结束判定 ---
+        # 获取最新的吊装物 Z 高度
+        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+        
+        # 降落结束判定：当吊装物距离地面小于等于 0.1 时，结束回合
+        if payload_z <= 0.1:
+            done = True
+            
+            # 判断是否成功降落：相对目标点的 XY 距离 < 0.05 且 摆动速度 < 0.15
+            dist_xy = np.linalg.norm(obs[8:10]) 
+            vel_xy = np.linalg.norm(obs[6:8])   
+            if dist_xy < 0.05 and vel_xy < 0.15:
+                success = True
+        
+        # 超时保护
+        if self.current_step >= self.max_steps:
+            done = True
+            
+        return obs, reward, done, success
+    
+    # 【New Observation】: Override _get_obs to append obstacle XY coordinates and radius
+    def _get_obs(self):
+        base_obs = super()._get_obs()
+        
+        obs_data = []
+        # 【Modification】: Append (x, y, r) for each generated obstacle
+        if hasattr(self, '_obstacles') and self._obstacles:
+            for (ox, oy, r) in self._obstacles:
+                obs_data.extend([ox, oy, r])
+                
+        # 【Modification】: Target length is now n_obstacles * 3
+        target_len = self.n_obstacles * 3
+        while len(obs_data) < target_len:
+            obs_data.append(0.0)
+            
+        # 1. 获取机械臂末端(mocap)的 Z 高度和 Z 速度
+        mocap_z = self.current_mocap_pos[2]
+        mocap_vz = self.current_mocap_vel[2]
+        
+        # 2. 获取吊装物(prefab)的 Z 高度和 Z 速度
+        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+        dof_idx = self.model.jnt_dofadr[self.prefab_jnt_id]
+        payload_vz = self.data.qvel[dof_idx + 2]
+            
+        # 将 base_obs, 障碍物信息, 以及新增的 4 维 Z 轴物理量拼接在一起返回
+        return np.concatenate([base_obs, obs_data[:target_len], [mocap_z, mocap_vz, payload_z, payload_vz]], dtype=np.float32)
+    
     def get_obstacles(self):
         return list(self._obstacles)
 

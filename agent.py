@@ -22,174 +22,199 @@ class FastActor(nn.Module):
         super(FastActor, self).__init__()
         self.max_action = max_action
         self.fc = nn.Sequential(
-            nn.Linear(state_dim, 256),
+            nn.Linear(state_dim, 512),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(512, 256),
             nn.ReLU(),
             nn.Linear(256, action_dim),
-            nn.Tanh()) 
+            nn.Tanh())
 
     def forward(self, s):
-        # 【关键修正】输出乘以 max_action，使范围匹配环境 [-0.5, 0.5]
         return self.fc(s) * self.max_action
 
-class Critic(nn.Module):
+class FastCritic(nn.Module):
     def __init__(self, state_dim, action_dim):
-        super(Critic, self).__init__()
+        super(FastCritic, self).__init__()
         self.fc = nn.Sequential(
-            nn.Linear(state_dim + action_dim, 256),
+            nn.Linear(state_dim + action_dim, 512),
             nn.ReLU(),
-            nn.Linear(256, 256),
+            nn.Linear(512, 256),
             nn.ReLU(),
-            nn.Linear(256, 1),
-            nn.Sigmoid())
+            nn.Linear(256, 1))
 
-    def forward(self, state, action):
-        return self.fc(torch.cat((state, action), dim=1))
+    def forward(self, s, a):
+        return self.fc(torch.cat([s, a], 1))
 
-class ReplayBufferFast:
-    def __init__(self, state_dim, action_dim, size):
-        self.sta1_buf = np.zeros([size, state_dim], dtype=np.float32)
-        self.sta2_buf = np.zeros([size, state_dim], dtype=np.float32)
-        self.acts_buf = np.zeros([size, action_dim], dtype=np.float32)
-        self.base_acts_buf = np.zeros([size, action_dim], dtype=np.float32) 
-        self.rews_buf = np.zeros([size, 1], dtype=np.float32)
-        self.done_buf = np.zeros([size, 1], dtype=np.bool_)
-        self.ptr, self.size, self.max_size = 0, 0, size
+class ReplayBuffer:
+    def __init__(self, state_dim, action_dim, max_size=int(1e6)):
+        self.max_size = max_size
+        self.ptr  = 0
+        self.size = 0
+        self.state            = np.zeros((max_size, state_dim),  dtype=np.float32)
+        self.action           = np.zeros((max_size, action_dim), dtype=np.float32)
+        self.base_action      = np.zeros((max_size, action_dim), dtype=np.float32)
+        self.next_base_action = np.zeros((max_size, action_dim), dtype=np.float32)
+        self.next_state       = np.zeros((max_size, state_dim),  dtype=np.float32)
+        self.reward           = np.zeros((max_size, 1),          dtype=np.float32)
+        self.not_done         = np.zeros((max_size, 1),          dtype=np.float32)
 
-    def store(self, sta, act, base_act, next_sta, rew, done):
-        self.sta1_buf[self.ptr] = sta
-        self.sta2_buf[self.ptr] = next_sta
-        self.acts_buf[self.ptr] = act
-        self.base_acts_buf[self.ptr] = base_act
-        self.rews_buf[self.ptr] = rew
-        self.done_buf[self.ptr] = done
-        self.ptr = (self.ptr + 1) % self.max_size
+    def add(self, state, action, base_action, next_base_action, next_state, reward, done):
+        self.state[self.ptr]             = state
+        self.action[self.ptr]            = action
+        self.base_action[self.ptr]       = base_action
+        self.next_base_action[self.ptr]  = next_base_action
+        self.next_state[self.ptr]        = next_state
+        self.reward[self.ptr]            = reward
+        self.not_done[self.ptr]          = 1. - done
+        self.ptr  = (self.ptr + 1) % self.max_size
         self.size = min(self.size + 1, self.max_size)
 
-    def sample_batch(self, batch_size):
-        idxs = np.random.randint(0, self.size, size=batch_size)
-        return dict(sta1=self.sta1_buf[idxs],
-                    sta2=self.sta2_buf[idxs],
-                    acts=self.acts_buf[idxs],
-                    base_acts=self.base_acts_buf[idxs],
-                    rews=self.rews_buf[idxs],
-                    done=self.done_buf[idxs])
+    def sample(self, batch_size, device):
+        ind = np.random.randint(0, self.size, size=batch_size)
+        return (
+            np_to_tensor(self.state[ind],            device),
+            np_to_tensor(self.action[ind],           device),
+            np_to_tensor(self.base_action[ind],      device),
+            np_to_tensor(self.next_base_action[ind], device),
+            np_to_tensor(self.next_state[ind],       device),
+            np_to_tensor(self.reward[ind],           device),
+            np_to_tensor(self.not_done[ind],         device),
+        )
 
 class WBAgent:
-    def __init__(self, log_dir, state_dim=10, action_dim=2, max_action=0.5, device=0, 
-                 mixed_q=True, base_boot=True, behavior_clone=True, 
+    def __init__(self, log_dir, state_dim, action_dim, max_action=0.5,
+                 base_boot=True, mixed_q=True, behavior_clone=True,
                  base_controller_func=None):
-        
-        self.device = device
-        self.mixed_q = mixed_q
-        self.base_boot = base_boot
-        self.behavior_clone = behavior_clone
-        self.base = base_controller_func 
-        self.max_action = max_action
 
-        self.buffer = ReplayBufferFast(state_dim, action_dim, size=100000)
-        
-        # 传入 max_action
-        self.actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
-        self.target_actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
-        soft_update(self.target_actor, self.actor, 1)
-        
-        self.critic = opt_cuda(Critic(state_dim, action_dim), self.device)
-        self.target_critic = opt_cuda(Critic(state_dim, action_dim), self.device)
-        soft_update(self.target_critic, self.critic, 1)
-        
-        self.optimizer_actor = torch.optim.Adam(self.actor.parameters(), lr=1e-3)
-        self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
-        
-        self.gamma = 0.99
-        self.tau = 0.005
-        self.epsilon = 1.0
-        self.delta = 5e-6
+        self.device      = 0 if torch.cuda.is_available() else "cpu"
+        self.state_dim   = state_dim
+        self.action_dim  = action_dim
+        self.max_action  = max_action
+
+        # ---------- Hyperparameters ----------
+        self.gamma      = 0.99
+        self.tau        = 0.005
         self.batch_size = 256
 
-    def act(self, s, test=False):
-        if self.base is not None:
-            action_b = self.base(s) 
-        else:
-            action_b = np.zeros(2)
+        # Epsilon 线性衰减（与参考 agent 完全一致）：
+        #   每次调用 act() 减少固定量 delta，而非按集数乘法衰减。
+        #   从 1.0 → epsilon_min 约需 (1.0-0.1)/5e-6 = 180,000 步，
+        #   对应 2000集×150步 训练量的约 60%，退火速率平稳可控。
+        self.epsilon     = 1.0
+        self.epsilon_min = 0.1
+        self.delta       = 5e-6   # 可在外部按需调整
 
-        s_tensor = np_to_tensor(s, self.device).unsqueeze(dim=0)
+        # ---------- Flags ----------
+        self.base_boot            = base_boot
+        self.mixed_q              = mixed_q
+        self.behavior_clone       = behavior_clone
+        self.base_controller_func = base_controller_func
+
+        # ---------- Networks ----------
+        self.actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
+        self.target_actor = opt_cuda(FastActor(state_dim, action_dim, max_action), self.device)
+        self.target_actor.load_state_dict(self.actor.state_dict())
+        self.optimizer_actor = torch.optim.Adam(self.actor.parameters(), lr=1e-4)
+
+        self.critic = opt_cuda(FastCritic(state_dim, action_dim), self.device)
+        self.target_critic = opt_cuda(FastCritic(state_dim, action_dim), self.device)
+        self.target_critic.load_state_dict(self.critic.state_dict())
+        self.optimizer_critic = torch.optim.Adam(self.critic.parameters(), lr=1e-3)
+
+        self.buffer = ReplayBuffer(state_dim, action_dim)
+
+    def act(self, state, test=False):
+        """
+        动作选择，逻辑与参考 agent 保持一致：
+
+        1. 先获取专家动作与网络动作。
+        2. test=True → 直接返回网络动作，不衰减 epsilon。
+        3. 以 epsilon 概率执行专家动作（纯探索分支）。
+        4. 否则进入 mixed_q 分支：用 Critic 比较两者 Q 值，
+           若专家更优则执行专家，否则执行网络动作。
+        5. 每次进入非 test 路径，epsilon 线性衰减一次。
+
+        返回: (action, is_network, base_action)
+        """
+        base_action = np.zeros(self.action_dim, dtype=np.float32)
+        if self.base_controller_func is not None:
+            base_action = self.base_controller_func(state)
+
+        s_t = np_to_tensor(state.reshape(1, -1), self.device)
         with torch.no_grad():
-            # 这里的 action_net 已经在 [-0.5, 0.5] 范围内了
-            action_net = self.actor(s_tensor).squeeze().cpu().numpy()
+            action_net = self.actor(s_t).cpu().data.numpy().flatten()
 
         if test:
-            return action_net, True, action_b
+            return action_net, True, base_action
+
+        # 每步线性衰减一次（与参考 agent delta 机制相同）
+        self.epsilon = max(self.epsilon - self.delta, self.epsilon_min)
 
         if np.random.uniform(0, 1) < self.epsilon:
-            self.epsilon = max(self.epsilon - self.delta, 0.1)
-            return action_b, False, action_b
+            # 专家分支：epsilon 仍较高时优先用专家填充 buffer
+            return base_action, False, base_action
         else:
-            self.epsilon = max(self.epsilon - self.delta, 0.1)
             if self.mixed_q:
-                action_b_tensor = np_to_tensor(action_b, self.device).unsqueeze(dim=0)
-                action_net_tensor = np_to_tensor(action_net, self.device).unsqueeze(dim=0)
+                # Q 值对比：Critic 判断谁更优
+                ba_t = np_to_tensor(base_action.reshape(1, -1), self.device)
+                na_t = np_to_tensor(action_net.reshape(1, -1),  self.device)
                 with torch.no_grad():
-                    q_base = self.critic(s_tensor, action_b_tensor)
-                    q_net = self.critic(s_tensor, action_net_tensor)
-                if q_base.item() > q_net.item():
-                    return action_b, False, action_b
-            return action_net, True, action_b
+                    q_base = self.critic(s_t, ba_t).item()
+                    q_net  = self.critic(s_t, na_t).item()
+                if q_base > q_net:
+                    return base_action, False, base_action
+            return action_net, True, base_action
 
-    def remember(self, state, action, base_action, next_state, reward, done):
-        self.buffer.store(state, action, base_action, next_state, [reward], [done])
+    def remember(self, state, action, base_action, next_base_action, next_state, reward, done):
+        self.buffer.add(state, action, base_action, next_base_action, next_state, reward, done)
 
-    def train(self, frame):
-        total_Lc = total_La = total_Lbc = 0
-        steps = min(int(frame), max((5 * self.buffer.size) // self.batch_size, 1))
-        
-        for i in range(steps):
-            batch = self.buffer.sample_batch(batch_size=self.batch_size)
-            si = np_to_tensor(batch['sta1'], self.device)
-            sn = np_to_tensor(batch['sta2'], self.device)
-            ai = np_to_tensor(batch['acts'], self.device)
-            ri = np_to_tensor(batch['rews'], self.device)
-            d = np_to_tensor(batch['done'], self.device)
-            
-            base_action = np_to_tensor(batch['base_acts'], self.device)
-            base_action_n = base_action 
+    def train(self, iterations):
+        total_Lc = total_La = total_Lbc = 0.0
 
-            self.optimizer_critic.zero_grad()
+        for _ in range(iterations):
+            si, ai, base_action, next_base_action_n, sn, ri, d = \
+                self.buffer.sample(self.batch_size, self.device)
+
+            # ------ Critic update ------
             with torch.no_grad():
-                a_next = self.target_actor(sn)
+                a_next  = self.target_actor(sn)
                 back_up = self.target_critic(sn, a_next)
                 if self.base_boot:
-                    back_up_d = self.target_critic(sn, base_action_n)
-                    back_up = torch.max(back_up, back_up_d)
-                yi = ri + (1 - d) * self.gamma * back_up
-            
+                    back_up_d = self.target_critic(sn, next_base_action_n)
+                    back_up   = torch.max(back_up, back_up_d)
+                yi = ri + d * self.gamma * back_up
+
             Lc = ((self.critic(si, ai) - yi) ** 2).mean()
+            self.optimizer_critic.zero_grad()
             Lc.backward()
+            torch.nn.utils.clip_grad_norm_(self.critic.parameters(), max_norm=1.0)
             self.optimizer_critic.step()
             soft_update(self.target_critic, self.critic, self.tau)
             total_Lc += Lc.item()
 
+            # ------ Actor update ------
             self.optimizer_actor.zero_grad()
             if self.behavior_clone:
                 with torch.no_grad():
                     q_base = self.critic(si, base_action)
-                a = self.actor(si)
+                a   = self.actor(si)
                 q_a = self.critic(si, a)
                 with torch.no_grad():
                     xi = nn.ReLU()(torch.sign(q_base - q_a))
-                Lbc = (((a - base_action) ** 2).mean(dim=1, keepdim=True) * xi).sum() / max(xi.sum().item(), 1)
-                La = Lbc - 0.02 * q_a.mean()
+                Lbc = (((a - base_action) ** 2).mean(dim=1, keepdim=True) * xi).sum() \
+                      / max(xi.sum().item(), 1)
+                La  = Lbc - 0.02 * q_a.mean()
             else:
-                a = self.actor(si)
-                La = - self.critic(si, a).mean()
-            
+                a   = self.actor(si)
+                La  = -self.critic(si, a).mean()
+                Lbc = torch.tensor(0.0)
+
             La.backward()
+            torch.nn.utils.clip_grad_norm_(self.actor.parameters(), max_norm=1.0)
             self.optimizer_actor.step()
             soft_update(self.target_actor, self.actor, self.tau)
-            
-            if self.behavior_clone:
-                total_Lbc += Lbc.item()
-            total_La += La.item()
 
-        return total_Lc / steps, total_La / steps, total_Lbc / steps
+            total_La  += La.item()
+            total_Lbc += Lbc.item() if self.behavior_clone else 0.0
+
+        return total_Lc / iterations, total_La / iterations, total_Lbc / iterations
