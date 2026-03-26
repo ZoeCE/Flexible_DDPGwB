@@ -85,7 +85,7 @@
 
     <!--  固定钢筋 -->
     <body name="rebar_base" pos="-0.2 0.3 0">
-      <geom type="cylinder" size="0.012 0.02" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
+      <geom type="cylinder" size="0.002 0.005" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
     </body>
 
     <!-- 吊装构件 -->

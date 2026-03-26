@@ -36,10 +36,10 @@ class NMPCController:
         cost = 0
         constraints = []
         
-        Q_pos = np.array([10.0, 80.0])
-        Q_swing = np.array([20.0, 10.0])
-        Q_vel = 1.0
-        R_acc = 0.1
+        Q_pos = np.array([10.0, 10.0])
+        Q_swing = np.array([50.0, 50.0]) 
+        Q_vel = 2.0                      
+        R_acc = 0.2                      
         
         P_ref = ca.SX.sym('P_ref', 2)
         X_init = ca.SX.sym('X_init', self.nx)
@@ -104,13 +104,13 @@ class NMPCController:
 
 
 # ---------------------------------------------------------------------------
-# 带障碍物避碰的 NMPC 控制器
+# 带障碍物避碰的 NMPC 控制器 (兼容 3D 轨迹)
 # ---------------------------------------------------------------------------
 
 class NMPCTrajectoryTracker:
     """
-    优化后的纯轨迹跟踪 NMPC
-    修复了权重不对称导致的甩尾现象，以及使用负载位置判定跳点带来的共振发散问题。
+    优化后的轨迹跟踪 NMPC
+    全面升级为 3D 轨迹跟随模式，解耦 XY 的 NMPC 防摆与 Z 轴的动态下潜。
     """
 
     def __init__(self, dt=0.02, N=20, L=0.6, u_max=0.5):
@@ -122,13 +122,9 @@ class NMPCTrajectoryTracker:
         self.nx = 8      
         self.nu = 2      
         
-        self.trajectory_xy = []
+        self.trajectory = []
         self.current_wp_idx = 0
         self.reached_final = False
-
-        # === 【新增】: 引入状态机模式，初始默认为巡航 ===
-        self.phase = 'CRUISE'
-        
 
         x = ca.SX.sym('x', self.nx)
         u = ca.SX.sym('u', self.nu)
@@ -153,12 +149,11 @@ class NMPCTrajectoryTracker:
         cost = 0
         eq_constraints = []
 
-        # 【核心优化 1：恢复对称的代价函数】
-        # XY方向的惩罚必须完全一致，否则在二维平面斜向运动时会导致剧烈的扭矩和甩尾
-        Q_pos = np.array([20.0, 20.0])   # 适度降低极端的跟踪需求，给予系统缓冲
-        Q_swing = np.array([20.0, 20.0]) # 强化对称的防摆权重
-        Q_vel = 1.0                      
-        R_acc = 0.1                      
+        # [中和修改]：兼顾速度与防摆的折中方案
+        Q_pos = np.array([20.0, 20.0])   
+        Q_swing = np.array([50.0, 50.0]) # 中度防摆
+        Q_vel = 2.0                      # 中度限制速度
+        R_acc = 0.2                      # 中度平滑加速度
 
         P_ref = ca.SX.sym('P_ref', 2)    
         X_init = ca.SX.sym('X_init', self.nx)
@@ -212,12 +207,10 @@ class NMPCTrajectoryTracker:
 
         self.last_sol = None
 
-    # === 【新增】: 状态机重置方法 ===
     def reset_state_machine(self):
-        """每局环境 reset 时调用，重置状态机"""
+        """每局环境 reset 时调用，重置状态"""
         self.current_wp_idx = 0
         self.reached_final = False
-        self.phase = 'CRUISE'
 
     def get_action(self, state, target_pos):
         p_val = np.concatenate([state, target_pos])
@@ -242,76 +235,95 @@ class NMPCTrajectoryTracker:
     
     def set_trajectory(self, path_array):
         if path_array is None or len(path_array) == 0:
-            self.trajectory_xy = []
-            # 【修改】: 清理轨迹时重置状态机
+            self.trajectory = []
             self.reset_state_machine()
             return
             
-        self.trajectory_xy = path_array
-        # 【修改】: 设定新轨迹时重置状态机
+        self.trajectory = path_array
         self.reset_state_machine()
 
-    # 【修改】: 增加 z 和 vz 作为输入参数
-    def get_tracking_action(self, state, z, vz):
-        p_x, p_y = state[0], state[1]
-        v_qx, v_qy = state[6], state[7]
-        # 计算负载在平面的摆动速度，用于判断是否稳定
-        vel_xy = np.linalg.norm([v_qx, v_qy])
+    def get_tracking_action(self, full_obs, env_wp_idx=None):
+        # --- 直接从完整状态数组中提取所需物理量 ---
+        nmpc_s = full_obs[:8]  
+        p_x, p_y = full_obs[0], full_obs[1]
+        q_x, q_y = full_obs[4], full_obs[5] 
+        v_qx, v_qy = full_obs[6], full_obs[7]
+        
+        # 提取 Z 轴状态数据
+        mocap_z   = full_obs[-4]
+        mocap_vz  = full_obs[-3]
+        payload_z = full_obs[-2]
 
         # ---------------------------------------------------------
-        # 1. 轨迹跟踪与二维 NMPC 动作计算
+        # 1. 无轨迹时的默认防御性悬停逻辑
         # ---------------------------------------------------------
-        if self.trajectory_xy is None or len(self.trajectory_xy) == 0:
-            action_2d = self.get_action(state, state[4:6])
-            dist_xy = 0.0
-            is_at_final_wp = False
+        if self.trajectory is None or len(self.trajectory) == 0:
+            target_xy = [0.0, 0.0] 
+            action_2d = self.get_action(nmpc_s, target_xy)
+            az = 4.0 * (1.0 - mocap_z) - 2.5 * mocap_vz 
         else:
-            target_xy = self.trajectory_xy[self.current_wp_idx]
-            dist_xy = np.linalg.norm([p_x - target_xy[0], p_y - target_xy[1]])
+            total_wps = len(self.trajectory)
             
-            total_wps = len(self.trajectory_xy)
-            rem_wps = (total_wps - 1) - self.current_wp_idx
-            brake_zone = 5  
-
-            if not self.reached_final:
-                if rem_wps <= brake_zone:
-                    look_ahead_dist = 0.02
-                    max_step = 1
-                else:
-                    look_ahead_dist = 0.04
-                    max_step = 1
-
-                if dist_xy < look_ahead_dist:
-                    step = min(max_step, rem_wps)
-                    self.current_wp_idx += step
+            # ---------------------------------------------------------
+            # 2. 3D 轨迹的航点步进逻辑
+            # ---------------------------------------------------------
+            if env_wp_idx is not None:
+                self.current_wp_idx = min(env_wp_idx, total_wps - 1)
+                if self.current_wp_idx >= total_wps - 1:
+                    self.reached_final = True
+            else:
+                target_wp_current = self.trajectory[self.current_wp_idx]
+                current_pos_3d = np.array([q_x, q_y, payload_z])
+                dist_3d = np.linalg.norm(current_pos_3d - target_wp_current)
+                
+                if not self.reached_final:
+                    rem_wps = total_wps - 1 - self.current_wp_idx
+                    look_ahead_dist = 0.06 if rem_wps <= 2 else 0.10 
                     
-                    if self.current_wp_idx >= total_wps - 1:
-                        self.current_wp_idx = total_wps - 1
-                        self.reached_final = True
-                    
-                    target_xy = self.trajectory_xy[self.current_wp_idx]
+                    if dist_3d < look_ahead_dist:
+                        step = min(1, rem_wps)
+                        self.current_wp_idx += step
+                        if self.current_wp_idx >= total_wps - 1:
+                            self.current_wp_idx = total_wps - 1
+                            self.reached_final = True
+            
+            # ---------------------------------------------------------
+            # 3. 解析目标点并进行 XY + Z 控制解耦
+            # ---------------------------------------------------------
+            target_wp = self.trajectory[self.current_wp_idx]
+            target_xy = target_wp[:2]
+            target_z = target_wp[2] if len(target_wp) >= 3 else 0.4
+            
+            # 求解最优二维平面防摆加速度
+            action_2d = self.get_action(nmpc_s, target_xy)
+            
+            # [中和修改]：Z轴下降逻辑
+            Kp_z = 3.5 
+            Kd_z = 2.5
+            az = Kp_z * (target_z - payload_z) - Kd_z * mocap_vz
+            
+            # 放宽限幅，保证下降速度不至于像上版本那样慢动作
+            az = np.clip(az, -0.4, 0.4)
 
-            action_2d = self.get_action(state, target_xy)
-            is_at_final_wp = self.reached_final or (self.current_wp_idx == total_wps - 1)
+            # ---------------------------------------------------------
+            # 4. 最终降落点的柔顺稳定
+            # ---------------------------------------------------------
+            if self.reached_final:
+                target_final = self.trajectory[-1]
+                Kp_xy = 0.5
+                Kd_xy = 1.5 # 中度降落末端阻尼
+                
+                pd_x = Kp_xy * (target_final[0] - q_x) - Kd_xy * v_qx
+                pd_y = Kp_xy * (target_final[1] - q_y) - Kd_xy * v_qy
+                
+                max_pd_acc = 0.15 
+                action_2d[0] += np.clip(pd_x, -max_pd_acc, max_pd_acc)
+                action_2d[1] += np.clip(pd_y, -max_pd_acc, max_pd_acc)
 
         # ---------------------------------------------------------
-        # 2. 状态机流转判断（复刻原物理环境的降落判定）
+        # 5. 合并为 3D 动作并硬限幅输出
         # ---------------------------------------------------------
-        # 条件：到达终点附近，并且负载摆动速度极小
-        if is_at_final_wp and dist_xy < 0.05 and vel_xy < 0.15:
-            self.phase = 'DESCENT'
+        base_action = np.array([action_2d[0], action_2d[1], az], dtype=np.float32)
+        base_action = np.clip(base_action, -self.u_max, self.u_max)
 
-        # ---------------------------------------------------------
-        # 3. Z 轴独立控制算法（剥离自原物理环境）
-        # ---------------------------------------------------------
-        if self.phase == 'DESCENT':
-            target_vz = -0.2
-            # P 控制向下，直到着陆
-            az = 2.0 * (target_vz - vz)
-        else:
-            target_z = 1.0
-            # PD 控制维持巡航高度
-            az = 5.0 * (target_z - z) - 2.0 * vz
-
-        # 将 2D NMPC 动作和 Z 轴 PD 动作合并为 3D 输出
-        return np.array([action_2d[0], action_2d[1], az], dtype=np.float32)
+        return base_action

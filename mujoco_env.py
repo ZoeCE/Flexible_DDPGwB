@@ -88,39 +88,28 @@ class CableRobotEnv:
         return self._get_obs()
 
     def step(self, action):
-        # 获取当前误差状态 (用于判断是否自动下降)
         obs_tmp = self._get_obs()
-        dist_xy = np.linalg.norm(obs_tmp[8:10]) # 目标距离
-        vel_xy = np.linalg.norm(obs_tmp[6:8])   # 摆动速度
+        dist_xy = np.linalg.norm(obs_tmp[8:10]) 
+        vel_xy = np.linalg.norm(obs_tmp[6:8])   
         
-        # --- 动作处理逻辑 ---
         if len(action) == 2:
-            # Case A: RL 训练模式 (2D 动作)
-            # 启用【自动下降逻辑】
             action = np.clip(action, -self.action_space_high, self.action_space_high)
             ax, ay = action
             
-            # 逻辑：如果水平对准了(<5cm) 且 摆动很小(<0.15m/s)，就开始下降
             if dist_xy < 0.05 and vel_xy < 0.15:
-                # 简单的 P 控制向下
                 target_vz = -0.2
                 current_vz = self.current_mocap_vel[2]
                 az = 2.0 * (target_vz - current_vz)
             else:
-                # 否则保持高度 Z=1.0
                 target_z = 1.0
                 current_z = self.current_mocap_pos[2]
                 current_vz = self.current_mocap_vel[2]
-                # PD 控制保持高度
                 az = 5.0 * (target_z - current_z) - 2.0 * current_vz
                 
         else:
-            # Case B: NMPC 测试模式 (3D 动作)
-            # 直接执行输入的 Z 轴指令
             action = np.clip(action, -self.action_space_high, self.action_space_high)
             ax, ay, az = action
 
-        # --- 动力学积分 (3D) ---
         self.current_mocap_pos[0] += self.current_mocap_vel[0] * self.dt + 0.5 * ax * self.dt**2
         self.current_mocap_pos[1] += self.current_mocap_vel[1] * self.dt + 0.5 * ay * self.dt**2
         self.current_mocap_pos[2] += self.current_mocap_vel[2] * self.dt + 0.5 * az * self.dt**2
@@ -129,7 +118,6 @@ class CableRobotEnv:
         self.current_mocap_vel[1] += ay * self.dt
         self.current_mocap_vel[2] += az * self.dt
         
-        # 地面碰撞保护
         if self.current_mocap_pos[2] < 0.4: 
              self.current_mocap_pos[2] = 0.4
              self.current_mocap_vel[2] = 0
@@ -176,7 +164,6 @@ class CableRobotEnv:
         success = False
         reward = 0.0
         
-        # 成功判据：XY对准 + 不摆 + Z到位
         if dist_xy < 0.03 and payload_vel < 0.1 and q_z < 0.15:
             reward = 1.0
             success = True
@@ -191,15 +178,9 @@ class CableRobotEnv:
 OBSTACLE_Z_CENTER = 0.25
 OBSTACLE_HALFHEIGHT = 0.2
 
-
 def _sample_obstacles_on_path(start_xy, target_xy, n_obstacles, radius_range,
                               path_width=0.15, rng=None,
                               min_clearance_from_endpoints=0.0):
-    """
-    在起点到目标的路径附近采样圆形障碍物（仅在 XY 平面）。
-    约束：障碍物圆心到起点、终点的距离均不少于 min_clearance_from_endpoints + 障碍物半径，
-    以保证目标物（负载）在起点和终点处有足够空间，不与障碍物过近。
-    """
     if rng is None:
         rng = np.random.default_rng()
     r_min, r_max = radius_range
@@ -234,7 +215,6 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
                               path_points=None,
                               start_xy=None,
                               goal_xy=None):
-    """在基础 XML 中插入障碍物与路径可视化，并设置 rebar_base 的 xy 与 goal_xy 一致。"""
     if obstacles:
         material_line = '    <material name="steel" rgba="0.6 0.6 0.6 1"/>'
         insert = (
@@ -248,7 +228,7 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
     obstacle_bodies = []
     for i, (x, y, r) in enumerate(obstacles):
         body = (
-            f'    <!-- 路径障碍物 {i} (静态) -->\n'
+            f'    \n'
             f'    <body name="obstacle_{i}" pos="{x} {y} {OBSTACLE_Z_CENTER}">\n'
             f'      <geom type="cylinder" size="{r} {OBSTACLE_HALFHEIGHT}" pos="0 0 0" '
             f'material="obstacle" contype="1" conaffinity="1"/>\n'
@@ -259,12 +239,13 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
 
     path_bodies = []
     if path_points is not None:
-        path_z = OBSTACLE_Z_CENTER + OBSTACLE_HALFHEIGHT + 0.02
         for i, p in enumerate(path_points):
             px, py = float(p[0]), float(p[1])
+            # [核心修改 1]：让可视化点兼容 3D 坐标输入
+            pz = float(p[2]) if len(p) >= 3 else (OBSTACLE_Z_CENTER + OBSTACLE_HALFHEIGHT + 0.02)
             body = (
-                f'    <!-- 规划路径点 {i} (可视化) -->\n'
-                f'    <body name="path_pt_{i}" pos="{px} {py} {path_z}">\n'
+                f'    \n'
+                f'    <body name="path_pt_{i}" pos="{px} {py} {pz}">\n'
                 f'      <geom type="sphere" size="0.01" rgba="0 0 1 1" '
                 f'contype="0" conaffinity="0"/>\n'
                 f'    </body>\n\n'
@@ -277,7 +258,7 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
     if start_xy is not None:
         sx, sy = float(start_xy[0]), float(start_xy[1])
         body = (
-            f'    <!-- 规划起点 (可视化) -->\n'
+            f'    \n'
             f'    <body name="path_start" pos="{sx} {sy} {endpoint_z}">\n'
             f'      <geom type="sphere" size="0.012" rgba="1 0 0 1" '
             f'contype="0" conaffinity="0"/>\n'
@@ -287,7 +268,7 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
     if goal_xy is not None:
         gx, gy = float(goal_xy[0]), float(goal_xy[1])
         body = (
-            f'    <!-- 规划终点 (可视化) -->\n'
+            f'    \n'
             f'    <body name="path_goal" pos="{gx} {gy} {endpoint_z}">\n'
             f'      <geom type="sphere" size="0.012" rgba="1 0 0 1" '
             f'contype="0" conaffinity="0"/>\n'
@@ -300,10 +281,10 @@ def _build_xml_with_obstacles(base_xml_content, obstacles,
         + (obstacles_block if obstacles_block else '')
         + (path_block if path_block else '')
         + (endpoint_block if endpoint_block else '')
-        + '    <!--  固定钢筋 -->'
+        + '    '
     )
     xml = xml.replace(
-        '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    <!--  固定钢筋 -->',
+        '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',
         replacement,
         1,
     )
@@ -324,7 +305,6 @@ def plan_path_2d(start_xy, target_xy, obstacles,
                  safety_margin=0.02,
                  bounds_margin=0.3,
                  max_expansions=100000):
-    """在 XY 平面上使用栅格 A* 规划从 start_xy 到 target_xy 的避障路径。"""
     start_xy = np.asarray(start_xy, dtype=float).reshape(2)
     target_xy = np.asarray(target_xy, dtype=float).reshape(2)
     if not obstacles:
@@ -441,11 +421,6 @@ def plan_path_2d(start_xy, target_xy, obstacles,
 
 
 class CableRobotEnvWithObstacles(CableRobotEnv):
-    """
-    带路径障碍物的环境：每次 reset 时生成带静态障碍物的临时 XML 并加载，
-    同时进行 2D 路径规划；通过 get_obstacles() / get_planned_path() 暴露给控制层。
-    """
-
     def __init__(self, n_obstacles=3, obstacle_radius_range=(0.001, 0.005),
                  path_width=0.12, obstacle_seed=None,
                  payload_radius=0.06, planning_margin=0.02,
@@ -482,11 +457,8 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.prefab_body_id = self.model.body("prefab").id
         self.target_body_id = self.model.body("rebar_base").id
 
-        self.n_obstacles = n_obstacles # Need to know this for state_dim
-        # 【Modification】: Increase state_dim by 3 for every obstacle (x, y, r)
-        # 增加 4 维：末端高度(mocap_z)、末端垂直速度(mocap_vz)、吊装物高度(payload_z)、吊装物垂直速度(payload_vz)
+        self.n_obstacles = n_obstacles 
         self.state_dim = 10 + (self.n_obstacles * 3) + 4 
-        # 动作维度彻底改为 3，接收 (ax, ay, az)
         self.action_dim = 3
 
         self.action_space_high = 0.5
@@ -565,22 +537,36 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         start_xy = self.default_start_xy.copy()
         target_xy = self.default_target.copy()
         min_clearance = self.payload_radius + self.planning_margin
+        
+        # 1. 障碍物及 2D 路径规划
         self._obstacles = _sample_obstacles_on_path(
             start_xy, target_xy, self.n_obstacles, self.obstacle_radius_range,
             self.path_width, self._obstacle_rng,
             min_clearance_from_endpoints=min_clearance,
         )
-        self._planned_path = plan_path_2d(
+        path_2d = plan_path_2d(
             start_xy=start_xy, target_xy=target_xy, obstacles=self._obstacles,
             grid_res=self.planning_grid_res, payload_radius=self.payload_radius,
             safety_margin=self.planning_margin,
         )
-        self._reload_model_with_obstacles(
-            self._obstacles, self._planned_path, start_xy=start_xy, goal_xy=target_xy,
-        )
-        obs = super().reset()
+        
+        # [核心修改 2]：预构造占位 3D 轨迹点（包含下降段），以确保编译的 XML 包含正确数量的球体用于渲染
+        num_descent_steps = 6
+        dummy_path = []
+        for pt in path_2d:
+            dummy_path.append([pt[0], pt[1], 1.0])
+        last_xy = path_2d[-1]
+        for _ in range(num_descent_steps):
+            dummy_path.append([last_xy[0], last_xy[1], 1.0])
+        dummy_path_np = np.array(dummy_path)
 
-        # 覆盖父类 reset() 中的目标随机化，确保 rebar_base 与 path_goal 的 XY 一致
+        # 加载带实体的 XML 模型
+        self._reload_model_with_obstacles(
+            self._obstacles, dummy_path_np, start_xy=start_xy, goal_xy=target_xy,
+        )
+        
+        obs = super().reset() # 父类 reset 会再次随机化初始位置和目标
+
         self.target_pos = target_xy.copy()
         self.model.body_pos[self.target_body_id][:2] = target_xy
 
@@ -593,28 +579,62 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.data.mocap_pos[self.mocap_id][0] = start_x
         self.data.mocap_pos[self.mocap_id][1] = start_y
         self.data.mocap_pos[self.mocap_id][2] = 1.0
+        
+        # 再次预热以让绳索和负载自然下垂稳定
         for _ in range(50):
             mujoco.mj_step(self.model, self.data)
+            
         self.current_mocap_pos = self.data.mocap_pos[self.mocap_id].copy()
         self.current_mocap_vel = np.zeros(3)
-        return self._get_obs()
+        
+        # [核心修改 3]：预热完毕后获取实际悬停高度，构建真正的 3D 轨迹！
+        payload_z_cruise = self.data.qpos[self.prefab_jnt_id + 2]
+        
+        true_path_3d = []
+        # 前半段：保持悬停高度的平移
+        for pt in path_2d:
+            true_path_3d.append([pt[0], pt[1], payload_z_cruise])
+            
+        # 后半段：目标点正上方的垂直下降（下潜至 0.12 米）
+        descent_zs = np.linspace(payload_z_cruise, 0.12, num_descent_steps + 1)[1:] 
+        for z in descent_zs:
+            true_path_3d.append([last_xy[0], last_xy[1], z])
+            
+        self._planned_path = np.array(true_path_3d)
+
+        # 动态更新物理引擎中轨迹球的位置，完成完美的可视化对接
+        for i, pt in enumerate(self._planned_path):
+            body_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, f"path_pt_{i}")
+            if body_id != -1:
+                self.model.body_pos[body_id] = pt
+
+        self.current_wp_idx = 0
+        self.reached_final = False
+        
+        obs = self._get_obs()
+        
+        if self._planned_path is not None and len(self._planned_path) > 0:
+            # 初始化变为 3D 距离计算
+            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            current_pos = np.array([obs[4], obs[5], payload_z])
+            target_wp = self._planned_path[self.current_wp_idx]
+            self.last_dist = np.linalg.norm(current_pos - target_wp)
+        else:
+            self.last_dist = None
+            
+        return obs
 
     def step(self, action):
-        # --- 1. 动作处理逻辑 (彻底改为纯 3D 控制) ---
         action = np.clip(action, -self.action_space_high, self.action_space_high)
         
-        # 兼容性防御：确保正确解包三维动作
         if len(action) == 3:
             ax, ay, az = action
         elif len(action) == 2:
-            # 理论上不会走到这里，除非网络还没更新完
             ax, ay = action
             az = 0.0
         else:
             ax, ay, az = action[:3]
 
-        # --- 2. 动力学积分 (3D) ---
-        # 无论下降还是巡航，完全听从控制器或 RL Agent 输出的 az
         self.current_mocap_pos[0] += self.current_mocap_vel[0] * self.dt + 0.5 * ax * self.dt**2
         self.current_mocap_pos[1] += self.current_mocap_vel[1] * self.dt + 0.5 * ay * self.dt**2
         self.current_mocap_pos[2] += self.current_mocap_vel[2] * self.dt + 0.5 * az * self.dt**2
@@ -623,72 +643,133 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.current_mocap_vel[1] += ay * self.dt
         self.current_mocap_vel[2] += az * self.dt
         
-        # 机械臂末端(mocap)地面碰撞保护（防止吊车本身砸到地面）
         if self.current_mocap_pos[2] < 0.4: 
              self.current_mocap_pos[2] = 0.4
              self.current_mocap_vel[2] = 0
 
         self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
         
-        # --- 3. 物理引擎步进 ---
         for _ in range(self.sim_steps):
             mujoco.mj_step(self.model, self.data)
             
+        if np.any(np.isnan(self.data.qpos)) or np.any(np.isnan(self.data.qvel)):
+            return self._get_obs(), -10.0, True, False
+
         if self.render_mode and hasattr(self, 'viewer') and self.viewer:
             self.viewer.sync()
             
         self.current_step += 1
-        
-        # --- 4. 状态更新与基础奖励 ---
-        # 注意：这里调用 self._get_obs() 会自动执行当前类重写后的版本，包含 4 维 Z 轴数据
         obs = self._get_obs()
-        reward, done, success = self._compute_reward(obs)
         
-        # --- 5. 新增：吊装物触地结束判定 ---
-        # 获取最新的吊装物 Z 高度
-        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
-        
-        # 降落结束判定：当吊装物距离地面小于等于 0.1 时，结束回合
-        if payload_z <= 0.1:
-            done = True
+        if self._planned_path is not None and len(self._planned_path) > 0 and not self.reached_final:
+            # [核心修改 4]：推演状态机，将目标捕捉的距离测算升级为 3D
+            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            current_pos = np.array([obs[4], obs[5], payload_z])
+            target_wp = self._planned_path[self.current_wp_idx]
+            dist_to_wp = np.linalg.norm(current_pos - target_wp)
             
-            # 判断是否成功降落：相对目标点的 XY 距离 < 0.05 且 摆动速度 < 0.15
-            dist_xy = np.linalg.norm(obs[8:10]) 
-            vel_xy = np.linalg.norm(obs[6:8])   
-            if dist_xy < 0.05 and vel_xy < 0.15:
-                success = True
+            total_wps = len(self._planned_path)
+            rem_wps = total_wps - 1 - self.current_wp_idx
+            # 引入 Z 轴后容差稍微放大，确保平滑过渡而不卡死在航点上
+            look_ahead_dist = 0.06 if rem_wps <= 2 else 0.10 
+                
+            if dist_to_wp < look_ahead_dist:
+                step_idx = min(1, rem_wps)
+                self.current_wp_idx += step_idx
+                if self.current_wp_idx >= total_wps - 1:
+                    self.current_wp_idx = total_wps - 1
+                    self.reached_final = True
         
-        # 超时保护
+        reward, done, success = self._compute_reward(obs, action)
+        
+        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+        dist_to_final = np.linalg.norm(obs[8:10])
+
+        if payload_z <= 0.12: 
+            done = True
+            vel_xy = np.linalg.norm(obs[6:8])   
+            payload_vz = obs[-1]
+            # 【优化】：加入对下降速度的限制 (如绝对值小于 0.5 m/s，防止砸地)
+            if dist_to_final < 0.15 and vel_xy < 0.2 and abs(payload_vz) < 0.5:
+                success = True
+                reward += 15.0 # 【优化】：拉开成功奖励与失败惩罚的差距
+            else:
+                reward -= 5.0  # 摔机或偏离
+        
         if self.current_step >= self.max_steps:
             done = True
+            if not success:
+                reward -= 5.0   
+            
+        if dist_to_final > 2.0: 
+            reward -= 10.0      
+            done = True
+
+        reward = float(np.clip(reward, -15.0, 15.0))
             
         return obs, reward, done, success
+
+    def _compute_reward(self, obs, action):
+        done = False
+        success = False
+        reward = 0.0
+        
+        current_xy = obs[4:6]
+        payload_vel = np.linalg.norm(obs[6:8])
+        
+        if self._planned_path is not None and len(self._planned_path) > 0:
+            # [核心修改 5]：势能导向函数升级为引导 3D 趋近，自动鼓励垂直下落
+            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            current_pos = np.array([current_xy[0], current_xy[1], payload_z])
+            target_wp = self._planned_path[self.current_wp_idx]
+            
+            dist_t = np.linalg.norm(current_pos - target_wp)
+            
+            if getattr(self, 'last_wp_idx', -1) != self.current_wp_idx:
+                self.last_dist = None
+                self.last_wp_idx = self.current_wp_idx
+
+            if self.last_dist is not None:
+                step_progress_reward = (self.last_dist - dist_t) * 50.0
+                reward += np.clip(step_progress_reward, -2.0, 2.0)
+            
+            reward -= np.clip(dist_t * 0.5, 0.0, 2.0)
+            self.last_dist = dist_t
+
+        if hasattr(self, '_obstacles') and self._obstacles:
+            payload_radius = getattr(self, 'payload_radius', 0.1) 
+            for (ox, oy, orad) in self._obstacles:
+                d = np.linalg.norm(current_xy - np.array([ox, oy]))
+                if d < (orad + payload_radius):
+                    reward -= 8.0  
+                    done = True    
+                    return reward, done, success
+
+        reward -= 0.02 * np.sum(np.square(action))
+        reward -= np.clip(0.1 * payload_vel, 0.0, 1.0)
+        reward -= 0.02
+            
+        return reward, done, success
     
-    # 【New Observation】: Override _get_obs to append obstacle XY coordinates and radius
     def _get_obs(self):
         base_obs = super()._get_obs()
         
         obs_data = []
-        # 【Modification】: Append (x, y, r) for each generated obstacle
         if hasattr(self, '_obstacles') and self._obstacles:
             for (ox, oy, r) in self._obstacles:
                 obs_data.extend([ox, oy, r])
                 
-        # 【Modification】: Target length is now n_obstacles * 3
         target_len = self.n_obstacles * 3
         while len(obs_data) < target_len:
             obs_data.append(0.0)
             
-        # 1. 获取机械臂末端(mocap)的 Z 高度和 Z 速度
         mocap_z = self.current_mocap_pos[2]
         mocap_vz = self.current_mocap_vel[2]
         
-        # 2. 获取吊装物(prefab)的 Z 高度和 Z 速度
         payload_z = self.data.qpos[self.prefab_jnt_id + 2]
         dof_idx = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz = self.data.qvel[dof_idx + 2]
             
-        # 将 base_obs, 障碍物信息, 以及新增的 4 维 Z 轴物理量拼接在一起返回
         return np.concatenate([base_obs, obs_data[:target_len], [mocap_z, mocap_vz, payload_z, payload_vz]], dtype=np.float32)
     
     def get_obstacles(self):
