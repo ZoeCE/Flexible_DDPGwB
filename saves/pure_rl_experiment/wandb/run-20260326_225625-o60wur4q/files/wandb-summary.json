@@ -1,0 +1,1 @@
+{"loss/behavior_clone":0,"_runtime":10651.923744197,"reward/avg20":9.048455435910899,"loss/critic":0.4305371344089508,"reward/episode":10.16742946410957,"steps/avg20":41.35,"loss/actor":-0.054689325392246246,"_wandb":{"runtime":10651},"steps/episode":98,"frames_total":1443315,"explore/noise_sigma":0.06151162666666667,"_step":19999,"_timestamp":1.7745478081972084e+09}

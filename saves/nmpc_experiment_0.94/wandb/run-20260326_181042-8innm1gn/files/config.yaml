@@ -1,0 +1,75 @@
+_wandb:
+    value:
+        cli_version: 0.25.1
+        e:
+            sh36vejjbenv0lewxzqdt25ogkq0jc4v:
+                codePath: learn.py
+                codePathLocal: learn.py
+                cpu_count: 6
+                cpu_count_logical: 6
+                cudaVersion: "13.1"
+                disk:
+                    /:
+                        total: "1081101176832"
+                        used: "57289662464"
+                email: xz573@cam.ac.uk
+                executable: /home/xyzha/miniconda3/envs/vsdrl_env_5060/bin/python
+                git:
+                    commit: fe4a2bf9e61266bf7bd436a3a60f1cb0964f3fc1
+                    remote: https://github.com/ZoeCE/Flexible_DDPGwB.git
+                gpu: NVIDIA GeForce RTX 5060 Laptop GPU
+                gpu_count: 1
+                gpu_nvidia:
+                    - architecture: Blackwell
+                      memoryTotal: "8546942976"
+                      name: NVIDIA GeForce RTX 5060 Laptop GPU
+                      uuid: GPU-3a45bc42-4891-2a53-288a-5b94f8fce51e
+                host: Xiaoyu
+                memory:
+                    total: "12543823872"
+                os: Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39
+                program: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/learn.py
+                python: CPython 3.11.14
+                root: saves/nmpc_experiment
+                startedAt: "2026-03-26T10:10:42.131094Z"
+                writerId: sh36vejjbenv0lewxzqdt25ogkq0jc4v
+        m: []
+        python_version: 3.11.14
+        t:
+            "1":
+                - 1
+            "2":
+                - 1
+            "3":
+                - 2
+                - 13
+                - 16
+                - 61
+            "4": 3.11.14
+            "5": 0.25.1
+            "12": 0.25.1
+            "13": linux-x86_64
+action_dim:
+    value: 3
+batch_size:
+    value: 64
+delta:
+    value: 5e-06
+epsilon_min:
+    value: 0.1
+explore_noise:
+    value: 0.05
+gamma:
+    value: 0.94
+max_action:
+    value: 0.5
+max_steps_per_ep:
+    value: 150
+n_episodes:
+    value: 4000
+state_dim:
+    value: 23
+tau:
+    value: 0.005
+warmup_episodes:
+    value: 100

@@ -1,0 +1,39 @@
+{
+  "os": "Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.39",
+  "python": "CPython 3.11.14",
+  "startedAt": "2026-03-26T09:53:22.293781Z",
+  "program": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/learn.py",
+  "codePath": "learn.py",
+  "codePathLocal": "learn.py",
+  "git": {
+    "remote": "https://github.com/ZoeCE/Flexible_DDPGwB.git",
+    "commit": "fe4a2bf9e61266bf7bd436a3a60f1cb0964f3fc1"
+  },
+  "email": "xz573@cam.ac.uk",
+  "root": "saves/nmpc_experiment",
+  "host": "Xiaoyu",
+  "executable": "/home/xyzha/miniconda3/envs/vsdrl_env_5060/bin/python",
+  "cpu_count": 6,
+  "cpu_count_logical": 6,
+  "gpu": "NVIDIA GeForce RTX 5060 Laptop GPU",
+  "gpu_count": 1,
+  "disk": {
+    "/": {
+      "total": "1081101176832",
+      "used": "57289588736"
+    }
+  },
+  "memory": {
+    "total": "12543823872"
+  },
+  "gpu_nvidia": [
+    {
+      "name": "NVIDIA GeForce RTX 5060 Laptop GPU",
+      "memoryTotal": "8546942976",
+      "architecture": "Blackwell",
+      "uuid": "GPU-3a45bc42-4891-2a53-288a-5b94f8fce51e"
+    }
+  ],
+  "cudaVersion": "13.1",
+  "writerId": "jbdbb8z8st7yna3k2dm5nkhs4al5aetu"
+}

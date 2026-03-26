@@ -34,7 +34,7 @@ def soft_update(target, source, tau):
 class FastActor(nn.Module):
     """
     策略网络（Actor）。
-    相较于原版 DDPG，升级为 3 层 256 宽度，增强对 23 维高维状态的表征能力。
+    相较于原版 DDPG，升级为 2 层 256 宽度，增强对 23 维高维状态的表征能力。
     输出经 Tanh 压缩后乘以 max_action，保证动作在合法范围内。
     """
     def __init__(self, state_dim, action_dim, max_action=0.5):
@@ -193,7 +193,7 @@ class WBAgent:
  
         # ---------- 基础超参数（与原版保持一致）----------
         self.batch_size = 64
-        self.gamma      = 0.95
+        self.gamma      = 0.94
         self.tau        = 0.005
  
         # ---------- Epsilon 探索（与原版保持一致）----------
@@ -394,3 +394,61 @@ class WBAgent:
         #   avg_critic_loss, actor_loss, bc_loss
         # 因 Actor 存在延迟更新，返回缓存值（而非本轮 0），保证 learn.py 日志正常
         return total_Lc / iterations, self._last_actor_loss, self._last_bc_loss
+    
+
+# ===========================================================================
+# PureRLAgent —— 纯 TD3，无专家依赖
+# ===========================================================================
+ 
+class PureRLAgent(WBAgent):
+    """
+    纯强化学习 Agent（TD3），完全不依赖 NMPC 专家控制器。
+ 
+    与 WBAgent 的三点区别：
+      1. act()：始终执行 Actor 输出，探索靠外部高斯噪声（learn_rl.py 负责注入），
+                is_network 恒为 True，base_action 恒为零向量（占位）。
+      2. train()：base_boot=False, behavior_clone=False，纯 TD3 梯度更新。
+      3. epsilon / delta 在 PureRLAgent 内部完全不使用（探索由 explore_noise 控制）。
+ 
+    继承 WBAgent 的所有网络结构（FastActor / TwinCritic）和 train() 框架，
+    只覆盖 act() 和构造函数中的相关超参数，保证 test.py 的模型加载完全兼容。
+    """
+ 
+    def __init__(self, log_dir, state_dim, action_dim, max_action=0.5,
+                 # 以下三个参数强制为 False，保留签名仅为接口兼容
+                 mixed_q=False, base_boot=False, behavior_clone=False,
+                 base_controller_func=None):
+ 
+        # 强制关闭专家相关机制，base_controller_func 置 None 忽略传入值
+        super().__init__(
+            log_dir=log_dir,
+            state_dim=state_dim,
+            action_dim=action_dim,
+            max_action=max_action,
+            mixed_q=False,
+            base_boot=False,
+            behavior_clone=False,
+            base_controller_func=None,   # 不使用专家，即使传入也忽略
+        )
+ 
+        # epsilon 在纯RL模式下无意义，固定为 0 防止误用
+        self.epsilon     = 0.0
+        self.epsilon_min = 0.0
+        self.delta       = 0.0
+ 
+    # -----------------------------------------------------------------------
+    # 动作选择（纯 Actor 输出，探索噪声由 learn_rl.py 在外部注入）
+    # -----------------------------------------------------------------------
+ 
+    def act(self, state):
+        """
+        返回 (actor_action, True, zero_base_action)。
+          - is_network 恒为 True（统计 ratio 时该步计入 Actor 执行）
+          - base_action 为零向量（满足 remember() 接口，train() 不会使用）
+          - 探索噪声不在此注入，由 learn_rl.py 的主循环负责（与环境交互更透明）
+        """
+        with torch.no_grad():
+            s_tensor     = np_to_tensor(state.reshape(1, -1))
+            actor_action = self.actor(s_tensor).cpu().data.numpy().flatten()
+            zero_base    = np.zeros(self.action_dim, dtype=np.float32)
+        return actor_action, True, zero_base
