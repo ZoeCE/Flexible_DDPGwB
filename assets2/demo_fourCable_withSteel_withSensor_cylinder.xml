@@ -1,14 +1,13 @@
 <mujoco model="iiwa14_lifting_scene_sensors_compatible">
 
   <!-- 加载机械臂 -->
-  <include file="iiwa14.xml"/>
+  <include file="iiwa14_four_cables_with_plate.xml"/>
 
   <option integrator="implicitfast" gravity="0 0 -9.81"/>
 
   <asset>
     <material name="groundplane" rgba="0.3 0.3 0.3 1"/>
     <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
-    <material name="rope" rgba="0.2 0.2 0.2 1"/>
     <material name="red" rgba="0.8 0 0 1"/>
     <material name="steel" rgba="0.6 0.6 0.6 1"/>
 
@@ -85,11 +84,11 @@
 
     <!--  固定钢筋 -->
     <body name="rebar_base" pos="-0.2 0.3 0">
-      <geom type="cylinder" size="0.002 0.005" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
+      <geom type="cylinder" size="0.005 0.03" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
     </body>
 
     <!-- 吊装构件 -->
-    <body name="prefab" pos="0.2 0.3 0.3">
+    <body name="prefab" pos="0.2 0.3 0.8">
       <joint type="free"/>
       <!-- <geom type="mesh" mesh="cylinder_with_holes" material="concrete" mass="1.0" /> -->
       <geom type="mesh" mesh="hollow_cylinder_convex_0" material="concrete" mass="0.0156"/>
@@ -175,31 +174,12 @@
 
   <!-- 绑定挂点到机械臂末端 -->
   <equality>
-      <weld body1="link7" body2="mocap" 
-            solimp="0.99 0.99 0.01"
-            solref="0.001 1"
-            relpose="0 0 0.045 1 0 0 0"/>
+      <!-- 使用刚体绳索末端与负载四吊点连接 -->
+      <connect site1="rope_fl_end" site2="lift_fl"/>
+      <connect site1="rope_fr_end" site2="lift_fr"/>
+      <connect site1="rope_rl_end" site2="lift_rl"/>
+      <connect site1="rope_rr_end" site2="lift_rr"/>
   </equality>
-  
-  <!-- 四根吊索 -->
-  <tendon>
-    <spatial name="rope_fl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_fl"/>
-    </spatial>
-    <spatial name="rope_fr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_fr"/>
-    </spatial>
-    <spatial name="rope_rl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_rl"/>
-    </spatial>
-    <spatial name="rope_rr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_rr"/>
-    </spatial>
-  </tendon>
 
   <sensor>
     <framepos name="prefab/pos" objtype="site" objname="imu_site"/>

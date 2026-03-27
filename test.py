@@ -258,7 +258,7 @@ if __name__ == '__main__':
                         help='Test mode')
     parser.add_argument('--render', action='store_true', help='Enable MuJoCo rendering')
     parser.add_argument('--episodes', type=int, default=10, help='Number of test episodes')
-    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment', help='Directory with actor.pt')
+    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment_0.95', help='Directory with actor.pt')
 
     # 障碍物模式专用参数
     parser.add_argument('--obstacles', type=int, default=3, help='[obstacles] Number of obstacles per episode')
