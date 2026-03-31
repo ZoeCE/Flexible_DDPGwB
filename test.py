@@ -5,6 +5,8 @@ import time
 import os
 import sys
 
+from ipdb import set_trace as xxxx
+
 # 引入环境和控制器
 from mujoco_env import CableRobotEnv, CableRobotEnvWithObstacles
 from nmpc_controller import NMPCController, NMPCTrajectoryTracker
@@ -228,17 +230,6 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 
                 if success:
                     success_count += 1
-                    total_steps_success += step
-                if episode_collision:
-                    collision_count += 1
-                break
-                
-        # 进度条 (非渲染模式下显示)
-        if not render and (ep+1) % 10 == 0:
-            print(f"Progress: {ep+1}/{n_episodes} | Current SR: {success_count/(ep+1)*100:.1f}%")
-
-    end_time = time.time()
-    avg_steps = total_steps_success / success_count if success_count > 0 else 0
     
     print("\n" + "="*50)
     print(f"Final Result [{mode.upper()}]:")

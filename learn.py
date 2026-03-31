@@ -8,6 +8,8 @@ from agent import WBAgent
 from mujoco_env import CableRobotEnvWithObstacles
 from nmpc_controller import NMPCTrajectoryTracker
 
+from ipdb import set_trace as xxxx
+
 nmpc_instance = None
 
 # ===========================================================================

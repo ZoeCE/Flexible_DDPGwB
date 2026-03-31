@@ -7,6 +7,8 @@ import tempfile
 import heapq
 from collections import deque
 
+from ipdb import set_trace as xxxx
+
 class CableRobotEnv:
     def __init__(self, render=False):
         # --- 1. 加载模型 ---
@@ -69,8 +71,10 @@ class CableRobotEnv:
         start_y = 0.3 + np.random.uniform(-0.05, 0.05)
         
         q_idx = self.prefab_jnt_id
-        self.data.qpos[q_idx] = start_x
-        self.data.qpos[q_idx+1] = start_y
+        # self.data.qpos[q_idx] = start_x ## orig
+        # self.data.qpos[q_idx+1] = start_y ## orig
+        self.data.body('prefab').xpos[0] = start_x ## xyc: 重新确定prefab的x-value
+        self.data.body('prefab').xpos[1] = start_y ## xyc: 重新确定prefab的y-value
         
         # 3. Mocap 对齐
         self.data.mocap_pos[self.mocap_id][0] = start_x
@@ -144,8 +148,10 @@ class CableRobotEnv:
         vpx, vpy = self.current_mocap_vel[0], self.current_mocap_vel[1]
         
         q_idx = self.prefab_jnt_id
-        qx = self.data.qpos[q_idx]
-        qy = self.data.qpos[q_idx+1]
+        # qx = self.data.qpos[q_idx] ## orig
+        # qy = self.data.qpos[q_idx+1] ## orig
+        qx = self.data.body('prefab').xpos[0] ## xyc: 重新确定prefab的x-value
+        qy = self.data.body('prefab').xpos[1] ## xyc: 重新确定prefab的y-value
         
         dof_idx = self.model.jnt_dofadr[self.prefab_jnt_id]
         vqx = self.data.qvel[dof_idx]
@@ -159,7 +165,8 @@ class CableRobotEnv:
     def _compute_reward(self, obs):
         dist_xy = np.linalg.norm(obs[8:10])
         payload_vel = np.linalg.norm(obs[6:8])
-        q_z = self.data.qpos[self.prefab_jnt_id + 2]
+        # q_z = self.data.qpos[self.prefab_jnt_id + 2] ## orig
+        q_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value
         
         success = False
         reward = 0.0
@@ -501,10 +508,12 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.target_body_id = self.model.body("rebar_base").id
 
     def _reload_model_with_obstacles(self, obstacles, path_points=None, start_xy=None, goal_xy=None):
+        # load xml with obstacles
         xml_content = _build_xml_with_obstacles(
             self._base_xml_content, obstacles,
             path_points=path_points, start_xy=start_xy, goal_xy=goal_xy,
         )
+        # write xml to file
         fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets2_dir, prefix="obstacles_")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
@@ -515,17 +524,25 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             if os.path.exists(path):
                 os.remove(path)
             raise
+        # load model from xml file
         self.model = mujoco.MjModel.from_xml_path(path)
         self.data = mujoco.MjData(self.model)
         self.model.opt.timestep = self.physics_dt
         self.sim_steps = int(self.dt / self.model.opt.timestep)
         self._reresolve_ids()
+        # launch viewer if render mode is enabled
         if self.render_mode and self.viewer is not None:
             try:
                 self.viewer.close()
             except Exception:
                 pass
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            ## xyc: 增加初始化时的预热，检查初始化时的模型是否正确
+            for _ in range(500):
+                mujoco.mj_step(self.model, self.data)
+            self.viewer.sync()
+            # xyc?: 发现此时，机械臂末端并没有跟踪mocap的位置，而是自然掉落，需确认是否是跟踪mocap的控制失效
+            ## xyc: 增加初始化时的预热，检查初始化时的模型是否正确
         try:
             if os.path.exists(path):
                 os.remove(path)
@@ -557,7 +574,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             dummy_path.append([pt[0], pt[1], 1.0])
         last_xy = path_2d[-1]
         for _ in range(num_descent_steps):
-            dummy_path.append([last_xy[0], last_xy[1], 1.0])
+            dummy_path.append([last_xy[0], last_xy[1], 0.5])
         dummy_path_np = np.array(dummy_path)
 
         # 加载带实体的 XML 模型
@@ -574,8 +591,10 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         start_x = self.default_start_xy[0] + rng.uniform(-self.init_position_range, self.init_position_range)
         start_y = self.default_start_xy[1] + rng.uniform(-self.init_position_range, self.init_position_range)
         q_idx = self.prefab_jnt_id
-        self.data.qpos[q_idx] = start_x
-        self.data.qpos[q_idx + 1] = start_y
+        # self.data.qpos[q_idx] = start_x ## orig
+        # self.data.qpos[q_idx + 1] = start_y ## orig
+        self.data.body('prefab').xpos[0] = start_x ## xyc: 重新确定prefab的x-value
+        self.data.body('prefab').xpos[1] = start_y ## xyc: 重新确定prefab的y-value
         self.data.mocap_pos[self.mocap_id][0] = start_x
         self.data.mocap_pos[self.mocap_id][1] = start_y
         self.data.mocap_pos[self.mocap_id][2] = 1.0
@@ -588,7 +607,8 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.current_mocap_vel = np.zeros(3)
         
         # [核心修改 3]：预热完毕后获取实际悬停高度，构建真正的 3D 轨迹！
-        payload_z_cruise = self.data.qpos[self.prefab_jnt_id + 2]
+        # payload_z_cruise = self.data.body('prefab').xpos[2] ## xyc: confirm z-value of planned path
+        payload_z_cruise = 0.35 ## xyc?: confirm z-value of planned path, 固定一个值方便测试
         
         true_path_3d = []
         # 前半段：保持悬停高度的平移
@@ -615,7 +635,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         
         if self._planned_path is not None and len(self._planned_path) > 0:
             # 初始化变为 3D 距离计算
-            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            payload_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value，解决第一帧reset问题
             current_pos = np.array([obs[4], obs[5], payload_z])
             target_wp = self._planned_path[self.current_wp_idx]
             self.last_dist = np.linalg.norm(current_pos - target_wp)
@@ -648,7 +668,8 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
              self.current_mocap_vel[2] = 0
 
         self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
-        
+
+
         for _ in range(self.sim_steps):
             mujoco.mj_step(self.model, self.data)
             
@@ -663,7 +684,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         
         if self._planned_path is not None and len(self._planned_path) > 0 and not self.reached_final:
             # [核心修改 4]：推演状态机，将目标捕捉的距离测算升级为 3D
-            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            payload_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value，解决第一帧reset问题
             current_pos = np.array([obs[4], obs[5], payload_z])
             target_wp = self._planned_path[self.current_wp_idx]
             dist_to_wp = np.linalg.norm(current_pos - target_wp)
@@ -671,7 +692,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             total_wps = len(self._planned_path)
             rem_wps = total_wps - 1 - self.current_wp_idx
             # 引入 Z 轴后容差稍微放大，确保平滑过渡而不卡死在航点上
-            look_ahead_dist = 0.06 if rem_wps <= 2 else 0.10 
+            look_ahead_dist = 0.06 if rem_wps <= 2 else 0.10
                 
             if dist_to_wp < look_ahead_dist:
                 step_idx = min(1, rem_wps)
@@ -682,7 +703,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         
         reward, done, success = self._compute_reward(obs, action)
         
-        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+        payload_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value，解决第一帧reset问题
         dist_to_final = np.linalg.norm(obs[8:10])
 
         if payload_z <= 0.12: 
@@ -719,7 +740,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         
         if self._planned_path is not None and len(self._planned_path) > 0:
             # [核心修改 5]：势能导向函数升级为引导 3D 趋近，自动鼓励垂直下落
-            payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+            payload_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value，解决第一帧reset问题
             current_pos = np.array([current_xy[0], current_xy[1], payload_z])
             target_wp = self._planned_path[self.current_wp_idx]
             
@@ -766,7 +787,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         mocap_z = self.current_mocap_pos[2]
         mocap_vz = self.current_mocap_vel[2]
         
-        payload_z = self.data.qpos[self.prefab_jnt_id + 2]
+        payload_z = self.data.body('prefab').xpos[2] ## xyc: 重新确定prefab的z-value
         dof_idx = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz = self.data.qvel[dof_idx + 2]
             
