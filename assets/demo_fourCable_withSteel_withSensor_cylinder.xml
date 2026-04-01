@@ -1,17 +1,15 @@
-<mujoco model="iiwa14_lifting_scene_sensors_obstacles">
+<mujoco model="iiwa14_lifting_scene_sensors_compatible">
 
   <!-- 加载机械臂 -->
-  <include file="iiwa14.xml"/>
+  <include file="iiwa14_four_cables_with_plate.xml"/>
 
   <option integrator="implicitfast" gravity="0 0 -9.81"/>
 
   <asset>
     <material name="groundplane" rgba="0.3 0.3 0.3 1"/>
     <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
-    <material name="rope" rgba="0.2 0.2 0.2 1"/>
     <material name="red" rgba="0.8 0 0 1"/>
     <material name="steel" rgba="0.6 0.6 0.6 1"/>
-    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>
 
     <mesh name="hollow_cylinder_convex_0"  file="hollow_cylinder_convex_0.stl"/>
     <mesh name="hollow_cylinder_convex_1"  file="hollow_cylinder_convex_1.stl"/>
@@ -84,36 +82,15 @@
     <light pos="1.5 0 1.5" dir="1 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
-    <!-- 路径障碍物：圆柱体，free joint 便于每步固定位置实现运动学障碍，与 prefab 发生真实碰撞 -->
-    <body name="obstacle_0" pos="0 0 -5">
-      <joint type="free"/>
-      <geom name="obstacle_0_geom" type="cylinder" size="0.06 0.12" pos="0 0 0" material="obstacle" contype="1" conaffinity="1" mass="10"/>
-    </body>
-    <body name="obstacle_1" pos="0 0 -5">
-      <joint type="free"/>
-      <geom name="obstacle_1_geom" type="cylinder" size="0.06 0.12" pos="0 0 0" material="obstacle" contype="1" conaffinity="1" mass="10"/>
-    </body>
-    <body name="obstacle_2" pos="0 0 -5">
-      <joint type="free"/>
-      <geom name="obstacle_2_geom" type="cylinder" size="0.06 0.12" pos="0 0 0" material="obstacle" contype="1" conaffinity="1" mass="10"/>
-    </body>
-    <body name="obstacle_3" pos="0 0 -5">
-      <joint type="free"/>
-      <geom name="obstacle_3_geom" type="cylinder" size="0.06 0.12" pos="0 0 0" material="obstacle" contype="1" conaffinity="1" mass="10"/>
-    </body>
-    <body name="obstacle_4" pos="0 0 -5">
-      <joint type="free"/>
-      <geom name="obstacle_4_geom" type="cylinder" size="0.06 0.12" pos="0 0 0" material="obstacle" contype="1" conaffinity="1" mass="10"/>
-    </body>
-
     <!--  固定钢筋 -->
     <body name="rebar_base" pos="-0.2 0.3 0">
-      <geom type="cylinder" size="0.012 0.02" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
+      <geom type="cylinder" size="0.005 0.03" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
     </body>
 
     <!-- 吊装构件 -->
-    <body name="prefab" pos="0.2 0.3 0.3">
+    <body name="prefab" pos="0.2 0.3 0.5">
       <joint type="free"/>
+      <!-- <geom type="mesh" mesh="cylinder_with_holes" material="concrete" mass="1.0" /> -->
       <geom type="mesh" mesh="hollow_cylinder_convex_0" material="concrete" mass="0.0156"/>
       <geom type="mesh" mesh="hollow_cylinder_convex_1" material="concrete" mass="0.0156"/>
       <geom type="mesh" mesh="hollow_cylinder_convex_2" material="concrete" mass="0.0156"/>
@@ -179,44 +156,32 @@
       <geom type="mesh" mesh="hollow_cylinder_convex_62" material="concrete" mass="0.0156"/>
       <geom type="mesh" mesh="hollow_cylinder_convex_63" material="concrete" mass="0.0156"/>
 
+      <!-- 四个吊点 -->
       <site name="lift_fl" pos=" 0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>
       <site name="lift_fr" pos=" 0.05 -0.05  0.1" size="0.01" rgba="1 0 0 1"/>
       <site name="lift_rl" pos="-0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>
       <site name="lift_rr" pos="-0.05 -0.05  0.1" size="0.01" rgba="1 0 0 1"/>
+
+      <!-- ✅ IMU 传感器安装点 -->
       <site name="imu_site" pos="0 0 0" size="0.01" rgba="0 1 0 1"/>
     </body>
 
-    <body mocap="true" name="mocap" pos="0.2 0.3 1.0" quat="0 0 1 0">
+    <body mocap="true" name="mocap" pos="0.2 0.3 0.7" quat="0 0 1 0">
       <geom type="box" size="0.01 0.01 0.1" rgba="0 0 1 1"/>
     </body>
 
   </worldbody>
 
+  <!-- 绑定挂点到机械臂末端 -->
   <equality>
-      <weld body1="link7" body2="mocap" 
-            solimp="0.99 0.99 0.01"
-            solref="0.001 1"
-            relpose="0 0 0.045 1 0 0 0"/>
+      <!-- 使用刚体绳索末端与负载四吊点连接 -->
+      <connect site1="rope_fl_end" site2="lift_fl"/>
+      <connect site1="rope_fr_end" site2="lift_fr"/>
+      <connect site1="rope_rl_end" site2="lift_rl"/>
+      <connect site1="rope_rr_end" site2="lift_rr"/>
   </equality>
 
-  <tendon>
-    <spatial name="rope_fl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_fl"/>
-    </spatial>
-    <spatial name="rope_fr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_fr"/>
-    </spatial>
-    <spatial name="rope_rl" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_rl"/>
-    </spatial>
-    <spatial name="rope_rr" limited="true" range="0 0.604152" width="0.004" material="rope" stiffness="8">
-      <site site="attachment_site"/>
-      <site site="lift_rr"/>
-    </spatial>
-  </tendon>
+
 
   <sensor>
     <framepos name="prefab/pos" objtype="site" objname="imu_site"/>
@@ -225,15 +190,8 @@
     <framelinvel name="end/vel" objtype="site" objname="attachment_site"/>
   </sensor>
 
-  <!-- 初始 qpos：机械臂(7) + prefab(7) + obstacle_0..4 各(7)，未使用的障碍物置于 z=-5 -->
   <keyframe>
-    <key name="home" qpos="0.955545 0.391462 -2.86463 0.00599717 2.97003 2.37487 7.3179 
-                                 0.2 0.3 0.3  1 0 0 0
-                                 0 0 -5 1 0 0 0
-                                 0 0 -5 1 0 0 0
-                                 0 0 -5 1 0 0 0
-                                 0 0 -5 1 0 0 0
-                                 0 0 -5 1 0 0 0"/>
+    <key name="home" qpos="1.10805046  0.35488624 -2.97538264  0.11512695  2.40048625  2.3193137 0.64687807 "/>
   </keyframe>
 
 </mujoco>

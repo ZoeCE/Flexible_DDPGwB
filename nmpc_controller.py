@@ -243,30 +243,32 @@ class NMPCTrajectoryTracker:
         self.reset_state_machine()
 
     def get_tracking_action(self, full_obs, env_wp_idx=None):
-        # --- 直接从完整状态数组中提取所需物理量 ---
+        # ---------------------------------------------------------
+        # 1. 适配新版 Env 的状态解析 (关键修复)
+        # ---------------------------------------------------------
         nmpc_s = full_obs[:8]  
-        p_x, p_y = full_obs[0], full_obs[1]
         q_x, q_y = full_obs[4], full_obs[5] 
         v_qx, v_qy = full_obs[6], full_obs[7]
         
-        # 提取 Z 轴状态数据
-        mocap_z   = full_obs[-4]
-        mocap_vz  = full_obs[-3]
-        payload_z = full_obs[-2]
+        # ❗因为末尾增加了7维姿态数据，Z轴相关数据的索引必须往前推7位
+        mocap_z    = full_obs[-11]
+        mocap_vz   = full_obs[-10]
+        payload_z  = full_obs[-9]
+        payload_vz = full_obs[-8] 
+        
+        # 提取新加入的姿态数据
+        prefab_quat   = full_obs[-7:-3] # [w, x, y, z]
+        prefab_angvel = full_obs[-3:]   # [wx, wy, wz]
 
         # ---------------------------------------------------------
-        # 1. 无轨迹时的默认防御性悬停逻辑
+        # 2. 目标点与步进逻辑
         # ---------------------------------------------------------
         if self.trajectory is None or len(self.trajectory) == 0:
             target_xy = [0.0, 0.0] 
+            target_z = 0.4
             action_2d = self.get_action(nmpc_s, target_xy)
-            az = 4.0 * (1.0 - mocap_z) - 2.5 * mocap_vz 
         else:
             total_wps = len(self.trajectory)
-            
-            # ---------------------------------------------------------
-            # 2. 3D 轨迹的航点步进逻辑
-            # ---------------------------------------------------------
             if env_wp_idx is not None:
                 self.current_wp_idx = min(env_wp_idx, total_wps - 1)
                 if self.current_wp_idx >= total_wps - 1:
@@ -279,7 +281,6 @@ class NMPCTrajectoryTracker:
                 if not self.reached_final:
                     rem_wps = total_wps - 1 - self.current_wp_idx
                     look_ahead_dist = 0.06 if rem_wps <= 2 else 0.10 
-                    
                     if dist_3d < look_ahead_dist:
                         step = min(1, rem_wps)
                         self.current_wp_idx += step
@@ -287,43 +288,49 @@ class NMPCTrajectoryTracker:
                             self.current_wp_idx = total_wps - 1
                             self.reached_final = True
             
-            # ---------------------------------------------------------
-            # 3. 解析目标点并进行 XY + Z 控制解耦
-            # ---------------------------------------------------------
             target_wp = self.trajectory[self.current_wp_idx]
             target_xy = target_wp[:2]
             target_z = target_wp[2] if len(target_wp) >= 3 else 0.4
-            
-            # 求解最优二维平面防摆加速度
             action_2d = self.get_action(nmpc_s, target_xy)
-            
-            # [中和修改]：Z轴下降逻辑
-            Kp_z = 3.5 
-            Kd_z = 2.5
-            az = Kp_z * (target_z - payload_z) - Kd_z * mocap_vz
-            
-            # 放宽限幅，保证下降速度不至于像上版本那样慢动作
-            az = np.clip(az, -0.4, 0.4)
-
-            # ---------------------------------------------------------
-            # 4. 最终降落点的柔顺稳定
-            # ---------------------------------------------------------
-            if self.reached_final:
-                target_final = self.trajectory[-1]
-                Kp_xy = 0.5
-                Kd_xy = 1.5 # 中度降落末端阻尼
-                
-                pd_x = Kp_xy * (target_final[0] - q_x) - Kd_xy * v_qx
-                pd_y = Kp_xy * (target_final[1] - q_y) - Kd_xy * v_qy
-                
-                max_pd_acc = 0.15 
-                action_2d[0] += np.clip(pd_x, -max_pd_acc, max_pd_acc)
-                action_2d[1] += np.clip(pd_y, -max_pd_acc, max_pd_acc)
 
         # ---------------------------------------------------------
-        # 5. 合并为 3D 动作并硬限幅输出
+        # 3. Z 轴双重阻尼控制器 (防止砸地)
         # ---------------------------------------------------------
-        base_action = np.array([action_2d[0], action_2d[1], az], dtype=np.float32)
-        base_action = np.clip(base_action, -self.u_max, self.u_max)
+        Kp_z = 4.0 
+        Kd_mocap = 2.0
+        Kd_payload = 3.5 
+        az = Kp_z * (target_z - payload_z) - Kd_mocap * mocap_vz - Kd_payload * payload_vz
+        az = np.clip(az, -self.u_max, self.u_max)
+
+        # ---------------------------------------------------------
+        # 4. ✅ 新增：Z 轴旋转 (Yaw) 闭环反馈控制器
+        # ---------------------------------------------------------
+        from scipy.spatial.transform import Rotation as R
+        
+        # MuJoCo 的四元数格式是 [w, x, y, z]，SciPy 期望的是 [x, y, z, w]
+        quat_scipy = [prefab_quat[1], prefab_quat[2], prefab_quat[3], prefab_quat[0]]
+        
+        try:
+            r = R.from_quat(quat_scipy)
+            # zyx 顺序，返回的第一个元素就是绕 Z 轴的欧拉角 (Yaw)
+            current_yaw = r.as_euler('zyx', degrees=False)[0] 
+        except Exception:
+            current_yaw = 0.0 # 出现异常时默认不旋转
+            
+        current_yaw_vel = prefab_angvel[2] # 绕 Z 轴的角速度
+        
+        target_yaw = 0.0 # 目标航向角（套圆柱任务中最好保持 0 以防扭摆）
+        Kp_yaw = 3.0
+        Kd_yaw = 1.0
+        
+        # 计算 Yaw 轴角加速度
+        a_yaw = Kp_yaw * (target_yaw - current_yaw) - Kd_yaw * current_yaw_vel
+        a_yaw = np.clip(a_yaw, -1.0, 1.0) # 旋转速度限幅可以稍微放宽一点
+
+        # ---------------------------------------------------------
+        # 5. 合并为 4D 动作输出
+        # ---------------------------------------------------------
+        action_2d = np.clip(action_2d, -self.u_max, self.u_max)
+        base_action = np.array([action_2d[0], action_2d[1], az, a_yaw], dtype=np.float32)
 
         return base_action

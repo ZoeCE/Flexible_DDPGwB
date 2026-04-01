@@ -10,6 +10,7 @@
     <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
     <material name="red" rgba="0.8 0 0 1"/>
     <material name="steel" rgba="0.6 0.6 0.6 1"/>
+    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>
 
     <mesh name="hollow_cylinder_convex_0"  file="hollow_cylinder_convex_0.stl"/>
     <mesh name="hollow_cylinder_convex_1"  file="hollow_cylinder_convex_1.stl"/>
@@ -82,8 +83,311 @@
     <light pos="1.5 0 1.5" dir="1 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
+    
+    <body name="obstacle_0" pos="0.3994783036386943 0.28451013306688844 0.25">
+      <geom type="cylinder" size="0.015010447751033636 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+
+    
+    <body name="obstacle_1" pos="0.4101102087107209 0.2545289002009352 0.25">
+      <geom type="cylinder" size="0.01493990819244519 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+
+    
+    <body name="obstacle_2" pos="0.27374685554348693 0.42235008208541186 0.25">
+      <geom type="cylinder" size="0.015717280523760754 0.2" pos="0 0 0" material="obstacle" contype="1" conaffinity="1"/>
+    </body>
+
+    
+    <body name="path_pt_0" pos="0.18802957501972617 0.20958899200849007 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_1" pos="0.1680295750197262 0.22958899200849003 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_2" pos="0.1480295750197262 0.22958899200849003 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_3" pos="0.12802957501972617 0.24958899200849005 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_4" pos="0.10802957501972621 0.26958899200849007 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_5" pos="0.08802957501972619 0.2895889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_6" pos="0.08802957501972619 0.3095889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_7" pos="0.06802957501972617 0.32958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_8" pos="0.06802957501972617 0.34958899200849003 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_9" pos="0.048029575019726156 0.36958899200849005 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_10" pos="0.048029575019726156 0.38958899200849006 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_11" pos="0.048029575019726156 0.4095889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_12" pos="0.048029575019726156 0.4295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_13" pos="0.048029575019726156 0.44958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_14" pos="0.048029575019726156 0.46958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_15" pos="0.06802957501972617 0.48958899200849004 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_16" pos="0.06802957501972617 0.5095889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_17" pos="0.06802957501972617 0.5295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_18" pos="0.08802957501972619 0.5495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_19" pos="0.10802957501972621 0.5695889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_20" pos="0.12802957501972617 0.58958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_21" pos="0.1480295750197262 0.60958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_22" pos="0.1680295750197262 0.6295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_23" pos="0.18802957501972617 0.6295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_24" pos="0.2080295750197262 0.6295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_25" pos="0.2280295750197262 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_26" pos="0.24802957501972617 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_27" pos="0.2680295750197262 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_28" pos="0.2880295750197262 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_29" pos="0.3080295750197262 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_30" pos="0.32802957501972624 0.6495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_31" pos="0.34802957501972615 0.6295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_32" pos="0.36802957501972616 0.6295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_33" pos="0.3880295750197262 0.60958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_34" pos="0.4080295750197262 0.60958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_35" pos="0.4280295750197262 0.58958899200849 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_36" pos="0.44802957501972623 0.5695889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_37" pos="0.46802957501972614 0.5495889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_38" pos="0.48802957501972616 0.5295889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_39" pos="0.5080295750197261 0.5095889920084901 1.0">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_40" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_41" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_42" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_43" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_44" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_pt_45" pos="0.5080295750197261 0.5095889920084901 0.5">
+      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>
+    </body>
+
+    
+    <body name="path_start" pos="0.2 0.2 0.47500000000000003">
+      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+    </body>
+
+
+    
+    <body name="path_goal" pos="0.5 0.5 0.47500000000000003">
+      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>
+    </body>
+
     <!--  固定钢筋 -->
-    <body name="rebar_base" pos="-0.2 0.3 0">
+    <body name="rebar_base" pos="0.5 0.5 0">
       <geom type="cylinder" size="0.005 0.03" pos=" 0 0 0.02" material="red" contype="1" conaffinity="1"/>
     </body>
 
@@ -178,8 +482,14 @@
       <connect site1="rope_fl_end" site2="lift_fl"/>
       <connect site1="rope_fr_end" site2="lift_fr"/>
       <connect site1="rope_rl_end" site2="lift_rl"/>
-      <connect site1="rope_rr_end" site2="lift_rr"/>
+      <connect site1="rope_rr_end" site2="lift_rr"/>\
+      <weld body1="link7" body2="mocap" 
+            solimp="0.99 0.99 0.01"
+            solref="0.001 1"
+            relpose="0 0 0.045 1 0 0 0"/>
   </equality>
+
+
 
   <sensor>
     <framepos name="prefab/pos" objtype="site" objname="imu_site"/>
@@ -189,7 +499,7 @@
   </sensor>
 
   <keyframe>
-    <key name="home" qpos="0.955545 0.391462 -2.86463 0.00599717 2.97003 2.37487 7.3179 
+    <key name="home" qpos="1.10805046  0.35488624 -2.97538264  0.11512695  2.40048625  2.3193137 0.64687807 
                                  0.2 0.3 0.3  1 0 0 0"/>
   </keyframe>
 

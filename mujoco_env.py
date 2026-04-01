@@ -13,7 +13,7 @@ class CableRobotEnv:
     def __init__(self, render=False):
         # --- 1. 加载模型 ---
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        xml_path = os.path.join(current_dir, "assets2/demo_fourCable_withSteel_withSensor_cylinder.xml")
+        xml_path = os.path.join(current_dir, "assets/demo_fourCable_withSteel_withSensor_cylinder.xml")
         
         if not os.path.exists(xml_path):
             raise FileNotFoundError(f"XML file not found at: {xml_path}")
@@ -59,7 +59,9 @@ class CableRobotEnv:
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
 
     def reset(self):
-        mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
+        mujoco.mj_resetDataKeyframe(self.model, self.data, 0) ## xyc!: xml中定义的keyframe仅在这里有效
+        self.data.qpos[:7] = np.array([1.10805046, 0.35488624, -2.97538264, 0.11512695, 2.40048625, 2.3193137, 0.64687807]) ## xyc: 设置机械臂初始关节值
+        self.data.qpos[-7:] = np.array([0.2, 0.3, 0.5, 1, 0, 0, 0]) ## xyc: 设置prefab初始位姿
         
         # 1. 随机化目标
         noise_target = np.random.uniform(-0.1, 0.1, size=2)
@@ -435,9 +437,9 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
                  default_start_xy=None, default_target_xy=None,
                  **kwargs):
         current_dir = os.path.dirname(os.path.abspath(__file__))
-        self._assets2_dir = os.path.join(current_dir, "assets2")
+        self._assets_dir = os.path.join(current_dir, "assets")
         base_xml_path = os.path.join(
-            self._assets2_dir,
+            self._assets_dir,
             "demo_fourCable_withSteel_withSensor_cylinder.xml",
         )
         if not os.path.exists(base_xml_path):
@@ -514,7 +516,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             path_points=path_points, start_xy=start_xy, goal_xy=goal_xy,
         )
         # write xml to file
-        fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets2_dir, prefix="obstacles_")
+        fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets_dir, prefix="obstacles_")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(xml_content)
@@ -537,18 +539,35 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
             except Exception:
                 pass
             self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
-            ## xyc: 增加初始化时的预热，检查初始化时的模型是否正确
-            for _ in range(500):
-                mujoco.mj_step(self.model, self.data)
-            self.viewer.sync()
-            # xyc?: 发现此时，机械臂末端并没有跟踪mocap的位置，而是自然掉落，需确认是否是跟踪mocap的控制失效
-            ## xyc: 增加初始化时的预热，检查初始化时的模型是否正确
         try:
             if os.path.exists(path):
                 os.remove(path)
         except Exception:
             pass
         self._temp_xml_path = None
+
+    ## xyc: for debug, print(self._print_state())
+    def _print_qpos_name(self):
+        for idx in range(self.model.njnt):  # 遍历所有关节
+            # 拿到关节名字
+            jnt_name = mujoco.mj_id2name(self.model, mujoco.mjtObj.mjOBJ_JOINT, idx)
+            # 拿到该关节在 qpos 中的起始地址
+            qpos_idx = self.model.jnt_qposadr[idx]
+            # 不同关节类型占用的 qpos 长度不同
+            jnt_type = self.model.jnt_type[idx]
+            if jnt_type == mujoco.mjtJoint.mjJNT_FREE:   # free关节: 7个数
+                print(f"qpos[{qpos_idx} ~ {qpos_idx+6}] = {jnt_name} (free, 7维)")
+            elif jnt_type == mujoco.mjtJoint.mjJNT_BALL: # 球关节: 4个数
+                print(f"qpos[{qpos_idx} ~ {qpos_idx+3}] = {jnt_name} (ball, 4维)")
+            else:  # 旋转/滑动关节: 1个数
+                print(f"qpos[{qpos_idx}] = {jnt_name} (1维)")
+
+    def _print_state(self):
+        print(f"Robot state: {self.data.qpos[:7]}")
+        print(f"MocapPos : {self.data.mocap_pos}")
+        print(f"EEPos : {self.data.xpos[self.model.body('link7').id]}")
+        print(f"EEQuat : {self.data.xquat[self.model.body('link7').id]}")
+    ## xyc: for debug, print(self._print_state())
 
     def reset(self):
         start_xy = self.default_start_xy.copy()
@@ -608,7 +627,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         
         # [核心修改 3]：预热完毕后获取实际悬停高度，构建真正的 3D 轨迹！
         # payload_z_cruise = self.data.body('prefab').xpos[2] ## xyc: confirm z-value of planned path
-        payload_z_cruise = 0.35 ## xyc?: confirm z-value of planned path, 固定一个值方便测试
+        payload_z_cruise = 0.35 ## xyc!: confirm z-value of planned path, 固定一个值方便测试
         
         true_path_3d = []
         # 前半段：保持悬停高度的平移
