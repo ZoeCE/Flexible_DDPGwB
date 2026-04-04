@@ -189,13 +189,18 @@ class CableRobotEnvWithObstacles:
         # ======================================================================
         current_dir   = os.path.dirname(os.path.abspath(__file__))
         self._assets_dir = os.path.join(current_dir, "assets")
+
+        # Auto-regenerate rope XML from config before loading
+        from assets.generate_four_cables_with_plate import main as generate_rope_xml
+        generate_rope_xml()
+
         base_xml_path = os.path.join(
             self._assets_dir,
             "demo_fourCable_withSteel_withSensor_cylinder.xml"
         )
         if not os.path.exists(base_xml_path):
             raise FileNotFoundError(f"Base XML not found: {base_xml_path}")
- 
+
         with open(base_xml_path, "r", encoding="utf-8") as f:
             self._base_xml_content = f.read()
  
@@ -234,7 +239,10 @@ class CableRobotEnvWithObstacles:
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
         if self.render_mode:
-            self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            kw = {}
+            if hasattr(self, '_key_callback') and self._key_callback is not None:
+                kw['key_callback'] = self._key_callback
+            self.viewer = mujoco.viewer.launch_passive(self.model, self.data, **kw)
  
     # ==========================================================================
     # 辅助：重新解析 MuJoCo ID（每次重载 XML 后调用）
@@ -250,7 +258,10 @@ class CableRobotEnvWithObstacles:
  
         self.prefab_jnt_id  = self.model.body("prefab").jntadr[0]
         self.prefab_body_id = self.model.body("prefab").id
-        self.target_body_id = self.model.body("rebar_base").id
+        self.target_body_id = self.model.body("target").id
+        self.ee_site_id     = mujoco.mj_name2id(
+            self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site"
+        )
  
     # ==========================================================================
     # 一站式场景生成器（静态方法，无需实例）
@@ -456,9 +467,9 @@ class CableRobotEnvWithObstacles:
         # 插入 obstacle 材质（只在有障碍物时插入）
         if obstacles:
             xml = xml.replace(
-                '    <material name="steel" rgba="0.6 0.6 0.6 1"/>',
-                '    <material name="steel" rgba="0.6 0.6 0.6 1"/>\n'
-                '    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>',
+                '  </asset>',
+                '    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>\n'
+                '  </asset>',
                 1
             )
  
@@ -505,10 +516,10 @@ class CableRobotEnvWithObstacles:
             replacement, 1
         )
  
-        # 移动目标重物基座 rebar_base 到真实终点
+        # 移动目标标记到真实终点
         xml = re.sub(
-            r'<body name="rebar_base" pos="[^"]+">',
-            f'<body name="rebar_base" pos="{target_xy[0]} {target_xy[1]} 0">',
+            r'<body name="target" pos="[^"]+">',
+            f'<body name="target" pos="{target_xy[0]} {target_xy[1]} 0">',
             xml, count=1
         )
  
@@ -522,150 +533,151 @@ class CableRobotEnvWithObstacles:
     # reset()
     # ==========================================================================
     def reset(self):
-        """
-        全方位重置环境：一站式生成新场景、重载 MuJoCo 模型、对齐物理状态。
-        """
         rng = self._obstacle_rng
- 
-        # ======================================================================
-        # 1. 确定本次回合的起点与终点
-        # ======================================================================
-        noise_range = self.init_position_range
-        start_x = self.default_start_xy[0] + rng.uniform(-noise_range, noise_range)
-        start_y = self.default_start_xy[1] + rng.uniform(-noise_range, noise_range)
-        start_xy  = np.array([start_x, start_y])
-        target_xy = self.default_target.copy()   # 子类沿用：目标点不加噪声
-        self.target_pos = target_xy              # 供后续 _get_obs / _compute_reward 使用
- 
-        # ======================================================================
-        # 2. 一站式场景生成
-        # ======================================================================
-        # [BUG-3 修复] 合并 scene + planning 两个子配置，确保函数可以取到所有需要的键
+
+        # === 1. Task: start / target positions ================================
+        noise = self.init_position_range
+        start_x = self.default_start_xy[0] + rng.uniform(-noise, noise)
+        start_y = self.default_start_xy[1] + rng.uniform(-noise, noise)
+        start_xy = np.array([start_x, start_y])
+        target_xy = self.default_target.copy()
+        self.target_pos = target_xy
+
+        # === 2. Scene: obstacles + 2D path + 3D trajectory + XML ==============
         scene_plan_cfg = {**self.config["scene"], **self.config["planning"]}
- 
-        # [BUG-2 修复] 通过类名调用 @staticmethod，消除 NameError
         scene_data = CableRobotEnvWithObstacles.generate_scene_and_trajectory(
-            start_xy        = start_xy,
-            target_xy       = target_xy,
-            base_xml_content = self._base_xml_content,
-            scene_plan_config = scene_plan_cfg,
-            rng             = rng,
+            start_xy=start_xy, target_xy=target_xy,
+            base_xml_content=self._base_xml_content,
+            scene_plan_config=scene_plan_cfg, rng=rng,
         )
-        self._obstacles   = scene_data["obstacles"]
+        self._obstacles = scene_data["obstacles"]
         self._planned_path = scene_data["path_3d"]
- 
-        # ======================================================================
-        # 3. 写入临时 XML 文件并重载 MuJoCo 模型
-        # ======================================================================
-        # [IMPROVE-1] 先完成模型加载，成功后再删除临时文件，避免加载期间文件被删
-        fd, path = tempfile.mkstemp(
-            suffix=".xml", dir=self._assets_dir, prefix="obstacles_"
-        )
+
+        # === 3. Reload MuJoCo model from generated XML ========================
+        fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets_dir, prefix="obstacles_")
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(scene_data["xml_content"])
- 
-            # 加载含障碍物的新模型
             self.model = mujoco.MjModel.from_xml_path(path)
-            self.data  = mujoco.MjData(self.model)
+            self.data = mujoco.MjData(self.model)
             self.model.opt.timestep = self.physics_dt
- 
-            # [IMPROVE-2] 重载后重新计算 sim_steps，防止外部修改 physics_dt 时失效
             self.sim_steps = int(self.dt / self.physics_dt)
- 
-            # 重新绑定 ID（XML 变化后 ID 可能改变）
             self._reresolve_ids()
- 
-            # 渲染器随模型更新
-            if self.render_mode and self.viewer is not None:
-                try:
-                    self.viewer.close()
-                except Exception:
-                    pass
-                self.viewer = mujoco.viewer.launch_passive(self.model, self.data)
+            if self.render_mode:
+                if self.viewer is not None:
+                    try: self.viewer.close()
+                    except Exception: pass
+                kw = {}
+                if hasattr(self, '_key_callback') and self._key_callback is not None:
+                    kw['key_callback'] = self._key_callback
+                self.viewer = mujoco.viewer.launch_passive(self.model, self.data, **kw)
         finally:
-            # 模型加载完成后删除临时文件（无论成功与否都清理）
             try:
-                if os.path.exists(path):
-                    os.remove(path)
-            except Exception:
-                pass
- 
-        # ======================================================================
-        # 4. 物理状态重置（严格对齐原父类逻辑）
-        # ======================================================================
-        # xyc!: xml中定义的keyframe仅在这里有效
-        mujoco.mj_resetDataKeyframe(self.model, self.data, 0)
- 
-        # xyc: 设置机械臂初始关节值
-        self.data.qpos[:7]  = np.array(self.config["reset"]["init_qpos_arm"])
-        # xyc: 设置prefab初始位姿
-        self.data.qpos[-7:] = np.array(self.config["reset"]["init_qpos_prefab"])
- 
-        # ======================================================================
-        # 5. 坐标对齐（目标体 + 负载 + 动捕点）
-        # ======================================================================
-        # 对齐目标重物基座与随机化后的终点
+                if os.path.exists(path): os.remove(path)
+            except Exception: pass
+
+        # === 4. Set qpos: all joints to a clean initial state =================
+        # Keyframe only covers arm joints (7 values); everything else is zeroed
+        # including ball joint quaternions → invalid. So we skip keyframe and
+        # build the full qpos ourselves.
+        self.data.qpos[:] = 0.0
+        self.data.qvel[:] = 0.0
+
+        # 4a. All ball joints → identity quaternion [1,0,0,0]
+        # 4b. All free joints → identity quaternion
+        for j in range(self.model.njnt):
+            adr = self.model.jnt_qposadr[j]
+            jtype = self.model.jnt_type[j]
+            if jtype == mujoco.mjtJoint.mjJNT_BALL:
+                self.data.qpos[adr:adr + 4] = [1, 0, 0, 0]
+            elif jtype == mujoco.mjtJoint.mjJNT_FREE:
+                self.data.qpos[adr + 3:adr + 7] = [1, 0, 0, 0]
+
+        # 4c. Prefab free joint: position from config + start_xy, upright orientation
+        init_prefab = np.array(self.config["reset"]["init_qpos_prefab"], dtype=np.float64)
+        init_prefab[0] = start_x
+        init_prefab[1] = start_y
+        self.data.qpos[-7:] = init_prefab
+        prefab_z = init_prefab[2]
+
+        # 4d. Arm joints: IK or default
+        if self.config["reset"].get("ik_enabled", False):
+            self.data.qpos[:7] = self._solve_ik(
+                target_xy=np.array([start_x, start_y]), prefab_z=prefab_z)
+        else:
+            self.data.qpos[:7] = np.array(self.config["reset"]["init_qpos_arm"])
+
+        # 4e. Target body position
         self.model.body_pos[self.target_body_id][:2] = target_xy
- 
-        # xyc: 重新确定prefab的x/y-value
-        self.data.body('prefab').xpos[0] = start_x
-        self.data.body('prefab').xpos[1] = start_y
- 
-        # 动捕点 XY 对齐到负载初始位置，Z 强制为配置高度
-        self.data.mocap_pos[self.mocap_id][0] = start_x
-        self.data.mocap_pos[self.mocap_id][1] = start_y
-        self.data.mocap_pos[self.mocap_id][2] = self.config["reset"]["mocap_init_z"]
- 
-        # [新增] 初始化 Mocap 偏航姿态四元数
-        self.data.mocap_quat[self.mocap_id] = self.start_quat_mocap
- 
-        # ======================================================================
-        # 6. 物理预热（让绳索自然垂落稳定）
-        # ======================================================================
+
+        # === 5. Sync derived quantities & align mocap to link7 ================
+        ee_body_id = self.model.body("link7").id
+        mujoco.mj_forward(self.model, self.data)
+        self.data.mocap_pos[self.mocap_id] = self.data.xpos[ee_body_id].copy()
+        self.data.mocap_quat[self.mocap_id] = self.data.xquat[ee_body_id].copy()
+
+        # === 6. Warmup: let ropes settle, lock arm + prefab + mocap ===========
+        arm_qpos_hold = self.data.qpos[:7].copy()
+        prefab_qpos_hold = self.data.qpos[-7:].copy()
+        mocap_pos_hold = self.data.mocap_pos[self.mocap_id].copy()
+        mocap_quat_hold = self.data.mocap_quat[self.mocap_id].copy()
+
         for _ in range(self.config["reset"]["warmup_steps"]):
+            # Lock everything except rope ball joints
+            self.data.qpos[:7] = arm_qpos_hold
+            self.data.qvel[:7] = 0.0
+            self.data.qpos[-7:] = prefab_qpos_hold
+            self.data.qvel[-6:] = 0.0
+            self.data.mocap_pos[self.mocap_id] = mocap_pos_hold
+            self.data.mocap_quat[self.mocap_id] = mocap_quat_hold
             mujoco.mj_step(self.model, self.data)
- 
-        # ======================================================================
-        # 7. 内部状态追踪变量初始化
-        # ======================================================================
+
+        # Final cleanup: restore exact state after last mj_step drift
+        self.data.qpos[:7] = arm_qpos_hold
+        self.data.qvel[:7] = 0.0
+        self.data.qpos[-7:] = prefab_qpos_hold
+        self.data.qvel[-6:] = 0.0
+        self.data.mocap_pos[self.mocap_id] = mocap_pos_hold
+        self.data.mocap_quat[self.mocap_id] = mocap_quat_hold
+        mujoco.mj_forward(self.model, self.data)
+
+        # === 7. Initialize tracking state =====================================
         self.current_step = 0
- 
-        # 平移状态：从预热后的真实 mocap 位置出发
-        self.current_mocap_pos = self.data.mocap_pos[self.mocap_id].copy()
+        self.current_mocap_pos = mocap_pos_hold.copy()
         self.current_mocap_vel = np.zeros(3)
- 
-        # 旋转状态：从零开始（对应 start_quat_mocap 方向）
-        self.current_mocap_yaw     = 0.0
+        self._base_mocap_quat = mocap_quat_hold.copy()
+        self.current_mocap_yaw = 0.0
         self.current_mocap_yaw_vel = 0.0
- 
-        # 延迟队列清零（reset 后动作历史无效）
+
         self.action_queue.clear()
         for _ in range(self.latency_steps):
             self.action_queue.append(np.zeros(self.action_dim))
- 
-        # 路径追踪状态机
+
         self.current_wp_idx = 0
-        self.reached_final  = False
-        self.last_dist      = None
-        self.last_wp_idx    = -1   # [BUG-9 修复] 清零航点切换检测变量
- 
-        # ======================================================================
-        # 8. 计算并返回初始观测
-        # ======================================================================
+        self.reached_final = False
+        self.last_dist = None
+        self.last_wp_idx = -1
+
+        # === 8. Debug output ==================================================
+        ee_pos = self.data.site_xpos[self.ee_site_id]
+        prefab_pos = self.data.body('prefab').xpos
+        rope_len = self.config["rope"]["num_segments"] * self.config["rope"]["segment_length"]
+        print(f"[RESET] EE:     {np.round(ee_pos, 4)}")
+        print(f"[RESET] Prefab: {np.round(prefab_pos, 4)}")
+        print(f"[RESET] Mocap:  {np.round(mocap_pos_hold, 4)}  quat: {np.round(mocap_quat_hold, 4)}")
+        print(f"[RESET] dz={ee_pos[2] - prefab_pos[2]:.4f}  dxy={np.linalg.norm(ee_pos[:2] - prefab_pos[:2]):.4f}  rope={rope_len:.4f}")
+
+        # === 9. Viewer sync + return obs ======================================
+        if self.render_mode and self.viewer is not None:
+            self.viewer.sync()
+
         obs = self._get_obs()
- 
-        # 计算到第一个航点的初始距离（供第一步的 progress reward 使用）
         if self._planned_path is not None and len(self._planned_path) > 0:
-            # xyc: 重新确定prefab的z-value，解决第一帧reset问题
-            payload_z   = self.data.body('prefab').xpos[2]
+            payload_z = self.data.body('prefab').xpos[2]
             current_pos = np.array([obs[4], obs[5], payload_z])
-            target_wp   = self._planned_path[self.current_wp_idx]
-            self.last_dist  = np.linalg.norm(current_pos - target_wp)
-            self.last_wp_idx = self.current_wp_idx
-        else:
-            self.last_dist = None
- 
+            self.last_dist = np.linalg.norm(current_pos - self._planned_path[0])
+            self.last_wp_idx = 0
+
         return obs
  
     # ==========================================================================
@@ -721,11 +733,14 @@ class CableRobotEnvWithObstacles:
         # 更新平移动捕点
         self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
  
-        # 更新旋转动捕点：将偏航角 yaw 转为四元数 q = [cos(yaw/2), 0, 0, sin(yaw/2)]
+        # 更新旋转动捕点：yaw 增量叠加到 EE 基础朝向上
+        # q_yaw = [cos(yaw/2), 0, 0, sin(yaw/2)]  (Z 轴旋转)
+        # q_final = q_yaw * q_base  (先基础朝向，再叠加 yaw)
         half_yaw = self.current_mocap_yaw / 2.0
-        self.data.mocap_quat[self.mocap_id] = np.array([
-            np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)
-        ])
+        q_yaw = np.array([np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)])
+        q_final = np.zeros(4)
+        mujoco.mju_mulQuat(q_final, q_yaw, self._base_mocap_quat)
+        self.data.mocap_quat[self.mocap_id] = q_final
  
         # 按控制频率循环执行物理步（例如 10Hz 控制 / 500Hz 物理 = 50 次 mj_step）
         for _ in range(self.sim_steps):
@@ -982,6 +997,87 @@ class CableRobotEnvWithObstacles:
             dtype=np.float32
         )
  
+    # ==========================================================================
+    # IK 求解：使末端在指定位置上方、垂直朝下
+    # ==========================================================================
+    def _solve_ik(self, target_xy, prefab_z):
+        """
+        雅可比伪逆 IK：求解机械臂 7 关节角，使 attachment_site 到达
+        (target_xy[0], target_xy[1], prefab_z + height_above)，姿态垂直朝下。
+
+        返回: np.ndarray (7,) 关节角；若未收敛则返回 config 中的默认值。
+        """
+        cfg_ik = self.config["reset"]
+        cfg_rope = self.config["rope"]
+        # IK 高度差 = 绳长 + hook_attachment 偏移 (0.045m)
+        # 实际链: EE → hook_attachment(0.045m) → rope → prefab
+        rope_length = cfg_rope["num_segments"] * cfg_rope["segment_length"]
+        hook_offset_z = 0.045  # hook_attachment body pos in link7 local Z
+        height = rope_length + hook_offset_z
+        tgt_quat = np.array(cfg_ik["ik_target_quat"], dtype=np.float64)
+        max_iter = cfg_ik["ik_max_iter"]
+        tol_pos  = cfg_ik["ik_tol_pos"]
+        tol_rot  = cfg_ik["ik_tol_rot"]
+
+        target_pos = np.array([target_xy[0], target_xy[1], prefab_z + height])
+
+        # 在独立的 data 副本上求解，避免污染主仿真状态
+        data_ik = mujoco.MjData(self.model)
+        n_joints = 7
+        site_id = self.ee_site_id
+
+        # 初始猜测：优先使用上次 IK 成功结果（热启动），否则用默认值
+        if hasattr(self, '_last_ik_qpos') and self._last_ik_qpos is not None:
+            data_ik.qpos[:n_joints] = self._last_ik_qpos.copy()
+        else:
+            data_ik.qpos[:n_joints] = np.array(
+                self.config["reset"]["init_qpos_arm"], dtype=np.float64
+            )
+
+        jacp = np.zeros((3, self.model.nv))
+        jacr = np.zeros((3, self.model.nv))
+        step_pos, step_rot = 0.5, 0.3
+
+        converged = False
+        for i in range(max_iter):
+            mujoco.mj_forward(self.model, data_ik)
+
+            pos_err = target_pos - data_ik.site_xpos[site_id]
+            # 姿态误差：四元数差 → 角轴
+            q_cur = np.zeros(4)
+            mujoco.mju_mat2Quat(q_cur, data_ik.site_xmat[site_id])
+            q_cur_inv = q_cur.copy()
+            q_cur_inv[1:] *= -1
+            q_err = np.zeros(4)
+            mujoco.mju_mulQuat(q_err, tgt_quat, q_cur_inv)
+            if q_err[0] < 0:
+                q_err *= -1
+            rot_err = 2.0 * q_err[1:]
+
+            if np.linalg.norm(pos_err) < tol_pos and np.linalg.norm(rot_err) < tol_rot:
+                converged = True
+                break
+
+            mujoco.mj_jacSite(self.model, data_ik, jacp, jacr, site_id)
+            Jp = jacp[:, :n_joints]
+            Jr = jacr[:, :n_joints]
+            dq = step_pos * Jp.T @ pos_err + step_rot * Jr.T @ rot_err
+            data_ik.qpos[:n_joints] += dq
+
+            # 关节限位裁剪
+            for j in range(n_joints):
+                lo, hi = self.model.jnt_range[j]
+                if lo < hi:
+                    data_ik.qpos[j] = np.clip(data_ik.qpos[j], lo, hi)
+
+        if not converged:
+            print(f"[IK] NOT converged (iter={max_iter}), using default qpos")
+            return np.array(self.config["reset"]["init_qpos_arm"], dtype=np.float64)
+        result = data_ik.qpos[:n_joints].copy()
+        self._last_ik_qpos = result
+        print(f"[IK] Converged! qpos={np.round(result, 4)}")
+        return result
+
     # ==========================================================================
     # 辅助调试工具（保留自旧版）
     # ==========================================================================

@@ -113,14 +113,70 @@ DEFAULT_CONFIG = {
     # ==========================================
     "reset": {
         # xyc: 机械臂初始关节角（7 个 revolute 关节，单位：rad）
+        # 由 IK 求解器自动计算：末端在 prefab 上方、垂直朝下
         "init_qpos_arm": [
-            1.10805046, 0.35488624, -2.97538264,
-            0.11512695, 2.40048625,  2.3193137,  0.64687807
+            -0.71972016, 0.29057466, -1.10685585,
+            1.53851657, 2.87907443, 1.73055121, -1.85194252
         ],
         # xyc: prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
-        "init_qpos_prefab": [0.2, 0.3, 0.5, 1.0, 0.0, 0.0, 0.0],
+        "init_qpos_prefab": [0.2, 0.3, 0.2, 1.0, 0.0, 0.0, 0.0],
  
         "warmup_steps": 50,    # 物理引擎预热步数（让绳索自然垂落稳定）
         "mocap_init_z": 1.0,   # 动捕点初始强制 Z 高度（单位：米）
+
+        # IK 求解参数：reset 时自动求解机械臂关节角，使末端在 prefab 正上方垂直朝下
+        "ik_enabled": True,              # 是否启用自动 IK（False 则使用 init_qpos_arm）
+        # NOTE: ik_height_above_prefab 应与 rope.total_length 一致
+        #       (= rope.num_segments * rope.segment_length)
+        "ik_height_above_prefab": 0.2,   # 末端在 prefab 上方的高度 (m)
+        "ik_target_quat": [0.0, 1.0, 0.0, 0.0],  # 末端目标姿态四元数 (wxyz)，绕X轴180°=朝下
+        "ik_max_iter": 5000,             # IK 最大迭代次数
+        "ik_tol_pos": 1e-4,              # 位置收敛容差 (m)
+        "ik_tol_rot": 1e-3,              # 姿态收敛容差 (rad)
+    },
+
+    # ==========================================
+    # 10. Rope Generation
+    # ==========================================
+    # ==========================================
+    # 10. Prefab (payload) geometry
+    # ==========================================
+    "prefab": {
+        "shape": "box",                      # "box" or "cylinder"
+        # box params: half-extents [x, y, z]
+        "box_half_size": [0.05, 0.05, 0.1],
+        "cylinder_radius": 0.05,             # only used if shape="cylinder"
+        "cylinder_half_height": 0.1,         # only used if shape="cylinder"
+        "mass": 1.0,
+        # lift site offset from prefab center (z = top of shape)
+        "lift_site_offset": 0.1,             # z-offset for lift sites
+        "lift_site_spread": 0.05,            # xy-offset for lift site corners
+    },
+
+    # ==========================================
+    # 11. Target (visual goal marker, no collision)
+    # ==========================================
+    "target": {
+        "shape": "box",                      # "box" or "cylinder" (matches prefab)
+        # box params
+        "box_half_size": [0.05, 0.05, 0.1],
+        "cylinder_radius": 0.05,
+        "cylinder_half_height": 0.1,
+        "rgba": [0.8, 0.0, 0.0, 0.4],       # semi-transparent red
+    },
+
+    # ==========================================
+    # 12. Rope Generation
+    # ==========================================
+    "rope": {
+        "num_segments":   20,      # capsule segments per rope
+        "segment_length": 0.02,    # length of each segment (m), total = num * length
+        "damping":        0.02,    # ball joint damping
+        "capsule_radius": 0.004,   # visual/collision radius (m)
+        "segment_mass":   0.01,    # mass per segment (kg)
+        # plate geometry (hook_attachment body)
+        "plate_half_size": [0.05, 0.05, 0.01],  # box half-extents [x, y, z]
+        "plate_mass":      0.1,                   # plate mass (kg)
+        "hook_offset":     0.05,                   # hook site offset from plate center (m)
     },
 }

@@ -250,15 +250,19 @@ class NMPCTrajectoryTracker:
         q_x, q_y = full_obs[4], full_obs[5] 
         v_qx, v_qy = full_obs[6], full_obs[7]
         
-        # ❗因为末尾增加了7维姿态数据，Z轴相关数据的索引必须往前推7位
-        mocap_z    = full_obs[-11]
-        mocap_vz   = full_obs[-10]
-        payload_z  = full_obs[-9]
-        payload_vz = full_obs[-8] 
-        
-        # 提取新加入的姿态数据
-        prefab_quat   = full_obs[-7:-3] # [w, x, y, z]
-        prefab_angvel = full_obs[-3:]   # [wx, wy, wz]
+        # 新版 mujoco_env_new obs 末尾 8 维:
+        # [-8] mocap_z, [-7] mocap_vz, [-6] payload_z, [-5] payload_vz,
+        # [-4] mocap_yaw, [-3] mocap_yaw_vel, [-2] payload_yaw, [-1] payload_yaw_vel
+        mocap_z    = full_obs[-8]
+        mocap_vz   = full_obs[-7]
+        payload_z  = full_obs[-6]
+        payload_vz = full_obs[-5]
+
+        # 旋转状态（yaw 标量，非四元数）
+        current_yaw     = full_obs[-4]   # mocap_yaw
+        current_yaw_vel_obs = full_obs[-3]   # mocap_yaw_vel
+        # payload_yaw = full_obs[-2]  # 占位，暂未使用
+        # payload_yaw_vel = full_obs[-1]  # 占位，暂未使用
 
         # ---------------------------------------------------------
         # 2. 目标点与步进逻辑
@@ -303,29 +307,15 @@ class NMPCTrajectoryTracker:
         az = np.clip(az, -self.u_max, self.u_max)
 
         # ---------------------------------------------------------
-        # 4. ✅ 新增：Z 轴旋转 (Yaw) 闭环反馈控制器
+        # 4. Z 轴旋转 (Yaw) 闭环反馈控制器
+        #    新版 obs 直接提供 yaw 标量，无需从四元数转换
         # ---------------------------------------------------------
-        from scipy.spatial.transform import Rotation as R
-        
-        # MuJoCo 的四元数格式是 [w, x, y, z]，SciPy 期望的是 [x, y, z, w]
-        quat_scipy = [prefab_quat[1], prefab_quat[2], prefab_quat[3], prefab_quat[0]]
-        
-        try:
-            r = R.from_quat(quat_scipy)
-            # zyx 顺序，返回的第一个元素就是绕 Z 轴的欧拉角 (Yaw)
-            current_yaw = r.as_euler('zyx', degrees=False)[0] 
-        except Exception:
-            current_yaw = 0.0 # 出现异常时默认不旋转
-            
-        current_yaw_vel = prefab_angvel[2] # 绕 Z 轴的角速度
-        
-        target_yaw = 0.0 # 目标航向角（套圆柱任务中最好保持 0 以防扭摆）
+        target_yaw = 0.0
         Kp_yaw = 3.0
         Kd_yaw = 1.0
-        
-        # 计算 Yaw 轴角加速度
-        a_yaw = Kp_yaw * (target_yaw - current_yaw) - Kd_yaw * current_yaw_vel
-        a_yaw = np.clip(a_yaw, -1.0, 1.0) # 旋转速度限幅可以稍微放宽一点
+
+        a_yaw = Kp_yaw * (target_yaw - current_yaw) - Kd_yaw * current_yaw_vel_obs
+        a_yaw = np.clip(a_yaw, -1.0, 1.0)
 
         # ---------------------------------------------------------
         # 5. 合并为 4D 动作输出

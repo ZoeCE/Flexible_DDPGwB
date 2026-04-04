@@ -1,21 +1,21 @@
 # ==========================================
-# 1. 训练权重与模型存储 (Training Weights)
+# 1. Training weights & experiment outputs
 # ==========================================
-saves/              # 忽略所有训练产生的网络权重文件夹
-*.pt                # 预防性忽略 PyTorch 模型文件
-*.pth               # 预防性忽略 PyTorch 权重文件
-*.ckpt              # 预防性忽略 Lightning 或其他检查点文件
+saves/
+*.pt
+*.pth
+*.ckpt
 
 # ==========================================
-# 2. 训练监控与日志 (ML Monitoring & Logs)
+# 2. ML monitoring & logs
 # ==========================================
-wandb/              # 忽略 Weights & Biases 产生的本地日志
-logs/               # 忽略可能生成的 Tensorboard 或自定义日志
-results/            # 忽略实验结果输出文件夹
-MUJOCO_LOG.TXT      # 忽略 MuJoCo 引擎自动生成的物理报错日志
+wandb/
+logs/
+results/
+MUJOCO_LOG.TXT
 
 # ==========================================
-# 3. Python 编译缓存 (Python Caches)
+# 3. Python caches
 # ==========================================
 __pycache__/
 *.py[cod]
@@ -23,19 +23,33 @@ __pycache__/
 .pytest_cache/
 
 # ==========================================
-# 4. 编辑器与 IDE (Editors & IDEs)
+# 4. IDE & editor configs
 # ==========================================
-.vscode/            # 忽略 VS Code 项目配置
-.idea/              # 忽略 PyCharm 项目配置
+.vscode/
+.idea/
 *.swp
 *.swo
 
 # ==========================================
-# 5. 虚拟环境与系统文件 (Environment & OS)
+# 5. AI assistant chat history
+# ==========================================
+.specstory/
+.claude/
+.cursorindexingignore
+
+# ==========================================
+# 6. Auto-generated XML (reproducible from scripts + config)
+# ==========================================
+assets/iiwa14_four_cables_with_plate.xml
+assets/obstacles_*.xml
+assets/demo_fourCable_withSteel_withSensor_cylinder_obstacles.xml
+
+# ==========================================
+# 7. Virtual environment & OS files
 # ==========================================
 venv/
 env/
 .env
 .venv/
-.DS_Store           # macOS 系统文件
-Thumbs.db           # Windows 缩略图缓存
+.DS_Store
+Thumbs.db

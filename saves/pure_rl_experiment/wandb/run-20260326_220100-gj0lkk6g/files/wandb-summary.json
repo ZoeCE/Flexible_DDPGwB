@@ -1,1 +1,0 @@
-{"reward/episode":-12.606479038399648,"loss/actor":2.2169079780578613,"_wandb":{"runtime":3049},"steps/episode":150,"explore/noise_sigma":0.03241426666666668,"reward/avg20":-11.623772130008028,"_step":3999,"_runtime":3049.122331951,"frames_total":506894,"loss/critic":0.18304254114627838,"loss/behavior_clone":0,"_timestamp":1.7745367353115537e+09,"steps/avg20":141.05}

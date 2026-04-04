@@ -8,7 +8,8 @@ import sys
 from ipdb import set_trace as xxxx
 
 # 引入环境和控制器
-from mujoco_env import CableRobotEnv, CableRobotEnvWithObstacles
+from mujoco_env import CableRobotEnv
+from mujoco_env_new import CableRobotEnvWithObstacles
 from nmpc_controller import NMPCController, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
 from agent import FastActor 
@@ -120,24 +121,35 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                        default_start_xy=None, default_target_xy=None, device_id=0):
     """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCTrajectoryTracker。"""
     
-    # 严格保留原有环境参数
-    env = CableRobotEnvWithObstacles(
-        render=render,
-        latency_steps=1,
-        force_noise_level=0.08,
-        control_freq_hz=10,
-        init_velocity_scale=0.08,
-        init_position_range=0.00,
-        n_obstacles=n_obstacles,
-        obstacle_radius_range=(0.01, 0.02),
-        path_width=0.12,
-        obstacle_seed=obstacle_seed,
-        default_start_xy=default_start_xy or [0.2, 0.2],
-        default_target_xy=default_target_xy or [0.5, 0.5],
-        payload_radius=payload_radius,
-        planning_margin=planning_margin,
-        planning_grid_res=planning_grid_res,
-    )
+    # 通过 config dict 覆盖默认配置
+    test_config = {
+        "sim": {
+            "render": render,
+            "control_freq_hz": 10,
+        },
+        "task": {
+            "default_start_xy": default_start_xy or [0.2, 0.2],
+            "default_target_xy": default_target_xy or [0.5, 0.5],
+            "init_position_range": 0.00,
+            "init_velocity_scale": 0.08,
+        },
+        "scene": {
+            "n_obstacles": n_obstacles,
+            "radius_range": (0.01, 0.02),
+            "path_width": 0.12,
+            "seed": obstacle_seed,
+        },
+        "noise": {
+            "latency_steps": 1,
+            "force_noise_level": 0.08,
+        },
+        "planning": {
+            "payload_radius": payload_radius,
+            "planning_margin": planning_margin,
+            "planning_grid_res": planning_grid_res,
+        },
+    }
+    env = CableRobotEnvWithObstacles(config=test_config)
 
     actor_model = None
     nmpc_controller = None
@@ -178,6 +190,9 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
     
     for ep in range(n_episodes):
         obs = env.reset()
+        if render:
+            print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
+            input()
         step = 0
         episode_collision = False
         target_pos = env.target_pos # 获取绝对终点
@@ -210,8 +225,9 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 current_wp = getattr(env, 'current_wp_idx', None)
                 action = nmpc_controller.get_tracking_action(obs, env_wp_idx=current_wp)
             
-            # === 2. 环境推演 ===
-            next_obs, reward, done, success = env.step(action)
+            # === 2. 环境推演 (新版返回 5 值: obs, reward, done, truncated, info) ===
+            next_obs, reward, done, _, info = env.step(action)
+            success = info.get("is_success", False)
             obs = next_obs
             step += 1
             
@@ -240,12 +256,123 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
     print(f"Time Elapsed:   {end_time - start_time:.2f}s")
     print("="*50 + "\n")
 
+def run_manual(n_obstacles=3, obstacle_seed=42, default_start_xy=None,
+               default_target_xy=None, payload_radius=0.10,
+               planning_margin=0.10, planning_grid_res=0.02):
+    """Manual keyboard control mode for debugging."""
+    import mujoco
+
+    test_config = {
+        "sim": {"render": True, "control_freq_hz": 10},
+        "task": {
+            "default_start_xy": default_start_xy or [0.2, 0.2],
+            "default_target_xy": default_target_xy or [0.5, 0.5],
+            "init_position_range": 0.00,
+            "init_velocity_scale": 0.08,
+        },
+        "scene": {
+            "n_obstacles": n_obstacles,
+            "radius_range": (0.01, 0.02),
+            "path_width": 0.12,
+            "seed": obstacle_seed,
+        },
+        "noise": {"latency_steps": 1, "force_noise_level": 0.08},
+        "planning": {
+            "payload_radius": payload_radius,
+            "planning_margin": planning_margin,
+            "planning_grid_res": planning_grid_res,
+        },
+    }
+    env = CableRobotEnvWithObstacles(config=test_config)
+
+    # Shared state for keyboard callback
+    key_state = {
+        "paused": True,  # start paused after reset
+        "move": np.zeros(4),  # [ax, ay, az, yaw] accumulator
+    }
+    MOVE_STEP = 0.3  # acceleration magnitude per key
+
+    def key_callback(keycode):
+        # GLFW key codes - use arrow keys + numpad to avoid MuJoCo viewer conflicts
+        KEY_SPACE = 32
+        KEY_RIGHT = 262; KEY_LEFT = 263  # X axis
+        KEY_UP = 264; KEY_DOWN = 265     # Y axis
+        KEY_PERIOD = 46; KEY_COMMA = 44  # Z axis: ,=down .=up
+        KEY_LBRACKET = 91; KEY_RBRACKET = 93  # yaw: [=CCW ]=CW
+
+        if keycode == KEY_SPACE:
+            key_state["paused"] = not key_state["paused"]
+            status = "PAUSED" if key_state["paused"] else "RUNNING"
+            print(f"  [{status}]")
+            return
+
+        m = key_state["move"]
+        if keycode == KEY_UP:        m[1] += MOVE_STEP   # +Y
+        elif keycode == KEY_DOWN:    m[1] -= MOVE_STEP   # -Y
+        elif keycode == KEY_RIGHT:   m[0] += MOVE_STEP   # +X
+        elif keycode == KEY_LEFT:    m[0] -= MOVE_STEP   # -X
+        elif keycode == KEY_PERIOD:  m[2] += MOVE_STEP   # +Z (up)
+        elif keycode == KEY_COMMA:   m[2] -= MOVE_STEP   # -Z (down)
+        elif keycode == KEY_LBRACKET:  m[3] += 0.5       # yaw CCW
+        elif keycode == KEY_RBRACKET:  m[3] -= 0.5       # yaw CW
+
+    # Store callback on env so reset() can reuse it when relaunching viewer
+    env._key_callback = key_callback
+
+    # Relaunch viewer with key callback
+    if env.viewer is not None:
+        try:
+            env.viewer.close()
+        except Exception:
+            pass
+    env.viewer = mujoco.viewer.launch_passive(
+        env.model, env.data, key_callback=key_callback
+    )
+
+    print("=" * 50)
+    print("MANUAL CONTROL MODE")
+    print("  Arrow keys = move XY")
+    print("  , / .      = move Z down/up")
+    print("  [ / ]      = yaw CCW/CW")
+    print("  SPACE      = pause/resume")
+    print("  Close viewer window to exit")
+    print("=" * 50)
+
+    obs = env.reset()
+    print("\n[Reset done] Simulation PAUSED. Press SPACE in viewer to start.")
+
+    while env.viewer.is_running():
+        if key_state["paused"]:
+            env.viewer.sync()
+            time.sleep(0.02)
+            continue
+
+        # Read and reset accumulated key input as action
+        action = key_state["move"].copy()
+        key_state["move"][:] = 0.0
+
+        next_obs, reward, done, _, info = env.step(action)
+        success = info.get("is_success", False)
+        obs = next_obs
+
+        if done:
+            status = "SUCCESS" if success else "DONE"
+            print(f"  [{status}] reward={reward:.2f}")
+            print("  Resetting... Press SPACE to start next episode.")
+            obs = env.reset()
+            key_state["paused"] = True
+
+        time.sleep(0.02)
+
+    print("Viewer closed. Exiting.")
+
+
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Test Cable Robot Policy')
-    
-    # 恢复原有的所有 mode choices
-    parser.add_argument('--mode', type=str, default='actor_obstacles', 
-                        choices=['base', 'actor', 'obstacles', 'obstacles_base', 'actor_obstacles'],
+
+    parser.add_argument('--mode', type=str, default='actor_obstacles',
+                        choices=['base', 'actor', 'obstacles', 'obstacles_base',
+                                 'actor_obstacles', 'manual'],
                         help='Test mode')
     parser.add_argument('--render', action='store_true', help='Enable MuJoCo rendering')
     parser.add_argument('--episodes', type=int, default=10, help='Number of test episodes')
@@ -265,6 +392,14 @@ if __name__ == '__main__':
     # 路由及参数传递：基础 2D 环境与 3D 障碍物环境的分流
     if args.mode in ['actor', 'base']:
         run_test(mode=args.mode, log_dir=args.dir, n_episodes=args.episodes, render=args.render)
+    elif args.mode == 'manual':
+        run_manual(
+            n_obstacles=args.obstacles,
+            obstacle_seed=args.seed,
+            payload_radius=args.payload_radius,
+            planning_margin=args.planning_margin,
+            planning_grid_res=args.planning_grid_res,
+        )
     elif args.mode in ['obstacles', 'obstacles_base', 'actor_obstacles']:
         run_test_obstacles(
             mode=args.mode,
