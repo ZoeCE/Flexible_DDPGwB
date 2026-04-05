@@ -194,6 +194,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
             input()
         step = 0
+        episode_reward = 0.0      # 【新增】用于统计回合总分
         episode_collision = False
         target_pos = env.target_pos # 获取绝对终点
         
@@ -215,37 +216,50 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             nmpc_controller.reset_state_machine()
             
         while True:
-            # === 1. 动作计算逻辑 (全面适配 3D 接口) ===
+            # === 1. 动作计算逻辑 ===
             if mode == 'actor_obstacles':
                 s_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
                 with torch.no_grad():
                     action = actor_model(s_tensor).cpu().numpy()[0]
             else:
-                # [针对 3D NMPC 的修改]：向控制器传入 env_wp_idx 保证航点一致性
                 current_wp = getattr(env, 'current_wp_idx', None)
                 action = nmpc_controller.get_tracking_action(obs, env_wp_idx=current_wp)
             
-            # === 2. 环境推演 (新版返回 5 值: obs, reward, done, truncated, info) ===
-            next_obs, reward, done, _, info = env.step(action)
+            # === 2. 环境推演 ===
+            # 【修复】不再丢弃截断标志，将 terminated 和 truncated 解包
+            next_obs, step_reward, terminated, truncated, info = env.step(action)
+            
+            # 【修复】合并终止和截断标志作为最终的 is_done
+            is_done = terminated or truncated
             success = info.get("is_success", False)
+            
+            # 【修复】累加这一步的奖励到回合总分
+            episode_reward += step_reward
             obs = next_obs
             step += 1
             
             # === 3. 碰撞与渲染处理 ===
-            if reward <= -5.0 and not success: 
+            # (如果你有专门的 collision 字段，最好从 info.get("collision") 获取)
+            if step_reward <= -5.0 and not success: 
                 episode_collision = True
                 
             if render:
-                time.sleep(0.01) 
+                time.sleep(0.01) # 控制渲染帧率
+                # 注意: 这里前提是使用 mujoco.viewer.launch_passive()，它会自动在后台同步
                 
-            if done or step >= 500:
+            # === 4. 回合结束判定与结算 ===
+            if is_done or step >= 150:
                 if render:
                     status = "✅ Success" if success else "❌ Failed"
                     col_status = " (Collision!)" if episode_collision else ""
-                    print(f"Ep {ep+1:3d} | {status}{col_status} | Reward: {reward:7.2f} | Steps: {step:3d}")
+                    # 【修复】打印的是 episode_reward 总分，而不是最后一步的分数
+                    print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
                 
                 if success:
                     success_count += 1
+                    
+                # 【极其关键的修复】跳出当前回合的 while 循环，进入下一个 Episode！
+                break
     
     print("\n" + "="*50)
     print(f"Final Result [{mode.upper()}]:")

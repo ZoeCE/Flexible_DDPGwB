@@ -26,9 +26,9 @@ DEFAULT_CONFIG = {
     # 2. 空间与动作 (Space & Action)
     # ==========================================
     "space": {
-        "action_dim":        4,                         # ax, ay, az + alpha_z (4D)
-        # 各维度上限 [ax_max, ay_max, az_max, alpha_z_max]
-        "action_space_high": [0.5, 0.5, 0.5, 1.5],
+        "action_dim":        6,                         # [ax, ay, az, a_roll, a_pitch, a_yaw]
+        # 各维度上限
+        "action_space_high": [0.5, 0.5, 0.5, 2.0, 2.0, 2.0],
     },
  
     # ==========================================
@@ -67,7 +67,7 @@ DEFAULT_CONFIG = {
         "bounds_margin":     0.3,     # 寻路地图超出首尾点的边界余量
         "max_expansions":    100000,  # A* 最大扩展节点数（防死循环）
  
-        "payload_z_cruise":   0.35,   # 负载平移阶段巡航高度（单位：米）
+        "payload_z_cruise":   0.30,   # 负载平移阶段巡航高度（单位：米）
         "target_z_descent":   0.12,   # 终点正上方垂直下潜的最低高度
         "num_descent_steps":  6,      # Z 轴垂直下降段的离散点数量
     },

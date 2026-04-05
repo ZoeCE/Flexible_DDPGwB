@@ -74,6 +74,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 from collections import deque
+from scipy.spatial.transform import Rotation as R  # 【新增】处理欧拉角与四元数转换
  
 # 引入独立配置文件
 from config import DEFAULT_CONFIG
@@ -181,8 +182,8 @@ class CableRobotEnvWithObstacles:
         # ======================================================================
         # 5. 状态维度计算
         # ======================================================================
-        # 10（旧版基础）+ n_obstacles*3（障碍物）+ 4（Z轴）+ 4（旋转，新增）
-        self.state_dim = 10 + (self.n_obstacles * 3) + 4 + 4
+        # 10（旧版基础）+ n_obstacles*3（障碍物）+ 4（Z轴）+ 8（3D姿态）
+        self.state_dim = 10 + (self.n_obstacles * 3) + 4 + 8
  
         # ======================================================================
         # 6. XML 资产管理与模型初始化
@@ -223,6 +224,11 @@ class CableRobotEnvWithObstacles:
         # 动捕点平移状态追踪（旧版等价变量）
         self.current_mocap_pos = np.zeros(3)
         self.current_mocap_vel = np.zeros(3)
+
+        # 【修改】动捕点 3D 旋转状态追踪 [roll, pitch, yaw]
+        self.current_mocap_euler = np.zeros(3)
+        self.current_mocap_euler_vel = np.zeros(3)
+
         # [新增] 动捕点 Z 轴旋转状态追踪
         self.current_mocap_yaw     = 0.0
         self.current_mocap_yaw_vel = 0.0
@@ -645,6 +651,10 @@ class CableRobotEnvWithObstacles:
         self.current_step = 0
         self.current_mocap_pos = mocap_pos_hold.copy()
         self.current_mocap_vel = np.zeros(3)
+        # 【修改】旋转状态追踪归零
+        self.current_mocap_euler = np.zeros(3)
+        self.current_mocap_euler_vel = np.zeros(3)
+
         self._base_mocap_quat = mocap_quat_hold.copy()
         self.current_mocap_yaw = 0.0
         self.current_mocap_yaw_vel = 0.0
@@ -706,43 +716,55 @@ class CableRobotEnvWithObstacles:
  
         # 解析 4D 动作
         a_xyz   = effective_action[:3]    # 平移加速度 [ax, ay, az]
-        alpha_z = effective_action[3]     # Z 轴角加速度
+        a_euler = effective_action[3:6] # [a_roll, a_pitch, a_yaw]
  
         # ======================================================================
-        # 2. 运动学积分（旧版显式 Euler + 二阶修正）
+        # 2. 运动学积分（显式 Euler + 二阶修正）
         # ======================================================================
-        # [BUG-5 修复] 恢复旧版积分公式：pos 先用旧速度更新（带 0.5*a*dt² 修正项），
-        # 再更新速度。这与旧版 CableRobotEnvWithObstacles.step() 完全一致。
+        # 解析 6D 动作
+        a_xyz = effective_action[:3]
+        a_euler = effective_action[3:6] # [a_roll, a_pitch, a_yaw]
+        
         dt = self.dt
+        
+        # (1) 平移部分积分：先用旧速度更新（带 0.5*a*dt² 修正项），再更新速度
         self.current_mocap_pos += self.current_mocap_vel * dt + 0.5 * a_xyz * dt ** 2
         self.current_mocap_vel += a_xyz * dt
- 
+        
+        # (2) 【修复】旋转部分积分：与平移部分保持严格相同的二阶 Euler，并彻底弃用 alpha_z
+        self.current_mocap_euler += self.current_mocap_euler_vel * dt + 0.5 * a_euler * dt ** 2
+        self.current_mocap_euler_vel += a_euler * dt
+
         # [BUG-6 修复] 地板夹紧：动捕点 Z 不能低于 0.4 m（旧版保护逻辑）
         # 防止动捕点（末端执行器代理）穿入地面导致物理仿真数值爆炸
         if self.current_mocap_pos[2] < 0.4:
             self.current_mocap_pos[2] = 0.4
             self.current_mocap_vel[2] = 0.0
+            
  
-        # [新增] Z 轴旋转积分（与平移部分相同的二阶 Euler）
-        self.current_mocap_yaw_vel += alpha_z * dt
-        self.current_mocap_yaw     += self.current_mocap_yaw_vel * dt
- 
-        # ======================================================================
+       # ======================================================================
         # 3. 注入 MuJoCo 并执行物理步进
         # ======================================================================
         # 更新平移动捕点
         self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
  
-        # 更新旋转动捕点：yaw 增量叠加到 EE 基础朝向上
-        # q_yaw = [cos(yaw/2), 0, 0, sin(yaw/2)]  (Z 轴旋转)
-        # q_final = q_yaw * q_base  (先基础朝向，再叠加 yaw)
-        half_yaw = self.current_mocap_yaw / 2.0
-        q_yaw = np.array([np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)])
+        # 【全新升级】更新旋转动捕点：将主动控制的 3D 姿态叠加到 EE 基础朝向上
+        # 1. 使用 Scipy 将当前的 3D 欧拉角 (Roll, Pitch, Yaw) 转化为四元数
+        r = R.from_euler('xyz', self.current_mocap_euler, degrees=False)
+        q_xyzw = r.as_quat()  # Scipy 默认输出格式为 [x, y, z, w]
+        
+        # 2. 转换为 MuJoCo 接受的格式 [w, x, y, z]
+        q_rot = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+        
+        # 3. q_final = q_rot * q_base 
+        # 物理意义：在保持末端初始下垂/原始朝向的基础之上，叠加我们计算出的 3D 姿态补偿
         q_final = np.zeros(4)
-        mujoco.mju_mulQuat(q_final, q_yaw, self._base_mocap_quat)
+        mujoco.mju_mulQuat(q_final, q_rot, self._base_mocap_quat)
+        
+        # 注入物理引擎
         self.data.mocap_quat[self.mocap_id] = q_final
- 
-        # 按控制频率循环执行物理步（例如 10Hz 控制 / 500Hz 物理 = 50 次 mj_step）
+        
+        # 循环步进物理引擎 (保持你原有的逻辑)
         for _ in range(self.sim_steps):
             mujoco.mj_step(self.model, self.data)
  
@@ -977,23 +999,33 @@ class CableRobotEnvWithObstacles:
             obs_data.append(0.0)
  
         # ------------------------------------------------------------------
-        # 旋转状态（新增；payload_yaw 占位为 0，可接传感器数据）
+        # 旋转状态（提取完整的 Roll, Pitch, Yaw 及其速度）
         # ------------------------------------------------------------------
-        mocap_yaw      = self.current_mocap_yaw
-        mocap_yaw_vel  = self.current_mocap_yaw_vel
-        payload_yaw    = 0.0   # 占位：可通过 quat2euler 解析 prefab 四元数
-        payload_yaw_vel = 0.0  # 占位：可通过 prefab DOF 的旋转速度补充
- 
+        mocap_roll      = self.current_mocap_euler[0]
+        mocap_pitch     = self.current_mocap_euler[1]
+        mocap_yaw       = self.current_mocap_euler[2]
+        
+        mocap_roll_vel  = self.current_mocap_euler_vel[0]
+        mocap_pitch_vel = self.current_mocap_euler_vel[1]
+        mocap_yaw_vel   = self.current_mocap_euler_vel[2]
+        
+        # 负载姿态 (目前为 0 占位，如需更精确的防摆可从 self.data.qpos 中解算)
+        payload_yaw     = 0.0  
+        payload_yaw_vel = 0.0  
+
         # ------------------------------------------------------------------
-        # 拼接（顺序与上方文档注释严格对应）
+        # 拼接（严格保证末尾 12 维顺序与 NMPC 控制器匹配）
         # ------------------------------------------------------------------
         return np.array(
             [mocap_x, mocap_y, mocap_vx, mocap_vy,
              payload_x, payload_y, payload_vx, payload_vy,
              rel_tx, rel_ty]
             + obs_data[:target_len]
-            + [mocap_z, mocap_vz, payload_z, payload_vz,
-               mocap_yaw, mocap_yaw_vel, payload_yaw, payload_yaw_vel],
+            + [
+                mocap_z, mocap_vz, payload_z, payload_vz,           # [-12] 到 [-9]
+                mocap_roll, mocap_roll_vel, mocap_pitch, mocap_pitch_vel, # [-8] 到 [-5]
+                mocap_yaw, mocap_yaw_vel, payload_yaw, payload_yaw_vel    # [-4] 到 [-1]
+              ],
             dtype=np.float32
         )
  
