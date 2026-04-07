@@ -75,6 +75,9 @@ import mujoco.viewer
 import numpy as np
 from collections import deque
 from scipy.spatial.transform import Rotation as R  # 【新增】处理欧拉角与四元数转换
+import pinocchio
+from pyroboplan.ik.differential_ik import DifferentialIk, DifferentialIkOptions
+from pyroboplan.ik.nullspace_components import joint_limit_nullspace_component
  
 # 引入独立配置文件
 from config import DEFAULT_CONFIG
@@ -208,6 +211,38 @@ class CableRobotEnvWithObstacles:
         self.model = mujoco.MjModel.from_xml_path(base_xml_path)
         self.data  = mujoco.MjData(self.model)
         self.model.opt.timestep = self.physics_dt
+
+        # ----------------------------------------------------------------------
+        # 【核心修复】：让 Pinocchio 只加载纯净的机械臂模型
+        # ----------------------------------------------------------------------
+        import pinocchio as pin
+        
+        # 方案：你需要在这里指定一个【只有 KUKA 机械臂】的模型文件。
+        # 请根据你 assets 文件夹下的实际文件名进行修改，比如 "iiwa14.xml" 或 "iiwa14.urdf"
+        pure_arm_model_name = "iiwa14.xml" 
+        
+        arm_model_path = os.path.join(self._assets_dir, pure_arm_model_name)
+        
+        if not os.path.exists(arm_model_path):
+            raise FileNotFoundError(f"找不到纯机械臂模型文件: {arm_model_path}，请提供仅包含机械臂的 URDF 或 XML。")
+
+        try:
+            # 如果是 URDF 文件，用 buildModelFromUrdf
+            if arm_model_path.endswith(".urdf"):
+                self.model_pin = pin.buildModelFromUrdf(arm_model_path)
+            # 如果是纯 XML 文件，用 buildModelFromMjcf
+            else:
+                self.model_pin = pin.buildModelFromMJCF(arm_model_path)
+                
+            self.data_pin  = self.model_pin.createData()
+            
+            # 实例化你的 IK 求解器
+            self.ik_solver = MPCPinocchioIKSolver(self.model_pin, self.data_pin)
+            print("✅ IK Solver (Pinocchio) 初始化成功！")
+            
+        except Exception as e:
+            print(f"❌ Pinocchio 加载机械臂模型失败: {e}")
+            raise e
  
         # ======================================================================
         # 7. MuJoCo 对象 ID 寻址
@@ -221,24 +256,19 @@ class CableRobotEnvWithObstacles:
         self._temp_xml_path  = None
         self._planned_path   = None
  
-        # 动捕点平移状态追踪（旧版等价变量）
+        # 【修改】完全废弃实体 mocap，但保留变量名 current_mocap_pos/euler 
+        # 作为 IK 求解器的“虚拟目标 (Virtual Target)”，以免破坏其他代码的兼容性
         self.current_mocap_pos = np.zeros(3)
         self.current_mocap_vel = np.zeros(3)
-
-        # 【修改】动捕点 3D 旋转状态追踪 [roll, pitch, yaw]
         self.current_mocap_euler = np.zeros(3)
         self.current_mocap_euler_vel = np.zeros(3)
-
-        # [新增] 动捕点 Z 轴旋转状态追踪
         self.current_mocap_yaw     = 0.0
         self.current_mocap_yaw_vel = 0.0
  
-        # 路径追踪辅助变量（reset 后由 reset() 初始化）
         self.current_wp_idx = 0
         self.reached_final  = False
         self.last_dist      = None
-        self.last_wp_idx    = -1   # [BUG-9 修复] 用于检测航点切换
- 
+        self.last_wp_idx    = -1
         # ======================================================================
         # 9. 渲染器初始化
         # ======================================================================
@@ -255,13 +285,6 @@ class CableRobotEnvWithObstacles:
     # ==========================================================================
     def _reresolve_ids(self):
         """重新绑定 MuJoCo 体/关节 ID，在每次 XML 重载后必须调用。"""
-        mocap_body = self.model.body("mocap")
-        if hasattr(mocap_body, "mocapid"):
-            mids = mocap_body.mocapid
-            self.mocap_id = mids[0] if isinstance(mids, (np.ndarray, list)) else mids
-        else:
-            raise ValueError("Model does not contain a mocap body named 'mocap'")
- 
         self.prefab_jnt_id  = self.model.body("prefab").jntadr[0]
         self.prefab_body_id = self.model.body("prefab").id
         self.target_body_id = self.model.body("target").id
@@ -583,14 +606,9 @@ class CableRobotEnvWithObstacles:
             except Exception: pass
 
         # === 4. Set qpos: all joints to a clean initial state =================
-        # Keyframe only covers arm joints (7 values); everything else is zeroed
-        # including ball joint quaternions → invalid. So we skip keyframe and
-        # build the full qpos ourselves.
         self.data.qpos[:] = 0.0
         self.data.qvel[:] = 0.0
 
-        # 4a. All ball joints → identity quaternion [1,0,0,0]
-        # 4b. All free joints → identity quaternion
         for j in range(self.model.njnt):
             adr = self.model.jnt_qposadr[j]
             jtype = self.model.jnt_type[j]
@@ -599,63 +617,57 @@ class CableRobotEnvWithObstacles:
             elif jtype == mujoco.mjtJoint.mjJNT_FREE:
                 self.data.qpos[adr + 3:adr + 7] = [1, 0, 0, 0]
 
-        # 4c. Prefab free joint: position from config + start_xy, upright orientation
+        # Prefab free joint
         init_prefab = np.array(self.config["reset"]["init_qpos_prefab"], dtype=np.float64)
         init_prefab[0] = start_x
         init_prefab[1] = start_y
         self.data.qpos[-7:] = init_prefab
         prefab_z = init_prefab[2]
 
-        # 4d. Arm joints: IK or default
+        # Arm joints: IK or default
         if self.config["reset"].get("ik_enabled", False):
             self.data.qpos[:7] = self._solve_ik(
                 target_xy=np.array([start_x, start_y]), prefab_z=prefab_z)
         else:
             self.data.qpos[:7] = np.array(self.config["reset"]["init_qpos_arm"])
 
-        # 4e. Target body position
+        # Target body position
         self.model.body_pos[self.target_body_id][:2] = target_xy
 
-        # === 5. Sync derived quantities & align mocap to link7 ================
+        # === 5. Sync derived quantities (Mocap 逻辑彻底移除) ==================
         ee_body_id = self.model.body("link7").id
         mujoco.mj_forward(self.model, self.data)
-        self.data.mocap_pos[self.mocap_id] = self.data.xpos[ee_body_id].copy()
-        self.data.mocap_quat[self.mocap_id] = self.data.xquat[ee_body_id].copy()
+        
+        # 获取当前机械臂末端的真实位置，作为 IK 控制的起点
+        initial_ee_pos = self.data.xpos[ee_body_id].copy()
 
-        # === 6. Warmup: let ropes settle, lock arm + prefab + mocap ===========
+        # === 6. Warmup: let ropes settle, lock arm + prefab ===================
         arm_qpos_hold = self.data.qpos[:7].copy()
         prefab_qpos_hold = self.data.qpos[-7:].copy()
-        mocap_pos_hold = self.data.mocap_pos[self.mocap_id].copy()
-        mocap_quat_hold = self.data.mocap_quat[self.mocap_id].copy()
+        
+        # 【核心新增】将初始姿态立刻下发给电机，防止刚开始物理模拟时机械臂瘫软
+        self.data.ctrl[:7] = arm_qpos_hold
 
         for _ in range(self.config["reset"]["warmup_steps"]):
-            # Lock everything except rope ball joints
             self.data.qpos[:7] = arm_qpos_hold
             self.data.qvel[:7] = 0.0
             self.data.qpos[-7:] = prefab_qpos_hold
             self.data.qvel[-6:] = 0.0
-            self.data.mocap_pos[self.mocap_id] = mocap_pos_hold
-            self.data.mocap_quat[self.mocap_id] = mocap_quat_hold
             mujoco.mj_step(self.model, self.data)
 
-        # Final cleanup: restore exact state after last mj_step drift
         self.data.qpos[:7] = arm_qpos_hold
         self.data.qvel[:7] = 0.0
         self.data.qpos[-7:] = prefab_qpos_hold
         self.data.qvel[-6:] = 0.0
-        self.data.mocap_pos[self.mocap_id] = mocap_pos_hold
-        self.data.mocap_quat[self.mocap_id] = mocap_quat_hold
         mujoco.mj_forward(self.model, self.data)
 
         # === 7. Initialize tracking state =====================================
         self.current_step = 0
-        self.current_mocap_pos = mocap_pos_hold.copy()
+        # 将末端初始位置赋给虚拟控制目标
+        self.current_mocap_pos = initial_ee_pos.copy()
         self.current_mocap_vel = np.zeros(3)
-        # 【修改】旋转状态追踪归零
         self.current_mocap_euler = np.zeros(3)
         self.current_mocap_euler_vel = np.zeros(3)
-
-        self._base_mocap_quat = mocap_quat_hold.copy()
         self.current_mocap_yaw = 0.0
         self.current_mocap_yaw_vel = 0.0
 
@@ -674,7 +686,7 @@ class CableRobotEnvWithObstacles:
         rope_len = self.config["rope"]["num_segments"] * self.config["rope"]["segment_length"]
         print(f"[RESET] EE:     {np.round(ee_pos, 4)}")
         print(f"[RESET] Prefab: {np.round(prefab_pos, 4)}")
-        print(f"[RESET] Mocap:  {np.round(mocap_pos_hold, 4)}  quat: {np.round(mocap_quat_hold, 4)}")
+        print(f"[RESET] Target: {np.round(self.current_mocap_pos, 4)} (Virtual Target)")
         print(f"[RESET] dz={ee_pos[2] - prefab_pos[2]:.4f}  dxy={np.linalg.norm(ee_pos[:2] - prefab_pos[:2]):.4f}  rope={rope_len:.4f}")
 
         # === 9. Viewer sync + return obs ======================================
@@ -714,9 +726,9 @@ class CableRobotEnvWithObstacles:
         self.action_queue.append(action)
         effective_action = self.action_queue.popleft()
  
-        # 解析 4D 动作
+        # 解析 4D/6D 动作 (保留原代码的重复解析，防止遗漏)
         a_xyz   = effective_action[:3]    # 平移加速度 [ax, ay, az]
-        a_euler = effective_action[3:6] # [a_roll, a_pitch, a_yaw]
+        a_euler = effective_action[3:6]   # [a_roll, a_pitch, a_yaw]
  
         # ======================================================================
         # 2. 运动学积分（显式 Euler + 二阶修正）
@@ -742,29 +754,29 @@ class CableRobotEnvWithObstacles:
             self.current_mocap_vel[2] = 0.0
             
  
-       # ======================================================================
-        # 3. 注入 MuJoCo 并执行物理步进
         # ======================================================================
-        # 更新平移动捕点
-        self.data.mocap_pos[self.mocap_id] = self.current_mocap_pos
- 
-        # 【全新升级】更新旋转动捕点：将主动控制的 3D 姿态叠加到 EE 基础朝向上
-        # 1. 使用 Scipy 将当前的 3D 欧拉角 (Roll, Pitch, Yaw) 转化为四元数
-        r = R.from_euler('xyz', self.current_mocap_euler, degrees=False)
-        q_xyzw = r.as_quat()  # Scipy 默认输出格式为 [x, y, z, w]
+        # 3. 注入 MuJoCo 并执行物理步进 (🔥🔥🔥 已使用 IK Solver 升级 🔥🔥🔥)
+        # ======================================================================
+        # 剥离旧版的 Mocap 直接修改（Scipy 四元数乘法等逻辑已被移除）
         
-        # 2. 转换为 MuJoCo 接受的格式 [w, x, y, z]
-        q_rot = np.array([q_xyzw[3], q_xyzw[0], q_xyzw[1], q_xyzw[2]])
+        # 3.1 获取当前机械臂的 7 维真实关节角度（作为 IK 迭代起点保证平滑连续）
+        current_q = self.data.qpos[:7].copy()
         
-        # 3. q_final = q_rot * q_base 
-        # 物理意义：在保持末端初始下垂/原始朝向的基础之上，叠加我们计算出的 3D 姿态补偿
-        q_final = np.zeros(4)
-        mujoco.mju_mulQuat(q_final, q_rot, self._base_mocap_quat)
+        # 3.2 调用 IK Solver，将积分得到的 4D 目标位姿转换为 7 个关节角度
+        # (注意: 这里传入 euler 的第3维即 Yaw 作为偏航角目标)
+        target_q = self.ik_solver.solve_4d(
+            current_q=current_q,
+            target_x=self.current_mocap_pos[0],
+            target_y=self.current_mocap_pos[1],
+            target_z=self.current_mocap_pos[2],
+            target_yaw=self.current_mocap_euler[2] 
+        )
         
-        # 注入物理引擎
-        self.data.mocap_quat[self.mocap_id] = q_final
+        # 3.3 将目标关节角下发给 MuJoCo 的位置执行器 (Actuators)
+        # 前提是你的 XML 已经把 mocap 换成了 7 个 position actuators
+        self.data.ctrl[:7] = target_q
         
-        # 循环步进物理引擎 (保持你原有的逻辑)
+        # 循环步进物理引擎 (保持你原有的逻辑，用电机平滑追踪)
         for _ in range(self.sim_steps):
             mujoco.mj_step(self.model, self.data)
  
@@ -1143,3 +1155,93 @@ class CableRobotEnvWithObstacles:
             return None
         return np.array(self._planned_path, copy=True)
 
+
+class MPCPinocchioIKSolver:
+    def __init__(self, model_roboplan, data_roboplan, collision_model=None):
+        """
+        初始化 IK 求解器
+        :param model_roboplan: 通过 pyroboplan.models 载入的 KUKA iiwa14 模型
+        :param data_roboplan: 对应的 data
+        """
+        self.model = model_roboplan
+        self.data = data_roboplan
+        self.collision_model = collision_model
+        
+        # 末端执行器的名字（请根据你 KUKA XML 中的名字修改，通常是 link7 所在的 frame）
+        self.target_frame = "link7"  
+        
+        # ---------------------------------------------------------
+        # 关键优化 1：针对 MPC 实时追踪的 IK 参数配置
+        # ---------------------------------------------------------
+        options = DifferentialIkOptions(
+            max_iters=50,         # MPC 连续追踪不需要像 demo 里的 200 次，50 次足够
+            max_retries=1,        # 实时控制中禁止重试跳跃，必须保持连续性
+            damping=1e-3,         # 阻尼项 (DLS)，防止奇异点引发大幅度跳动
+            min_step_size=0.1,
+            max_step_size=0.5,
+            ignore_joint_indices=[], # 如果你有夹爪，把夹爪的 index 放在这里忽略掉
+            rng_seed=None,
+        )
+        
+        self.ik = DifferentialIk(
+            self.model,
+            data=self.data,
+            collision_model=self.collision_model,
+            options=options,
+            visualizer=None,
+        )
+        
+        # ---------------------------------------------------------
+        # 关键优化 2：零空间投影 (解决 7 轴冗余)
+        # ---------------------------------------------------------
+        # 我们保留学长 demo 中的关节限位保护，防止机械臂扭死。
+        # 如果你的 MPC 速度要求极高，可以暂时去掉避障的 nullspace component
+        self.nullspace_components = [
+            lambda m, q: joint_limit_nullspace_component(m, q, gain=1.0, padding=0.025)
+        ]
+
+    def solve_4d(self, current_q, target_x, target_y, target_z, target_yaw):
+        """
+        根据 MPC 给出的 4D 目标，计算 KUKA 的 7 关节角度
+        :param current_q: 当前机械臂的 7 维真实关节角度（作为迭代起点保证平滑！）
+        :param target_x, target_y, target_z: 目标平移
+        :param target_yaw: 目标偏航角
+        :return: 7 维 numpy array (目标关节角度)
+        """
+        # 1. 固定 Roll 和 Pitch (使机械臂末端垂直向下)
+        # 注意：这里假设 np.pi 的 roll 能让你的末端朝下，请根据实际 URDF 坐标系调整
+        roll = np.pi  
+        pitch = 0.0
+        yaw = target_yaw
+
+        # 2. 构建旋转矩阵 (Z-Y-X 欧拉角转旋转矩阵)
+        R_x = np.array([[1, 0, 0], 
+                        [0, np.cos(roll), -np.sin(roll)], 
+                        [0, np.sin(roll), np.cos(roll)]])
+        R_y = np.array([[np.cos(pitch), 0, np.sin(pitch)], 
+                        [0, 1, 0], 
+                        [-np.sin(pitch), 0, np.cos(pitch)]])
+        R_z = np.array([[np.cos(yaw), -np.sin(yaw), 0], 
+                        [np.sin(yaw), np.cos(yaw), 0], 
+                        [0, 0, 1]])
+        R = R_z @ R_y @ R_x
+
+        # 3. 生成 Pinocchio 的 SE3 目标位姿 (等同于学长 demo 的 target_tform)
+        target_tform = pinocchio.SE3(R, np.array([target_x, target_y, target_z]))
+
+        # 4. 调用 Differential IK 进行求解
+        # 【极其重要】：init_state 必须传入 current_q，这样 IK 才会只在前一帧的基础上微调
+        q_sol = self.ik.solve(
+            self.target_frame,
+            target_tform,
+            init_state=current_q,
+            nullspace_components=self.nullspace_components,
+            verbose=False # 关闭打印以防刷屏
+        )
+
+        if q_sol is None:
+            print("[警告] IK 求解失败，可能是目标超出了工作空间。保持原位。")
+            return current_q # 如果无解，保持当前姿态防止崩溃
+
+        # 如果你的模型包含夹爪等额外自由度，确保只返回前 7 个 arm 关节
+        return q_sol[:7]

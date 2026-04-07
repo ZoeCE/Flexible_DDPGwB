@@ -176,8 +176,6 @@ def main():
         demo = re.sub(
             r"<equality>[\s\S]*?</equality>",
             """<equality>
-      <!-- mocap drives arm end-effector -->
-      <weld body1="mocap" body2="link7" relpose="0 0 0 1 0 0 0"/>
       <!-- rope ends to prefab lift sites (fl/rl swapped with fr/rr) -->
       <connect site1="rope_fl_end" site2="lift_fr"/>
       <connect site1="rope_fr_end" site2="lift_fl"/>

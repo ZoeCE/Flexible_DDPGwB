@@ -36,16 +36,19 @@
       <!-- IMU sensor mount -->
       <site name="imu_site" pos="0 0 0" size="0.01" rgba="0 1 0 1"/>
     </body>
-    <!-- Mocap body for arm control -->
-    <body mocap="true" name="mocap" pos="0.20005482 0.30008292 0.74501631" quat="0 -1 0 0">
-      <geom type="box" size="0.01 0.01 0.1" rgba="0 0 1 1" contype="0" conaffinity="0"/>
-    </body>
-
   </worldbody>
 
+  <actuator>
+    <position name="j1_motor" joint="joint1" ctrlrange="-2.96 2.96" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j2_motor" joint="joint2" ctrlrange="-2.09 2.09" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j3_motor" joint="joint3" ctrlrange="-2.96 2.96" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j4_motor" joint="joint4" ctrlrange="-2.09 2.09" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j5_motor" joint="joint5" ctrlrange="-2.96 2.96" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j6_motor" joint="joint6" ctrlrange="-2.09 2.09" forcerange="-300 300" kp="3000" kv="100"/>
+    <position name="j7_motor" joint="joint7" ctrlrange="-3.05 3.05" forcerange="-300 300" kp="3000" kv="100"/>
+  </actuator>
+
   <equality>
-      <!-- mocap drives arm end-effector -->
-      <weld body1="mocap" body2="link7" relpose="0 0 0 1 0 0 0"/>
       <!-- rope ends to prefab lift sites (fl/rl swapped with fr/rr) -->
       <connect site1="rope_fl_end" site2="lift_fr"/>
       <connect site1="rope_fr_end" site2="lift_fl"/>

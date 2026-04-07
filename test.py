@@ -10,7 +10,7 @@ from ipdb import set_trace as xxxx
 # 引入环境和控制器
 from mujoco_env import CableRobotEnv
 from mujoco_env_new import CableRobotEnvWithObstacles
-from nmpc_controller import NMPCController, NMPCTrajectoryTracker
+from nmpc_controller_new import NMPCController4D, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
 from agent import FastActor 
 
@@ -171,7 +171,8 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
         
     elif mode in ['obstacles', 'obstacles_base']:
         print("Initializing NMPC Trajectory Tracker (Following 3D path)...")
-        nmpc_controller = NMPCTrajectoryTracker()
+        # 【对齐新版】控制频率 10Hz，对应 dt=0.1
+        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.6)
 
     if save_paths_dir is not None:
         os.makedirs(save_paths_dir, exist_ok=True)
@@ -193,27 +194,17 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
         if render:
             print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
             input()
+            
         step = 0
-        episode_reward = 0.0      # 【新增】用于统计回合总分
+        episode_reward = 0.0      # 用于统计回合总分
         episode_collision = False
-        target_pos = env.target_pos # 获取绝对终点
         
-        # 获取当前环境生成的障碍物列表，用于后续碰撞统计
-        obstacles = env.get_obstacles()
+        # 【修复 1】预先定义 info 字典，使得第一步 NMPC 就能拿到正确的 current_wp_idx
+        info = {"current_wp_idx": 0, "reached_final": False}
         
-        # 加载环境规划的轨迹
-        if mode in ['obstacles', 'obstacles_base', 'actor_obstacles'] and hasattr(env, "get_planned_path"):
-            planned_path = env.get_planned_path()
-            if planned_path is not None and len(planned_path) > 0:
-                if nmpc_controller:
-                    nmpc_controller.set_trajectory(planned_path)
-            else:
-                if nmpc_controller:
-                    nmpc_controller.set_trajectory([])
-        
-        # 确保每回合重置 NMPC 内部的状态机
-        if nmpc_controller and hasattr(nmpc_controller, 'reset_state_machine'):
-            nmpc_controller.reset_state_machine()
+        # ！！！【删除废弃逻辑】！！！
+        # 旧版本需要用 nmpc_controller.set_trajectory() 传整个路径进去。
+        # 新版本的 NMPCTrajectoryTracker 非常极简，完全依赖环境的 obs 驱动，不需要这些多余的状态机！
             
         while True:
             # === 1. 动作计算逻辑 ===
@@ -222,44 +213,58 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 with torch.no_grad():
                     action = actor_model(s_tensor).cpu().numpy()[0]
             else:
-                current_wp = getattr(env, 'current_wp_idx', None)
-                action = nmpc_controller.get_tracking_action(obs, env_wp_idx=current_wp)
+                # 【修复 2：极其核心的接口对齐】
+                # 环境已经替我们管理好了当前的目标点索引 (info["current_wp_idx"])
+                # 我们只需从环境的 _planned_path 提取目标高度 Z，而 X,Y 的误差已经在 obs 里面了！
+                if env._planned_path is not None and len(env._planned_path) > 0:
+                    target_wp = env._planned_path[info["current_wp_idx"]]
+                    target_z = target_wp[2]
+                else:
+                    target_z = 0.7 # 兜底默认高度
+                    
+                # 严格调用新的 compute_action 极简接口
+                action = nmpc_controller.compute_action(obs, target_z=target_z, target_yaw=0.0)
             
             # === 2. 环境推演 ===
-            # 【修复】不再丢弃截断标志，将 terminated 和 truncated 解包
+            # Gymnasium 标准 5 返回值
             next_obs, step_reward, terminated, truncated, info = env.step(action)
             
-            # 【修复】合并终止和截断标志作为最终的 is_done
+            # 合并终止和截断标志作为最终的 is_done
             is_done = terminated or truncated
             success = info.get("is_success", False)
             
-            # 【修复】累加这一步的奖励到回合总分
+            # 累加这一步的奖励到回合总分
             episode_reward += step_reward
             obs = next_obs
             step += 1
             
             # === 3. 碰撞与渲染处理 ===
-            # (如果你有专门的 collision 字段，最好从 info.get("collision") 获取)
+            # (如果碰到障碍物，由于惩罚大，判定为 collision)
             if step_reward <= -5.0 and not success: 
                 episode_collision = True
                 
             if render:
                 time.sleep(0.01) # 控制渲染帧率
-                # 注意: 这里前提是使用 mujoco.viewer.launch_passive()，它会自动在后台同步
                 
             # === 4. 回合结束判定与结算 ===
             if is_done or step >= 150:
                 if render:
                     status = "✅ Success" if success else "❌ Failed"
                     col_status = " (Collision!)" if episode_collision else ""
-                    # 【修复】打印的是 episode_reward 总分，而不是最后一步的分数
                     print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
                 
+                # 【修复 3】补全平均步数和碰撞的统计累加逻辑
                 if success:
                     success_count += 1
+                    total_steps_success += step
+                if episode_collision:
+                    collision_count += 1
                     
-                # 【极其关键的修复】跳出当前回合的 while 循环，进入下一个 Episode！
-                break
+                break # 跳出当前回合的 while 循环，进入下一个 Episode
+    
+    # 【修复 4】补充 end_time 记录，防止最后报错
+    end_time = time.time()
+    avg_steps = (total_steps_success / success_count) if success_count > 0 else 0
     
     print("\n" + "="*50)
     print(f"Final Result [{mode.upper()}]:")
