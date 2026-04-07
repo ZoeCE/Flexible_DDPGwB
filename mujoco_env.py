@@ -477,7 +477,7 @@ class CableRobotEnvWithObstacles(CableRobotEnv):
         self.default_start_xy = _start
         self.default_target = _target
         self.target_pos = self.default_target.copy()
-        self.max_steps = 150
+        self.max_steps = 200
         self.current_step = 0
 
         self.latency_steps = kwargs.get("latency_steps", 1)

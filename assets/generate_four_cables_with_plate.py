@@ -200,7 +200,7 @@ def main():
             ch = cfg_prefab["cylinder_half_height"]
             prefab_geom = f'<geom type="cylinder" size="{cr} {ch}" material="concrete" mass="{pmass}"/>'
 
-        prefab_body = f"""<body name="prefab" pos="0.2 0.3 0.5">
+        prefab_body = f"""<body name="prefab" pos="0.3 0.2 0.5">
       <joint type="free"/>
       {prefab_geom}
 
@@ -233,7 +233,7 @@ def main():
             target_geom = f'<geom type="cylinder" size="{tr} {th}" pos="0 0 {th}"'
         target_geom += f'\n            rgba="{rgba_str}" contype="0" conaffinity="0"/>'
 
-        target_body = f"""<body name="target" pos="-0.2 0.3 0">
+        target_body = f"""<body name="target" pos="0.3 0.25 0">
       {target_geom}
     </body>"""
         demo = re.sub(

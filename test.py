@@ -128,15 +128,15 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             "control_freq_hz": 10,
         },
         "task": {
-            "default_start_xy": default_start_xy or [0.2, 0.2],
-            "default_target_xy": default_target_xy or [0.5, 0.5],
+            "default_start_xy": default_start_xy or [0.3, 0.2],
+            "default_target_xy": default_target_xy or [-0.3, 0.2],
             "init_position_range": 0.00,
             "init_velocity_scale": 0.08,
         },
         "scene": {
             "n_obstacles": n_obstacles,
             "radius_range": (0.01, 0.02),
-            "path_width": 0.12,
+            "path_width": 0.2,
             "seed": obstacle_seed,
         },
         "noise": {
@@ -171,8 +171,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
         
     elif mode in ['obstacles', 'obstacles_base']:
         print("Initializing NMPC Trajectory Tracker (Following 3D path)...")
-        # 【对齐新版】控制频率 10Hz，对应 dt=0.1
-        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.6)
+        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.4)
 
     if save_paths_dir is not None:
         os.makedirs(save_paths_dir, exist_ok=True)
@@ -194,6 +193,15 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
         if render:
             print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
             input()
+
+        # =========================================================
+        # 【新增修改点 1】：在每回合开始时，将环境生成的 A* 路径传给 Controller
+        # =========================================================
+        if mode in ['obstacles', 'obstacles_base']:
+            if hasattr(env, '_planned_path') and env._planned_path is not None:
+                nmpc_controller.set_path(env._planned_path)
+            else:
+                nmpc_controller.set_path([env.target_pos])  # 兜底：只有一个目标点
             
         step = 0
         episode_reward = 0.0      # 用于统计回合总分
@@ -213,17 +221,11 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 with torch.no_grad():
                     action = actor_model(s_tensor).cpu().numpy()[0]
             else:
-                # 【修复 2：极其核心的接口对齐】
-                # 环境已经替我们管理好了当前的目标点索引 (info["current_wp_idx"])
-                # 我们只需从环境的 _planned_path 提取目标高度 Z，而 X,Y 的误差已经在 obs 里面了！
-                if env._planned_path is not None and len(env._planned_path) > 0:
-                    target_wp = env._planned_path[info["current_wp_idx"]]
-                    target_z = target_wp[2]
-                else:
-                    target_z = 0.7 # 兜底默认高度
-                    
-                # 严格调用新的 compute_action 极简接口
-                action = nmpc_controller.compute_action(obs, target_z=target_z, target_yaw=0.0)
+                # =========================================================
+                # 【新增修改点 2】：直接调用极简接口，不再需要手动解析 target_z
+                # 删除原先的 target_z = target_wp[2] 等相关逻辑
+                # =========================================================
+                action = nmpc_controller.compute_action(obs, target_yaw=0.0)
             
             # === 2. 环境推演 ===
             # Gymnasium 标准 5 返回值
@@ -247,7 +249,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 time.sleep(0.01) # 控制渲染帧率
                 
             # === 4. 回合结束判定与结算 ===
-            if is_done or step >= 150:
+            if is_done or step >= 200:
                 if render:
                     status = "✅ Success" if success else "❌ Failed"
                     col_status = " (Collision!)" if episode_collision else ""
@@ -402,8 +404,8 @@ if __name__ == '__main__':
     parser.add_argument('--seed', type=int, default=42, help='[obstacles] Obstacle RNG seed')
     parser.add_argument('--save_paths_dir', type=str, default=None,
                         help='[obstacles] Save planned 3D paths as CSV to this dir')
-    parser.add_argument('--payload_radius', type=float, default=0.10, help='[obstacles] Payload safety radius (m)')
-    parser.add_argument('--planning_margin', type=float, default=0.10, help='[obstacles] Planning margin (m)')
+    parser.add_argument('--payload_radius', type=float, default=0.06, help='[obstacles] Payload safety radius (m)')
+    parser.add_argument('--planning_margin', type=float, default=0.05, help='[obstacles] Planning margin (m)')
     parser.add_argument('--planning_grid_res', type=float, default=0.02, help='[obstacles] Grid resolution (m)')
 
     args = parser.parse_args()

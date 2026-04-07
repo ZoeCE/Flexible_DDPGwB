@@ -18,7 +18,7 @@ DEFAULT_CONFIG = {
     "sim": {
         "physics_dt":      0.002,   # 物理引擎时间步长 (500 Hz)
         "control_freq_hz": 10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
-        "max_steps":       150,     # 回合最大步数
+        "max_steps":       200,     # 回合最大步数
         "render":          False,   # 是否开启 GUI 渲染
     },
  
@@ -28,18 +28,18 @@ DEFAULT_CONFIG = {
     "space": {
         "action_dim":        6,                         # [ax, ay, az, a_roll, a_pitch, a_yaw]
         # 各维度上限
-        "action_space_high": [0.5, 0.5, 0.5, 2.0, 2.0, 2.0],
+        "action_space_high": [0.5, 0.5, 0.5, 0.5, 2.0, 2.0],
     },
  
     # ==========================================
     # 3. 任务与随机化初始状态 (Task & Randomization)
     # ==========================================
     "task": {
-        "start_pos_mocap":    [0.2, 0.3, 1.0],         # 动捕点初始平移位置
+        "start_pos_mocap":    [0.3, 0.2, 1.0],         # 动捕点初始平移位置
         "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],   # 动捕点初始姿态四元数 (w,x,y,z)
-        "default_start_xy":   [0.2, 0.3],              # 负载初始 XY 中心（加噪声前）
-        "default_target_xy":  [-0.2, 0.3],             # 目标 XY 中心（子类中不加噪声）
-        "init_position_range": 0.08,                   # 初始 XY 位置均匀噪声范围 ±0.08
+        "default_start_xy":   [0.3, 0.2],              # 负载初始 XY 中心（加噪声前）
+        "default_target_xy":  [-0.3, 0.2],             # 目标 XY 中心（子类中不加噪声）
+        "init_position_range": 0.01,                   # 初始 XY 位置均匀噪声范围 ±0.08
         "init_velocity_scale": 0.15,                   # 初始速度扰动尺度（当前保留未用）
     },
  
@@ -49,8 +49,8 @@ DEFAULT_CONFIG = {
     # ==========================================
     "scene": {
         "n_obstacles":       3,                        # 障碍物数量
-        "radius_range":      (0.001, 0.005),           # 障碍物半径范围 [r_min, r_max]
-        "path_width":        0.12,                     # 障碍物横向分布宽度（在连线两侧）
+        "radius_range":      (0.001, 0.003),           # 障碍物半径范围 [r_min, r_max]
+        "path_width":        0.02,                     # 障碍物横向分布宽度（在连线两侧）
         "obstacle_z_center": 0.25,                     # 障碍物 Z 轴中心高度
         "obstacle_halfheight": 0.2,                    # 障碍物半高（圆柱半高）
         "endpoint_z_offset": 0.025,                    # 起/终点标记球相对障碍物顶部的偏移
@@ -62,12 +62,12 @@ DEFAULT_CONFIG = {
     # ==========================================
     "planning": {
         "payload_radius":    0.06,    # 负载几何半径（用于障碍物膨胀防撞）
-        "planning_margin":   0.02,    # A* 安全边距（在 payload_radius 基础上额外留白）
+        "planning_margin":   0.05,    # A* 安全边距（在 payload_radius 基础上额外留白）
         "planning_grid_res": 0.02,    # A* 栅格分辨率（单位：米）
-        "bounds_margin":     0.3,     # 寻路地图超出首尾点的边界余量
+        "bounds_margin":     0.05,     # 寻路地图超出首尾点的边界余量
         "max_expansions":    100000,  # A* 最大扩展节点数（防死循环）
  
-        "payload_z_cruise":   0.30,   # 负载平移阶段巡航高度（单位：米）
+        "payload_z_cruise":   0.2,   # 负载平移阶段巡航高度（单位：米）
         "target_z_descent":   0.12,   # 终点正上方垂直下潜的最低高度
         "num_descent_steps":  6,      # Z 轴垂直下降段的离散点数量
     },
@@ -119,7 +119,7 @@ DEFAULT_CONFIG = {
             1.53851657, 2.87907443, 1.73055121, -1.85194252
         ],
         # xyc: prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
-        "init_qpos_prefab": [0.2, 0.3, 0.2, 1.0, 0.0, 0.0, 0.0],
+        "init_qpos_prefab": [0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
  
         "warmup_steps": 50,    # 物理引擎预热步数（让绳索自然垂落稳定）
         "mocap_init_z": 1.0,   # 动捕点初始强制 Z 高度（单位：米）

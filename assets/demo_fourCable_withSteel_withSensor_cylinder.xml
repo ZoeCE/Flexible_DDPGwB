@@ -17,13 +17,13 @@
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
     <!-- target: visual-only goal marker (no collision) -->
-    <body name="target" pos="-0.2 0.3 0">
+    <body name="target" pos="0.3 0.25 0">
       <geom type="box" size="0.05 0.05 0.1" pos="0 0 0.1"
             rgba="0.8 0.0 0.0 0.4" contype="0" conaffinity="0"/>
     </body>
 
     <!-- prefab: payload with free joint -->
-    <body name="prefab" pos="0.2 0.3 0.5">
+    <body name="prefab" pos="0.3 0.2 0.5">
       <joint type="free"/>
       <geom type="box" size="0.05 0.05 0.1" material="concrete" mass="1.0"/>
 

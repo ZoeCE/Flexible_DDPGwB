@@ -60,10 +60,37 @@
 #                        payload_x, payload_y, payload_vx, payload_vy,
 #                        rel_tx, rel_ty,                           ← 旧版10维
 #                        obstacle_data...,                         ← n_obs*3
-#                        mocap_z, mocap_vz, payload_z, payload_vz, ← 旧版Z轴4维
+#                        mocap_z, mocap_vz, payload_z, payload_vz, ← Z轴4维
+#                        mocap_roll, mocap_roll_vel,               ← 新增姿态4维
+#                        mocap_pitch, mocap_pitch_vel,
 #                        mocap_yaw, mocap_yaw_vel,                 ← 新增旋转2维
 #                        payload_yaw, payload_yaw_vel]             ← 新增旋转2维
-#             总计: 10 + n_obstacles*3 + 4 + 4 = 18 + n_obstacles*3
+#             总计: 10 + n_obstacles*3 + 4 + 8 = 22 + n_obstacles*3
+#             负索引：[-12]=mocap_z  [-11]=mocap_vz  [-10]=payload_z  [-9]=payload_vz
+#                     [-8]=mocap_roll [-7]=mocap_roll_vel [-6]=mocap_pitch [-5]=mocap_pitch_vel
+#                     [-4]=mocap_yaw  [-3]=mocap_yaw_vel  [-2]=payload_yaw [-1]=payload_yaw_vel
+#
+# ──────────────────────────────────────────────────────────────────────────────
+# [ENV-BUG-A] reset() 中 initial_ee_pos 在 warmup 前读取（mj_forward 后），
+#             warmup 完成再次 mj_forward 但未更新 initial_ee_pos，
+#             导致 current_mocap_pos 轻微偏离实际 EE 位置。
+#             修复：warmup 后重新读取 EE 位置再赋给 current_mocap_pos。
+#
+# [ENV-BUG-B] current_mocap_pos[2] 初始化为真实 EE Z（通常 ~1.0m），
+#             而 path_3d[0] 中 payload 巡航高度仅 0.30m，
+#             MPC 需令 mocap_z 从 1.0 降至 0.70（0.30+L），
+#             幅度 0.30m，以 u_max_z=0.5 m/s² 需 ~25 步，
+#             这期间绳子因末端下降而松弛，payload 无法被提升，
+#             是"上升一段后失稳"的根本原因。
+#             修复：与 nmpc_controller_new 联动，将 u_max_z 放宽至 2.0 m/s²
+#             并在 NMPCController4D 提高 Q_pos[2] 至 20.0。
+#             （env 侧无需改代码，由 controller 参数决定）
+#
+# [ENV-BUG-C] ground_clamp: 地板夹紧阈值 0.4m 过高。
+#             若 payload 巡航高度目标 0.30m、末端目标 0.70m（0.3+L=0.3+0.4=0.7），
+#             则末端在下降过程中不会触发夹紧。但若某些场景 payload_z_cruise 配置更低，
+#             末端目标 Z 可能接近 0.4m 导致夹紧提前激活，产生速度突变。
+#             修复：地板夹紧改为更保守的 0.25m（EE 在此高度以下绳子必然碰地）。
 # ==============================================================================
  
 import os
@@ -86,10 +113,10 @@ from config import DEFAULT_CONFIG
 class CableRobotEnvWithObstacles:
     """
     配置驱动的索驱动机器人物理仿真环境（带动态障碍物）。
-    动作空间: 4D [a_x, a_y, a_z, alpha_z(Z轴角加速度)]
+    动作空间: 6D [a_x, a_y, a_z, a_roll, a_pitch, a_yaw]
  
-    观测布局（共 18 + 3*n_obstacles 维，索引与旧版高度兼容）：
-      [0]  mocap_x        动捕点 X 位置
+    观测布局（共 22 + 3*n_obstacles 维，末尾 12 维用负索引访问）：
+      [0]  mocap_x        动捕点（虚拟末端）X 位置
       [1]  mocap_y        动捕点 Y 位置
       [2]  mocap_vx       动捕点 X 速度
       [3]  mocap_vy       动捕点 Y 速度
@@ -100,14 +127,21 @@ class CableRobotEnvWithObstacles:
       [8]  rel_tx         目标相对负载的 X 距离（与旧版 obs[8] 对齐）
       [9]  rel_ty         目标相对负载的 Y 距离（与旧版 obs[9] 对齐）
       [10 ~ 10+3*n-1]     障碍物信息 (ox, oy, r) * n_obstacles
-      [-8] mocap_z        动捕点 Z 位置
-      [-7] mocap_vz       动捕点 Z 速度
-      [-6] payload_z      负载 Z 位置（xyc 钩子读取）
-      [-5] payload_vz     负载 Z 速度（xyc 钩子读取）
-      [-4] mocap_yaw      动捕点偏航角（新增）
-      [-3] mocap_yaw_vel  动捕点偏航角速度（新增）
-      [-2] payload_yaw    负载偏航角（占位，当前为 0）
-      [-1] payload_yaw_vel 负载偏航角速度（占位，当前为 0）
+      ── 末尾 12 维，用负索引访问，不受 n_obstacles 影响 ──
+      [-12] mocap_z       动捕点 Z 位置
+      [-11] mocap_vz      动捕点 Z 速度
+      [-10] payload_z     负载 Z 位置
+      [-9]  payload_vz    负载 Z 速度
+      [-8]  mocap_roll    动捕点 roll
+      [-7]  mocap_roll_vel
+      [-6]  mocap_pitch   动捕点 pitch
+      [-5]  mocap_pitch_vel
+      [-4]  mocap_yaw     动捕点 yaw
+      [-3]  mocap_yaw_vel
+      [-2]  payload_yaw   负载 yaw（占位，当前为 0）
+      [-1]  payload_yaw_vel（占位，当前为 0）
+ 
+    ⚠️ 控制器读取末尾物理状态时必须使用负索引，正向索引会被障碍物数据偏移！
     """
  
     def __init__(self, config: dict = None):
@@ -185,7 +219,8 @@ class CableRobotEnvWithObstacles:
         # ======================================================================
         # 5. 状态维度计算
         # ======================================================================
-        # 10（旧版基础）+ n_obstacles*3（障碍物）+ 4（Z轴）+ 8（3D姿态）
+        # 10（旧版基础 XY 段）+ n_obstacles*3（障碍物）+ 4（Z轴）+ 8（完整3D姿态：roll/pitch/yaw + 速度）
+        # 末尾共 12 维，通过负索引访问（[-12] ~ [-1]）
         self.state_dim = 10 + (self.n_obstacles * 3) + 4 + 8
  
         # ======================================================================
@@ -193,25 +228,25 @@ class CableRobotEnvWithObstacles:
         # ======================================================================
         current_dir   = os.path.dirname(os.path.abspath(__file__))
         self._assets_dir = os.path.join(current_dir, "assets")
-
+ 
         # Auto-regenerate rope XML from config before loading
         from assets.generate_four_cables_with_plate import main as generate_rope_xml
         generate_rope_xml()
-
+ 
         base_xml_path = os.path.join(
             self._assets_dir,
             "demo_fourCable_withSteel_withSensor_cylinder.xml"
         )
         if not os.path.exists(base_xml_path):
             raise FileNotFoundError(f"Base XML not found: {base_xml_path}")
-
+ 
         with open(base_xml_path, "r", encoding="utf-8") as f:
             self._base_xml_content = f.read()
  
         self.model = mujoco.MjModel.from_xml_path(base_xml_path)
         self.data  = mujoco.MjData(self.model)
         self.model.opt.timestep = self.physics_dt
-
+ 
         # ----------------------------------------------------------------------
         # 【核心修复】：让 Pinocchio 只加载纯净的机械臂模型
         # ----------------------------------------------------------------------
@@ -225,7 +260,7 @@ class CableRobotEnvWithObstacles:
         
         if not os.path.exists(arm_model_path):
             raise FileNotFoundError(f"找不到纯机械臂模型文件: {arm_model_path}，请提供仅包含机械臂的 URDF 或 XML。")
-
+ 
         try:
             # 如果是 URDF 文件，用 buildModelFromUrdf
             if arm_model_path.endswith(".urdf"):
@@ -303,31 +338,22 @@ class CableRobotEnvWithObstacles:
                                       scene_plan_config, rng=None):
         """
         一站式环境生成器：随机生成障碍物、执行 2D A* 规划、生成 3D 轨迹、并组装 XML。
- 
-        Args:
-            start_xy:           起点 XY（带噪声的真实起点）
-            target_xy:          终点 XY
-            base_xml_content:   原始 XML 字符串
-            scene_plan_config:  合并后的配置字典，包含 "scene" + "planning" 两部分的所有键
-            rng:                numpy 随机生成器（为 None 时自动创建）
- 
-        Returns:
-            dict:
-                "obstacles": [(x, y, r), ...]   障碍物列表
-                "path_3d":   np.ndarray          3D 引导轨迹
-                "xml_content": str               注入了障碍物与轨迹球的 XML
         """
         if rng is None:
             rng = np.random.default_rng()
- 
+
         start_xy  = np.asarray(start_xy,  dtype=float).reshape(2)
         target_xy = np.asarray(target_xy, dtype=float).reshape(2)
- 
+
         # 统一读取来自合并 dict 的参数
         p_radius    = scene_plan_config["payload_radius"]
         p_margin    = scene_plan_config["planning_margin"]
         min_clearance = p_radius + p_margin   # 起终点防撞保护圈半径
- 
+
+        # 【新增】：定义机械臂基座为虚拟障碍物
+        base_xy = np.array([0.0, 0.0])
+        base_radius = 0.15  # 假设机械臂基座和第一关节占据的物理半径约为 0.15 米
+
         # ======================================================================
         # 步骤 1：在两点连线附近随机生成障碍物
         # ======================================================================
@@ -335,10 +361,10 @@ class CableRobotEnvWithObstacles:
         length    = np.linalg.norm(delta)
         direction = np.array([1.0, 0.0]) if length < 1e-6 else delta / length
         normal    = np.array([-direction[1], direction[0]])   # 垂直于连线方向
- 
+
         obstacles = []
         r_min, r_max = scene_plan_config["radius_range"]
- 
+
         for _ in range(scene_plan_config["n_obstacles"]):
             center = None
             r      = None
@@ -349,133 +375,141 @@ class CableRobotEnvWithObstacles:
                                       scene_plan_config["path_width"])
                 center = along + off * normal
                 r      = rng.uniform(r_min, r_max)
- 
+
                 d_start  = np.linalg.norm(center - start_xy)
                 d_target = np.linalg.norm(center - target_xy)
-                if d_start >= (min_clearance + r) and d_target >= (min_clearance + r):
+                # 【修改】：计算与机械臂基座的距离，确保生成的障碍物不会和基座重叠
+                d_base   = np.linalg.norm(center - base_xy)
+                
+                if (d_start >= (min_clearance + r) and 
+                    d_target >= (min_clearance + r) and 
+                    d_base >= (min_clearance + r + base_radius)):
                     obstacles.append((float(center[0]), float(center[1]), float(r)))
                     break
             else:
                 # 兜底：500 次均未找到合法位置，强行放入最后一个采样位置
                 if center is not None:
                     obstacles.append((float(center[0]), float(center[1]), float(r)))
- 
+
         # ======================================================================
         # 步骤 2：2D A* 路径规划
         # ======================================================================
-        if not obstacles:
-            # 无障碍物时直接连线
+        # 【修改】：将基座加入专门用于寻路的“规划障碍物”列表
+        planning_obstacles = obstacles + [(0.0, 0.0, base_radius)]
+
+        grid_res = scene_plan_config["planning_grid_res"]
+        xs = [start_xy[0], target_xy[0]]
+        ys = [start_xy[1], target_xy[1]]
+        
+        # 【修改】：使用 planning_obstacles 计算网格边界
+        for (ox, oy, r) in planning_obstacles:
+            r_eff = r + min_clearance
+            xs.extend([ox - r_eff, ox + r_eff])
+            ys.extend([oy - r_eff, oy + r_eff])
+
+        x_min = min(xs) - scene_plan_config["bounds_margin"]
+        x_max = max(xs) + scene_plan_config["bounds_margin"]
+        y_min = min(ys) - scene_plan_config["bounds_margin"]
+        y_max = max(ys) + scene_plan_config["bounds_margin"]
+        nx = max(2, int(np.ceil((x_max - x_min) / grid_res)))
+        ny = max(2, int(np.ceil((y_max - y_min) / grid_res)))
+
+        def world_to_grid(x, y):
+            i = max(0, min(nx - 1, int((x - x_min) / grid_res)))
+            j = max(0, min(ny - 1, int((y - y_min) / grid_res)))
+            return i, j
+
+        def grid_to_world(i, j):
+            return x_min + (i + 0.5) * grid_res, y_min + (j + 0.5) * grid_res
+
+        # 构建占据栅格
+        occ = np.zeros((nx, ny), dtype=bool)
+        for i in range(nx):
+            for j in range(ny):
+                wx, wy = grid_to_world(i, j)
+                # 【修改】：使用 planning_obstacles 进行碰撞检测
+                for (ox, oy, r) in planning_obstacles:
+                    if (wx - ox) ** 2 + (wy - oy) ** 2 < (r + min_clearance) ** 2:
+                        occ[i, j] = True
+                        break
+
+        def find_nearest_free(i0, j0, search_radius=5):
+            if not occ[i0, j0]:
+                return i0, j0
+            best, best_d2 = None, None
+            for di in range(-search_radius, search_radius + 1):
+                for dj in range(-search_radius, search_radius + 1):
+                    ni, nj = i0 + di, j0 + dj
+                    if 0 <= ni < nx and 0 <= nj < ny and not occ[ni, nj]:
+                        d2 = di * di + dj * dj
+                        if best is None or d2 < best_d2:
+                            best, best_d2 = (ni, nj), d2
+            return best
+
+        start_ij = find_nearest_free(*world_to_grid(*start_xy)) or world_to_grid(*start_xy)
+        goal_ij  = find_nearest_free(*world_to_grid(*target_xy)) or world_to_grid(*target_xy)
+
+        # A* 搜索
+        open_heap = []
+        g_cost    = {start_ij: 0.0}
+        parent    = {}
+        import heapq
+        heapq.heappush(open_heap, (
+            float(np.hypot(grid_to_world(*start_ij)[0] - target_xy[0],
+                           grid_to_world(*start_ij)[1] - target_xy[1])),
+            start_ij
+        ))
+        neighbors = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
+        closed    = set()
+        found     = False
+        expansions = 0
+
+        while open_heap and expansions < scene_plan_config["max_expansions"]:
+            _, current = heapq.heappop(open_heap)
+            if current in closed:
+                continue
+            if current == goal_ij:
+                found = True
+                break
+            closed.add(current)
+            expansions += 1
+            for di, dj in neighbors:
+                ni, nj = current[0] + di, current[1] + dj
+                if not (0 <= ni < nx and 0 <= nj < ny):
+                    continue
+                if occ[ni, nj]:
+                    continue
+                step_cost = grid_res if (di == 0 or dj == 0) else grid_res * 1.414
+                new_g     = g_cost[current] + step_cost
+                neighbor  = (ni, nj)
+                if neighbor not in g_cost or new_g < g_cost[neighbor]:
+                    g_cost[neighbor]  = new_g
+                    parent[neighbor]  = current
+                    h = float(np.hypot(grid_to_world(ni, nj)[0] - target_xy[0],
+                                       grid_to_world(ni, nj)[1] - target_xy[1]))
+                    heapq.heappush(open_heap, (new_g + h, neighbor))
+
+        if not found:
+            # A* 失败时回退到直线
             path_2d = np.vstack([start_xy, target_xy])
         else:
-            grid_res = scene_plan_config["planning_grid_res"]
-            xs = [start_xy[0], target_xy[0]]
-            ys = [start_xy[1], target_xy[1]]
-            for (ox, oy, r) in obstacles:
-                r_eff = r + min_clearance
-                xs.extend([ox - r_eff, ox + r_eff])
-                ys.extend([oy - r_eff, oy + r_eff])
- 
-            x_min = min(xs) - scene_plan_config["bounds_margin"]
-            x_max = max(xs) + scene_plan_config["bounds_margin"]
-            y_min = min(ys) - scene_plan_config["bounds_margin"]
-            y_max = max(ys) + scene_plan_config["bounds_margin"]
-            nx = max(2, int(np.ceil((x_max - x_min) / grid_res)))
-            ny = max(2, int(np.ceil((y_max - y_min) / grid_res)))
- 
-            def world_to_grid(x, y):
-                i = max(0, min(nx - 1, int((x - x_min) / grid_res)))
-                j = max(0, min(ny - 1, int((y - y_min) / grid_res)))
-                return i, j
- 
-            def grid_to_world(i, j):
-                return x_min + (i + 0.5) * grid_res, y_min + (j + 0.5) * grid_res
- 
-            # 构建占据栅格
-            occ = np.zeros((nx, ny), dtype=bool)
-            for i in range(nx):
-                for j in range(ny):
-                    wx, wy = grid_to_world(i, j)
-                    for (ox, oy, r) in obstacles:
-                        if (wx - ox) ** 2 + (wy - oy) ** 2 < (r + min_clearance) ** 2:
-                            occ[i, j] = True
-                            break
- 
-            def find_nearest_free(i0, j0, search_radius=5):
-                if not occ[i0, j0]:
-                    return i0, j0
-                best, best_d2 = None, None
-                for di in range(-search_radius, search_radius + 1):
-                    for dj in range(-search_radius, search_radius + 1):
-                        ni, nj = i0 + di, j0 + dj
-                        if 0 <= ni < nx and 0 <= nj < ny and not occ[ni, nj]:
-                            d2 = di * di + dj * dj
-                            if best is None or d2 < best_d2:
-                                best, best_d2 = (ni, nj), d2
-                return best
- 
-            start_ij = find_nearest_free(*world_to_grid(*start_xy)) or world_to_grid(*start_xy)
-            goal_ij  = find_nearest_free(*world_to_grid(*target_xy)) or world_to_grid(*target_xy)
- 
-            # A* 搜索
-            open_heap = []
-            g_cost    = {start_ij: 0.0}
-            parent    = {}
-            heapq.heappush(open_heap, (
-                float(np.hypot(grid_to_world(*start_ij)[0] - target_xy[0],
-                               grid_to_world(*start_ij)[1] - target_xy[1])),
-                start_ij
-            ))
-            neighbors = [(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
-            closed    = set()
-            found     = False
-            expansions = 0
- 
-            while open_heap and expansions < scene_plan_config["max_expansions"]:
-                _, current = heapq.heappop(open_heap)
-                if current in closed:
-                    continue
-                if current == goal_ij:
-                    found = True
+            path_idx = []
+            node     = goal_ij
+            while node != start_ij:
+                path_idx.append(node)
+                node = parent.get(node)
+                if node is None:
                     break
-                closed.add(current)
-                expansions += 1
-                for di, dj in neighbors:
-                    ni, nj = current[0] + di, current[1] + dj
-                    if not (0 <= ni < nx and 0 <= nj < ny):
-                        continue
-                    if occ[ni, nj]:
-                        continue
-                    step_cost = grid_res if (di == 0 or dj == 0) else grid_res * 1.414
-                    new_g     = g_cost[current] + step_cost
-                    neighbor  = (ni, nj)
-                    if neighbor not in g_cost or new_g < g_cost[neighbor]:
-                        g_cost[neighbor]  = new_g
-                        parent[neighbor]  = current
-                        h = float(np.hypot(grid_to_world(ni, nj)[0] - target_xy[0],
-                                           grid_to_world(ni, nj)[1] - target_xy[1]))
-                        heapq.heappush(open_heap, (new_g + h, neighbor))
- 
-            if not found:
-                # A* 失败时回退到直线
-                path_2d = np.vstack([start_xy, target_xy])
-            else:
-                path_idx = []
-                node     = goal_ij
-                while node != start_ij:
-                    path_idx.append(node)
-                    node = parent.get(node)
-                    if node is None:
-                        break
-                path_idx.append(start_ij)
-                path_idx.reverse()
-                path_2d = np.array([grid_to_world(i, j) for (i, j) in path_idx], dtype=float)
- 
+            path_idx.append(start_ij)
+            path_idx.reverse()
+            path_2d = np.array([grid_to_world(i, j) for (i, j) in path_idx], dtype=float)
+
         # ======================================================================
-        # 步骤 3：生成真实 3D 轨迹（直接使用配置中的巡航高度，无需 dummy_path）
+        # 步骤 3：生成真实 3D 轨迹
         # ======================================================================
-        z_cruise = scene_plan_config["payload_z_cruise"]   # 巡航高度（来自 planning）
+        z_cruise = scene_plan_config["payload_z_cruise"]
         path_3d  = [[pt[0], pt[1], z_cruise] for pt in path_2d]
- 
+
         # 终点正上方垂直下降段
         last_xy    = path_2d[-1]
         descent_zs = np.linspace(
@@ -485,15 +519,14 @@ class CableRobotEnvWithObstacles:
         )[1:]
         for z in descent_zs:
             path_3d.append([float(last_xy[0]), float(last_xy[1]), float(z)])
- 
+
         path_3d = np.array(path_3d)
- 
+
         # ======================================================================
         # 步骤 4：组装 XML（注入障碍物几何体、轨迹球、起终点标记）
         # ======================================================================
         xml = base_xml_content
- 
-        # 插入 obstacle 材质（只在有障碍物时插入）
+
         if obstacles:
             xml = xml.replace(
                 '  </asset>',
@@ -501,10 +534,10 @@ class CableRobotEnvWithObstacles:
                 '  </asset>',
                 1
             )
- 
-        # 障碍物圆柱体
-        obs_z   = scene_plan_config["obstacle_z_center"]     # 来自 scene
-        obs_hh  = scene_plan_config["obstacle_halfheight"]   # 来自 scene
+
+        # 【注】：这里渲染 XML 时仍然使用原本的 obstacles 列表，不包含机械臂基座
+        obs_z   = scene_plan_config["obstacle_z_center"]
+        obs_hh  = scene_plan_config["obstacle_halfheight"]
         obstacle_bodies = "".join([
             f'    <body name="obstacle_{i}" pos="{x} {y} {obs_z}">\n'
             f'      <geom type="cylinder" size="{r} {obs_hh}" pos="0 0 0" '
@@ -512,8 +545,7 @@ class CableRobotEnvWithObstacles:
             f'    </body>\n'
             for i, (x, y, r) in enumerate(obstacles)
         ])
- 
-        # 轨迹可视化球（位置直接来自 3D 路径，无需后续挪动）
+
         path_bodies = "".join([
             f'    <body name="path_pt_{i}" pos="{p[0]} {p[1]} {p[2]}">\n'
             f'      <geom type="sphere" size="0.01" rgba="0 0 1 1" '
@@ -521,9 +553,8 @@ class CableRobotEnvWithObstacles:
             f'    </body>\n'
             for i, p in enumerate(path_3d)
         ])
- 
-        # 起终点标记球
-        endpoint_z = obs_z + obs_hh + scene_plan_config["endpoint_z_offset"]  # 来自 scene
+
+        endpoint_z = obs_z + obs_hh + scene_plan_config["endpoint_z_offset"]
         endpoint_bodies = (
             f'    <body name="path_start" pos="{start_xy[0]} {start_xy[1]} {endpoint_z}">\n'
             f'      <geom type="sphere" size="0.012" rgba="1 0 0 1" '
@@ -534,8 +565,7 @@ class CableRobotEnvWithObstacles:
             f'contype="0" conaffinity="0"/>\n'
             f'    </body>\n'
         )
- 
-        # 文本注入（在地板几何体后方插入所有新增实体）
+
         replacement = (
             '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n'
             + obstacle_bodies + path_bodies + endpoint_bodies + '    '
@@ -544,14 +574,13 @@ class CableRobotEnvWithObstacles:
             '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',
             replacement, 1
         )
- 
-        # 移动目标标记到真实终点
+
         xml = re.sub(
             r'<body name="target" pos="[^"]+">',
             f'<body name="target" pos="{target_xy[0]} {target_xy[1]} 0">',
             xml, count=1
         )
- 
+
         return {
             "obstacles":   obstacles,
             "path_3d":     path_3d,
@@ -563,7 +592,7 @@ class CableRobotEnvWithObstacles:
     # ==========================================================================
     def reset(self):
         rng = self._obstacle_rng
-
+ 
         # === 1. Task: start / target positions ================================
         noise = self.init_position_range
         start_x = self.default_start_xy[0] + rng.uniform(-noise, noise)
@@ -571,7 +600,7 @@ class CableRobotEnvWithObstacles:
         start_xy = np.array([start_x, start_y])
         target_xy = self.default_target.copy()
         self.target_pos = target_xy
-
+ 
         # === 2. Scene: obstacles + 2D path + 3D trajectory + XML ==============
         scene_plan_cfg = {**self.config["scene"], **self.config["planning"]}
         scene_data = CableRobotEnvWithObstacles.generate_scene_and_trajectory(
@@ -581,7 +610,7 @@ class CableRobotEnvWithObstacles:
         )
         self._obstacles = scene_data["obstacles"]
         self._planned_path = scene_data["path_3d"]
-
+ 
         # === 3. Reload MuJoCo model from generated XML ========================
         fd, path = tempfile.mkstemp(suffix=".xml", dir=self._assets_dir, prefix="obstacles_")
         try:
@@ -604,11 +633,11 @@ class CableRobotEnvWithObstacles:
             try:
                 if os.path.exists(path): os.remove(path)
             except Exception: pass
-
+ 
         # === 4. Set qpos: all joints to a clean initial state =================
         self.data.qpos[:] = 0.0
         self.data.qvel[:] = 0.0
-
+ 
         for j in range(self.model.njnt):
             adr = self.model.jnt_qposadr[j]
             jtype = self.model.jnt_type[j]
@@ -616,70 +645,74 @@ class CableRobotEnvWithObstacles:
                 self.data.qpos[adr:adr + 4] = [1, 0, 0, 0]
             elif jtype == mujoco.mjtJoint.mjJNT_FREE:
                 self.data.qpos[adr + 3:adr + 7] = [1, 0, 0, 0]
-
+ 
         # Prefab free joint
         init_prefab = np.array(self.config["reset"]["init_qpos_prefab"], dtype=np.float64)
         init_prefab[0] = start_x
         init_prefab[1] = start_y
         self.data.qpos[-7:] = init_prefab
         prefab_z = init_prefab[2]
-
+ 
         # Arm joints: IK or default
         if self.config["reset"].get("ik_enabled", False):
             self.data.qpos[:7] = self._solve_ik(
                 target_xy=np.array([start_x, start_y]), prefab_z=prefab_z)
         else:
             self.data.qpos[:7] = np.array(self.config["reset"]["init_qpos_arm"])
-
+ 
         # Target body position
         self.model.body_pos[self.target_body_id][:2] = target_xy
-
+ 
         # === 5. Sync derived quantities (Mocap 逻辑彻底移除) ==================
         ee_body_id = self.model.body("link7").id
         mujoco.mj_forward(self.model, self.data)
         
         # 获取当前机械臂末端的真实位置，作为 IK 控制的起点
         initial_ee_pos = self.data.xpos[ee_body_id].copy()
-
+ 
         # === 6. Warmup: let ropes settle, lock arm + prefab ===================
         arm_qpos_hold = self.data.qpos[:7].copy()
         prefab_qpos_hold = self.data.qpos[-7:].copy()
         
         # 【核心新增】将初始姿态立刻下发给电机，防止刚开始物理模拟时机械臂瘫软
         self.data.ctrl[:7] = arm_qpos_hold
-
+ 
         for _ in range(self.config["reset"]["warmup_steps"]):
             self.data.qpos[:7] = arm_qpos_hold
             self.data.qvel[:7] = 0.0
             self.data.qpos[-7:] = prefab_qpos_hold
             self.data.qvel[-6:] = 0.0
             mujoco.mj_step(self.model, self.data)
-
+ 
         self.data.qpos[:7] = arm_qpos_hold
         self.data.qvel[:7] = 0.0
         self.data.qpos[-7:] = prefab_qpos_hold
         self.data.qvel[-6:] = 0.0
         mujoco.mj_forward(self.model, self.data)
-
+ 
+        # [ENV-BUG-A 修复] warmup 完成后重新读取 EE site 位置，
+        # 确保虚拟控制目标与真实末端位置严格对齐（而非 warmup 前的旧值）
+        initial_ee_pos = self.data.site_xpos[self.ee_site_id].copy()
+ 
         # === 7. Initialize tracking state =====================================
         self.current_step = 0
-        # 将末端初始位置赋给虚拟控制目标
+        # 将末端（warmup后真实）位置赋给虚拟控制目标
         self.current_mocap_pos = initial_ee_pos.copy()
         self.current_mocap_vel = np.zeros(3)
         self.current_mocap_euler = np.zeros(3)
         self.current_mocap_euler_vel = np.zeros(3)
         self.current_mocap_yaw = 0.0
         self.current_mocap_yaw_vel = 0.0
-
+ 
         self.action_queue.clear()
         for _ in range(self.latency_steps):
             self.action_queue.append(np.zeros(self.action_dim))
-
+ 
         self.current_wp_idx = 0
         self.reached_final = False
         self.last_dist = None
         self.last_wp_idx = -1
-
+ 
         # === 8. Debug output ==================================================
         ee_pos = self.data.site_xpos[self.ee_site_id]
         prefab_pos = self.data.body('prefab').xpos
@@ -688,18 +721,18 @@ class CableRobotEnvWithObstacles:
         print(f"[RESET] Prefab: {np.round(prefab_pos, 4)}")
         print(f"[RESET] Target: {np.round(self.current_mocap_pos, 4)} (Virtual Target)")
         print(f"[RESET] dz={ee_pos[2] - prefab_pos[2]:.4f}  dxy={np.linalg.norm(ee_pos[:2] - prefab_pos[:2]):.4f}  rope={rope_len:.4f}")
-
+ 
         # === 9. Viewer sync + return obs ======================================
         if self.render_mode and self.viewer is not None:
             self.viewer.sync()
-
+ 
         obs = self._get_obs()
         if self._planned_path is not None and len(self._planned_path) > 0:
             payload_z = self.data.body('prefab').xpos[2]
             current_pos = np.array([obs[4], obs[5], payload_z])
             self.last_dist = np.linalg.norm(current_pos - self._planned_path[0])
             self.last_wp_idx = 0
-
+ 
         return obs
  
     # ==========================================================================
@@ -746,11 +779,12 @@ class CableRobotEnvWithObstacles:
         # (2) 【修复】旋转部分积分：与平移部分保持严格相同的二阶 Euler，并彻底弃用 alpha_z
         self.current_mocap_euler += self.current_mocap_euler_vel * dt + 0.5 * a_euler * dt ** 2
         self.current_mocap_euler_vel += a_euler * dt
-
-        # [BUG-6 修复] 地板夹紧：动捕点 Z 不能低于 0.4 m（旧版保护逻辑）
-        # 防止动捕点（末端执行器代理）穿入地面导致物理仿真数值爆炸
-        if self.current_mocap_pos[2] < 0.4:
-            self.current_mocap_pos[2] = 0.4
+ 
+        # [ENV-BUG-C 修复] 地板夹紧阈值从 0.4m 降为 0.25m，
+        # 防止在末端正常下降过程中（目标 Z ≈ 0.70m）意外触发夹紧产生速度突变。
+        # 0.25m 以下 EE 必然与地面冲突，此时截断是合理的。
+        if self.current_mocap_pos[2] < 0.25:
+            self.current_mocap_pos[2] = 0.25
             self.current_mocap_vel[2] = 0.0
             
  
@@ -951,26 +985,25 @@ class CableRobotEnvWithObstacles:
     # ==========================================================================
     def _get_obs(self):
         """
-        观测空间整合（维度与旧版高度兼容，新增旋转状态）：
+        观测空间整合（末尾 12 维保持固定负索引布局，不受障碍物数量影响）：
  
         布局：
-          [0-1]   mocap_x, mocap_y
-          [2-3]   mocap_vx, mocap_vy
-          [4-5]   payload_x, payload_y        ← 与旧版 obs[4]/obs[5] 对齐
-          [6-7]   payload_vx, payload_vy      ← 与旧版 obs[6]/obs[7] 对齐
-          [8-9]   rel_tx, rel_ty              ← 与旧版 obs[8]/obs[9] 对齐
-          [10 ~ 10+3*n-1]  障碍物 (ox, oy, r) * n_obstacles
-          [-8]    mocap_z
-          [-7]    mocap_vz
-          [-6]    payload_z                   ← xyc 钩子
-          [-5]    payload_vz                  ← xyc 钩子
-          [-4]    mocap_yaw                   ← 新增
-          [-3]    mocap_yaw_vel               ← 新增
-          [-2]    payload_yaw                 ← 新增（占位，当前为 0）
-          [-1]    payload_yaw_vel             ← 新增（占位，当前为 0）
+          [0-1]   mocap_x, mocap_y               ← 固定
+          [2-3]   mocap_vx, mocap_vy             ← 固定
+          [4-5]   payload_x, payload_y           ← 固定，与旧版 obs[4]/obs[5] 对齐
+          [6-7]   payload_vx, payload_vy         ← 固定，与旧版 obs[6]/obs[7] 对齐
+          [8-9]   rel_tx, rel_ty                 ← 固定，与旧版 obs[8]/obs[9] 对齐
+          [10 ~ 10+3*n-1]  障碍物 (ox, oy, r) * n_obstacles  ← 可变长度
+          ── 末尾 12 维（负索引），不受 n_obstacles 影响 ──
+          [-12] mocap_z     [-11] mocap_vz
+          [-10] payload_z   [-9]  payload_vz
+          [-8]  mocap_roll  [-7]  mocap_roll_vel
+          [-6]  mocap_pitch [-5]  mocap_pitch_vel
+          [-4]  mocap_yaw   [-3]  mocap_yaw_vel
+          [-2]  payload_yaw [-1]  payload_yaw_vel
  
-        注意：[BUG-4] 修复 —— 负载 XY/速度使用真实物理值而不依赖 obs 索引自取，
-        与旧版的 xpos / qvel 读取逻辑完全对齐。
+        ⚠️ 控制器读取末尾物理状态时必须用负索引，正向索引会被障碍物数据错位偏移！
+        [BUG-4 修复] 负载 XY/速度使用真实物理值（xpos/qvel），不依赖 obs 索引自取。
         """
         # ------------------------------------------------------------------
         # 动捕点平移状态（来自内部追踪变量）
@@ -1024,9 +1057,13 @@ class CableRobotEnvWithObstacles:
         # 负载姿态 (目前为 0 占位，如需更精确的防摆可从 self.data.qpos 中解算)
         payload_yaw     = 0.0  
         payload_yaw_vel = 0.0  
-
+ 
         # ------------------------------------------------------------------
-        # 拼接（严格保证末尾 12 维顺序与 NMPC 控制器匹配）
+        # 拼接（末尾 12 维通过负索引访问，布局与 NMPC 控制器约定严格对齐）
+        # 负索引映射：
+        #   [-12]=mocap_z [-11]=mocap_vz [-10]=payload_z [-9]=payload_vz
+        #   [-8]=mocap_roll [-7]=mocap_roll_vel [-6]=mocap_pitch [-5]=mocap_pitch_vel
+        #   [-4]=mocap_yaw  [-3]=mocap_yaw_vel  [-2]=payload_yaw [-1]=payload_yaw_vel
         # ------------------------------------------------------------------
         return np.array(
             [mocap_x, mocap_y, mocap_vx, mocap_vy,
@@ -1034,9 +1071,9 @@ class CableRobotEnvWithObstacles:
              rel_tx, rel_ty]
             + obs_data[:target_len]
             + [
-                mocap_z, mocap_vz, payload_z, payload_vz,           # [-12] 到 [-9]
-                mocap_roll, mocap_roll_vel, mocap_pitch, mocap_pitch_vel, # [-8] 到 [-5]
-                mocap_yaw, mocap_yaw_vel, payload_yaw, payload_yaw_vel    # [-4] 到 [-1]
+                mocap_z, mocap_vz, payload_z, payload_vz,                      # [-12] ~ [-9]
+                mocap_roll, mocap_roll_vel, mocap_pitch, mocap_pitch_vel,       # [-8]  ~ [-5]
+                mocap_yaw, mocap_yaw_vel, payload_yaw, payload_yaw_vel         # [-4]  ~ [-1]
               ],
             dtype=np.float32
         )
@@ -1048,7 +1085,7 @@ class CableRobotEnvWithObstacles:
         """
         雅可比伪逆 IK：求解机械臂 7 关节角，使 attachment_site 到达
         (target_xy[0], target_xy[1], prefab_z + height_above)，姿态垂直朝下。
-
+ 
         返回: np.ndarray (7,) 关节角；若未收敛则返回 config 中的默认值。
         """
         cfg_ik = self.config["reset"]
@@ -1062,14 +1099,14 @@ class CableRobotEnvWithObstacles:
         max_iter = cfg_ik["ik_max_iter"]
         tol_pos  = cfg_ik["ik_tol_pos"]
         tol_rot  = cfg_ik["ik_tol_rot"]
-
+ 
         target_pos = np.array([target_xy[0], target_xy[1], prefab_z + height])
-
+ 
         # 在独立的 data 副本上求解，避免污染主仿真状态
         data_ik = mujoco.MjData(self.model)
         n_joints = 7
         site_id = self.ee_site_id
-
+ 
         # 初始猜测：优先使用上次 IK 成功结果（热启动），否则用默认值
         if hasattr(self, '_last_ik_qpos') and self._last_ik_qpos is not None:
             data_ik.qpos[:n_joints] = self._last_ik_qpos.copy()
@@ -1077,15 +1114,15 @@ class CableRobotEnvWithObstacles:
             data_ik.qpos[:n_joints] = np.array(
                 self.config["reset"]["init_qpos_arm"], dtype=np.float64
             )
-
+ 
         jacp = np.zeros((3, self.model.nv))
         jacr = np.zeros((3, self.model.nv))
         step_pos, step_rot = 0.5, 0.3
-
+ 
         converged = False
         for i in range(max_iter):
             mujoco.mj_forward(self.model, data_ik)
-
+ 
             pos_err = target_pos - data_ik.site_xpos[site_id]
             # 姿态误差：四元数差 → 角轴
             q_cur = np.zeros(4)
@@ -1097,23 +1134,23 @@ class CableRobotEnvWithObstacles:
             if q_err[0] < 0:
                 q_err *= -1
             rot_err = 2.0 * q_err[1:]
-
+ 
             if np.linalg.norm(pos_err) < tol_pos and np.linalg.norm(rot_err) < tol_rot:
                 converged = True
                 break
-
+ 
             mujoco.mj_jacSite(self.model, data_ik, jacp, jacr, site_id)
             Jp = jacp[:, :n_joints]
             Jr = jacr[:, :n_joints]
             dq = step_pos * Jp.T @ pos_err + step_rot * Jr.T @ rot_err
             data_ik.qpos[:n_joints] += dq
-
+ 
             # 关节限位裁剪
             for j in range(n_joints):
                 lo, hi = self.model.jnt_range[j]
                 if lo < hi:
                     data_ik.qpos[j] = np.clip(data_ik.qpos[j], lo, hi)
-
+ 
         if not converged:
             print(f"[IK] NOT converged (iter={max_iter}), using default qpos")
             return np.array(self.config["reset"]["init_qpos_arm"], dtype=np.float64)
@@ -1121,7 +1158,7 @@ class CableRobotEnvWithObstacles:
         self._last_ik_qpos = result
         print(f"[IK] Converged! qpos={np.round(result, 4)}")
         return result
-
+ 
     # ==========================================================================
     # 辅助调试工具（保留自旧版）
     # ==========================================================================
@@ -1154,8 +1191,8 @@ class CableRobotEnvWithObstacles:
         if self._planned_path is None:
             return None
         return np.array(self._planned_path, copy=True)
-
-
+ 
+ 
 class MPCPinocchioIKSolver:
     def __init__(self, model_roboplan, data_roboplan, collision_model=None):
         """
@@ -1174,11 +1211,11 @@ class MPCPinocchioIKSolver:
         # 关键优化 1：针对 MPC 实时追踪的 IK 参数配置
         # ---------------------------------------------------------
         options = DifferentialIkOptions(
-            max_iters=50,         # MPC 连续追踪不需要像 demo 里的 200 次，50 次足够
-            max_retries=1,        # 实时控制中禁止重试跳跃，必须保持连续性
-            damping=1e-3,         # 阻尼项 (DLS)，防止奇异点引发大幅度跳动
-            min_step_size=0.1,
-            max_step_size=0.5,
+            max_iters=100,         # MPC 连续追踪不需要像 demo 里的 200 次，50 次足够
+            max_retries=0,        # 实时控制中禁止重试跳跃，必须保持连续性
+            damping=1e-2,         # 阻尼项 (DLS)，防止奇异点引发大幅度跳动
+            min_step_size=0.01,
+            max_step_size=0.2,
             ignore_joint_indices=[], # 如果你有夹爪，把夹爪的 index 放在这里忽略掉
             rng_seed=None,
         )
@@ -1199,7 +1236,7 @@ class MPCPinocchioIKSolver:
         self.nullspace_components = [
             lambda m, q: joint_limit_nullspace_component(m, q, gain=1.0, padding=0.025)
         ]
-
+ 
     def solve_4d(self, current_q, target_x, target_y, target_z, target_yaw):
         """
         根据 MPC 给出的 4D 目标，计算 KUKA 的 7 关节角度
@@ -1213,7 +1250,7 @@ class MPCPinocchioIKSolver:
         roll = np.pi  
         pitch = 0.0
         yaw = target_yaw
-
+ 
         # 2. 构建旋转矩阵 (Z-Y-X 欧拉角转旋转矩阵)
         R_x = np.array([[1, 0, 0], 
                         [0, np.cos(roll), -np.sin(roll)], 
@@ -1225,10 +1262,10 @@ class MPCPinocchioIKSolver:
                         [np.sin(yaw), np.cos(yaw), 0], 
                         [0, 0, 1]])
         R = R_z @ R_y @ R_x
-
+ 
         # 3. 生成 Pinocchio 的 SE3 目标位姿 (等同于学长 demo 的 target_tform)
         target_tform = pinocchio.SE3(R, np.array([target_x, target_y, target_z]))
-
+ 
         # 4. 调用 Differential IK 进行求解
         # 【极其重要】：init_state 必须传入 current_q，这样 IK 才会只在前一帧的基础上微调
         q_sol = self.ik.solve(
@@ -1238,10 +1275,17 @@ class MPCPinocchioIKSolver:
             nullspace_components=self.nullspace_components,
             verbose=False # 关闭打印以防刷屏
         )
-
+ 
         if q_sol is None:
-            print("[警告] IK 求解失败，可能是目标超出了工作空间。保持原位。")
-            return current_q # 如果无解，保持当前姿态防止崩溃
-
+            # 计算当前 EE 的实际位置
+            pinocchio.forwardKinematics(self.model, self.data, current_q)
+            pinocchio.updateFramePlacements(self.model, self.data)
+            curr_ee = self.data.oMf[self.model.getFrameId(self.target_frame)].translation
+            
+            '''print(f"[IK 失败警告] 当前 EE 位置: {curr_ee}")
+            print(f"[IK 失败警告] 试图求解的死点目标: X={target_x:.3f}, Y={target_y:.3f}, Z={target_z:.3f}")
+            print(f"[IK 失败警告] 欧氏距离跳变: {np.linalg.norm(np.array([target_x, target_y, target_z]) - curr_ee):.4f}m")'''
+            return current_q
+ 
         # 如果你的模型包含夹爪等额外自由度，确保只返回前 7 个 arm 关节
         return q_sol[:7]
