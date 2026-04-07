@@ -68,7 +68,7 @@ DEFAULT_CONFIG = {
         "max_expansions":    100000,  # A* 最大扩展节点数（防死循环）
  
         "payload_z_cruise":   0.2,   # 负载平移阶段巡航高度（单位：米）
-        "target_z_descent":   0.12,   # 终点正上方垂直下潜的最低高度
+        "target_z_descent":   0.09,   # 终点正上方垂直下潜的最低高度
         "num_descent_steps":  6,      # Z 轴垂直下降段的离散点数量
     },
  
