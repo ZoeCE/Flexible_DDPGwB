@@ -5,6 +5,7 @@ import time
 import os
 import sys
 
+
 from ipdb import set_trace as xxxx
 
 # 引入环境和控制器
@@ -117,7 +118,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
 
 def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3,
                        obstacle_seed=42, save_paths_dir=None,
-                       payload_radius=0.2, planning_margin=0.2, planning_grid_res=0.02,
+                       payload_radius=0.6, planning_margin=0.5, planning_grid_res=0.02,
                        default_start_xy=None, default_target_xy=None, device_id=0):
     """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCTrajectoryTracker。"""
     
@@ -171,7 +172,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
         
     elif mode in ['obstacles', 'obstacles_base']:
         print("Initializing NMPC Trajectory Tracker (Following 3D path)...")
-        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.4)
+        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.445)
 
     if save_paths_dir is not None:
         os.makedirs(save_paths_dir, exist_ok=True)

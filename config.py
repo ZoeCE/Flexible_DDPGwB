@@ -94,7 +94,8 @@ DEFAULT_CONFIG = {
     # 6. Step 逻辑判定 (Step Logic)
     # ==========================================================================
     "step_logic": {
-        "look_ahead_dist":    0.1,    # 切换下一 Waypoint 的视距阈值
+        # 【极其关键的修复】：放宽视距阈值，允许 NMPC 抄近道时能正确触发进度与航点奖励
+        "look_ahead_dist":    0.25,   # 原为 0.1，现放宽至 0.25
         "out_of_bounds_dist": 2.0,    # 偏离目标超过此距离视为出界
         "crash_z_threshold":  0.12,   # 判定坠毁的 Z 轴高度阈值
         "crash_vz_threshold": -0.1,   # 判定坠毁的 Z 轴下降速度阈值
@@ -103,45 +104,43 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     # 7. 奖励函数系数 (Reward Shaping) — [修复：解决专家策略总收益为负的致命漏洞]
     #
-    # 设计原则（已修正）：
-    #   · success_bonus = 100.0 作为绝对量级基准，确保“成功”是压倒性的正收益。
-    #   · 致死惩罚（越界、碰撞、坠毁） = -100.0，彻底消除 Agent “开局自杀以逃避过程扣分”的动机。
-    #   · 连续负项（step, action, swing）在 130 步内累计总扣分控制在约 -15 到 -20 分，
-    #     远小于 success_bonus，确保 Agent 敢于行动。
-    #   · waypoint_bonus 提高到 5.0，真正起到稠密正向里程碑的引导作用。
+    # 设计原则（已修正为 /10 缩放版本，完美适配 Critic 拟合范围）：
+    #   · success_bonus = 10.0 作为绝对量级基准，确保“成功”是压倒性的正收益。
+    #   · 致死惩罚（越界、碰撞、坠毁） = -10.0，彻底消除 Agent “开局自杀以逃避过程扣分”的动机。
+    #   · waypoint_bonus 提高到 0.5，真正起到稠密正向里程碑的引导作用。
     # ==========================================================================
     "reward": {
         # ── 终止奖励（Terminal Rewards） ──────────────────────────────────────
         # 成功降落的一次性奖励（绝对量级基准，必须兜住所有过程惩罚）
-        "success_bonus":          100.0,
+        "success_bonus":          20.0,
         # 超时未成功的惩罚（中度惩罚）
-        "timeout_penalty":        -20.0,
+        "timeout_penalty":        -10.0,
         # 碰撞障碍物惩罚（极度恶劣，负向拉满）
-        "collision_penalty":      -100.0,
+        "collision_penalty":      -20.0,
         # 出界惩罚（极度恶劣，负向拉满）
-        "out_of_bounds_penalty":  -100.0,
+        "out_of_bounds_penalty":  -20.0,
         # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
-        "crash_penalty":          -100.0,
+        "crash_penalty":          -20.0,
 
         # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
         # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
-        "progress_coef":          20.0,
-        # progress 奖励的单步 clip 范围（放宽至 2.0，允许单步获得足够的正向激励）
-        "progress_clip":           2.0,
+        "progress_coef":          2.0,
+        # progress 奖励的单步 clip 范围（允许单步获得足够的正向激励）
+        "progress_clip":           0.2,
 
         # ── 里程碑奖励（Waypoint Bonus） ─────────────────────────────────────
-        # 每通过一个中间航点给予正向奖励，缓解稀疏性（原 0.3 无异于杯水车薪，现提至 5.0）
-        "waypoint_bonus":          5.0,
+        # 每通过一个中间航点给予正向奖励，缓解稀疏性
+        "waypoint_bonus":          0.5,
 
         # ── 连续性惩罚（Per-Step Penalties） ─────────────────────────────────
-        # 每步生存惩罚（鼓励尽快完成，130步约扣 6.5分）
+        # 每步生存惩罚（鼓励尽快完成，130步约扣 0.65分）
         "step_penalty":           -0.05,
         # 动作 L2 正则系数（防抖）
         "action_smooth_penalty":  -0.01,
         # 速度过快惩罚系数（防过度甩动）
-        "velocity_penalty_coef":   0.05,
+        "velocity_penalty_coef":   0.01,
         # 绳摆角惩罚系数：惩罚 payload 与 EE 的 XY 偏差
-        "swing_penalty_coef":      0.5,
+        "swing_penalty_coef":      0.05,
     },
 
     # ==========================================================================
@@ -217,10 +216,7 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 13. TD3 Agent 网络与优化器超参数 (Agent) — [CFG-2 新增]
-    #
-    #     旧版：这些参数硬编码在 WBAgent.__init__ 内，修改需要改源码。
-    #     新版：统一从 config["agent"] 读取，learn.py 传入 agent 实例后从此节覆盖。
+    # 13. TD3 Agent 网络与优化器超参数 (Agent)
     # ==========================================================================
     "agent": {
         # 网络宽度（FastActor / TwinCritic 的隐层维度）
@@ -229,9 +225,9 @@ DEFAULT_CONFIG = {
         "buffer_size":      200000,
         # 批量大小
         "batch_size":       64,
-        # 折扣因子（与旧版 gamma=0.94 保持一致）
-        "gamma":            0.9,
-        # Polyak 软更新系数（与旧版 tau=0.005 保持一致）
+        # 【关键修复】折扣因子：根据之前的深度推演，坚决锁定 0.99
+        "gamma":            0.985,
+        # Polyak 软更新系数
         "tau":              0.005,
         # Actor 学习率
         "lr_actor":         1e-4,
@@ -241,13 +237,13 @@ DEFAULT_CONFIG = {
         "policy_noise":     0.1,
         # 平滑噪声截断上限
         "noise_clip":       0.25,
-        # Actor 延迟更新频率（每 policy_freq 步 Critic 更新更新一次 Actor）
+        # Actor 延迟更新频率
         "policy_freq":      2,
         # Epsilon 初始值（专家占比）
         "epsilon_init":     1.0,
         # Epsilon 最小值
         "epsilon_min":      0.1,
-        # Epsilon 每训练步线性衰减量（与旧版 delta=5e-6 保持一致）
+        # Epsilon 每训练步线性衰减量
         "epsilon_delta":    5e-6,
         # 是否启用混合 Q（Base Bootstrapping）
         "mixed_q":          True,
@@ -258,10 +254,7 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 14. 训练流程超参数 (Train) — [CFG-1 新增]
-    #
-    #     旧版：散落在 learn.py train() 函数体内，无法从外部传入或记录。
-    #     新版：统一从 config["train"] 读取，learn.py 直接引用。
+    # 14. 训练流程超参数 (Train)
     # ==========================================================================
     "train": {
         # 总训练回合数
@@ -278,31 +271,25 @@ DEFAULT_CONFIG = {
         "save_interval":        50,
         # 日志平滑窗口（最近 N 回合的均值）
         "log_smooth_win":       20,
-        # [CFG-5 新增] 指定训练使用的 GPU 编号（-1 = CPU）
+        # 指定训练使用的 GPU 编号（-1 = CPU）
         "gpu_id":               0,
-        # [CFG-5 新增] 并行环境数量占位符（当前单进程，未来扩展）
+        # 并行环境数量占位符（当前单进程，未来扩展）
         "n_envs":               1,
     },
 
     # ==========================================================================
     # 15. 控制器超参数 (Controller) — 供 NMPCTrajectoryTracker 读取
-    #
-    #     旧版：NMPCTrajectoryTracker 硬编码 dt/N/L/threshold 等参数。
-    #     新版：统一从 config["controller"] 读取，便于全局调参。
     # ==========================================================================
     "controller": {
         # MPC 预测时域（控制步数）
         "N":                   15,
         # 控制周期，应与 sim.control_freq_hz 倒数严格一致
         "dt":                  0.1,
-        # 绳长估计：nmpc_controller_new.py 注释为 rope_length(0.4) + hook_offset_z(0.045) = 0.445
-        # NOTE: rope.hook_offset = 0.05（几何值），但 controller 使用 0.045（带滤波估计的等效值）。
-        #       两者之差 0.005m 在 NMPC 动态摆长滤波中自动补偿（estimated_L 约 0.9*L + 0.1*actual）。
-        #       如修改 rope.num_segments / rope.segment_length，需同步更新此值。
+        # 绳长估计
         "L":                   0.445,
-        # 平移动作上限 (m/s²)，对应 config["space"]["action_space_high"][0]
+        # 平移动作上限 (m/s²)
         "u_max_xy":            0.5,
-        # Z 轴动作上限 (m/s²)，放宽以加快初始高度收敛
+        # Z 轴动作上限 (m/s²)
         "u_max_z":             2.0,
         # Yaw 动作上限 (rad/s²)
         "u_max_yaw":           2.0,

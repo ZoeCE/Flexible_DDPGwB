@@ -841,6 +841,7 @@ class CableRobotEnvWithObstacles:
         if self._planned_path is not None and not self.reached_final:
             target_wp   = self._planned_path[self.current_wp_idx]
             dist_to_wp  = np.linalg.norm(current_payload_pos - target_wp)
+            
  
             # [BUG-9 修复] 切换航点时清空 last_dist，避免跨航点产生虚假进展奖励
             if self.last_wp_idx != self.current_wp_idx:
@@ -854,11 +855,12 @@ class CableRobotEnvWithObstacles:
             # 接近终点（剩余 ≤ 2 个航点）时用更小阈值 (0.06)，防止过早触发 reached_final
             total_wps  = len(self._planned_path)
             rem_wps    = total_wps - 1 - self.current_wp_idx
-            look_ahead = 0.06 if rem_wps <= 2 else self.config["step_logic"]["look_ahead_dist"]
+            look_ahead = 0.04 if rem_wps <= 2 else self.config["step_logic"]["look_ahead_dist"]
  
             if dist_to_wp < look_ahead:
                 if self.current_wp_idx < total_wps - 1:
                     self.current_wp_idx += 1
+                    self._wp_just_advanced = True
                 else:
                     self.reached_final = True
  
@@ -866,6 +868,7 @@ class CableRobotEnvWithObstacles:
         # 6. 奖励计算与终止判定
         # ======================================================================
         reward, done, success = self._compute_reward(effective_action)
+        # print(reward)
  
         # [BUG-8 修复] current_step 在步末递增，与旧版对齐
         self.current_step += 1
@@ -926,23 +929,27 @@ class CableRobotEnvWithObstacles:
 
     def _compute_reward(self, action):
         """
-        奖励计算与终止状态机（重新设计版，对应 config["reward"] 新版参数）。
-
+        奖励计算与终止状态机（双重势能场 + 动态阶段里程碑版）。
+        
         奖励组成：
         Per-step（每步）：
-            + progress_reward   ← 靠近当前航点的势能差奖励（clip 收紧）
-            + waypoint_bonus    ← 【新增】通过中间航点的里程碑奖励
+            + global_progress   ← 全局：迈向最终目标的势能奖励（兜底防迷路）
+            + local_progress    ← 局部：迈向当前航点的势能奖励（引导避障）
             - step_penalty      ← 生存惩罚（鼓励尽快完成）
             - action_penalty    ← 动作 L2 正则（抑制抖动）
             - velocity_penalty  ← 速度过载惩罚（防甩动）
-            - swing_penalty     ← 【新增】绳摆角惩罚（EE 与 payload XY 偏差）
-
+            - swing_penalty     ← 绳摆角惩罚（EE 与 payload XY 偏差）
+            
+        Milestone（航点切换时）：
+            + waypoint_bonus    ← 基础过点奖励
+            + stage_bonus       ← 【新增】基于 (当前进度/总航点数) 的动态阶段性奖励
+            
         Terminal（终止时）：
             + success_bonus     ← 成功降落
-            - timeout_penalty   ← 超时（在 step() 中追加，不在此处）
+            - timeout_penalty   ← 超时 (在 step 中计算)
             - collision_penalty ← 碰撞障碍物
             - crash_penalty     ← 坠毁（砸地/甩机）
-            - oob_penalty       ← 出界
+            - out_of_bounds     ← 出界
         """
         reward  = 0.0
         done    = False
@@ -955,12 +962,9 @@ class CableRobotEnvWithObstacles:
         # 1. 获取物理状态
         # ======================================================================
         obs = self._get_obs()
-
-        # 负载 XY 位置与速度（固定正向索引，不受障碍物影响）
         payload_xy  = obs[4:6]
         payload_vxy = obs[6:8]
 
-        # 负载 Z 位置与速度（用真实物理值）
         payload_z  = self.data.body('prefab').xpos[2]
         dof_idx    = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz = self.data.qvel[dof_idx + 2]
@@ -968,103 +972,76 @@ class CableRobotEnvWithObstacles:
         current_payload_pos = np.array([payload_xy[0], payload_xy[1], payload_z])
         payload_vel_norm    = np.linalg.norm(np.append(payload_vxy, payload_vz))
 
-        # EE（虚拟末端）XY 位置（用于绳摆角计算）
-        ee_xy = self.current_mocap_pos[:2]   # shape: (2,)
+        ee_xy = self.current_mocap_pos[:2]
 
         # ======================================================================
         # 2. 连续性惩罚（每步）
         # ======================================================================
-        # (1) 步数惩罚：确保 agent 有动力尽快完成任务
-        reward += cfg_rwd["step_penalty"]
+        reward += cfg_rwd.get("step_penalty", -0.005)
+        reward += cfg_rwd.get("action_smooth_penalty", -0.001) * float(np.sum(np.square(action)))
 
-        # (2) 动作 L2 正则：抑制高频抖动，减少机械臂磨损
-        reward += cfg_rwd["action_smooth_penalty"] * float(np.sum(np.square(action)))
-
-        # (3) 速度过载惩罚：防止 payload 大幅甩动
-        #     clip 到 [0, 0.5] 防止速度惩罚主导梯度
-        vel_pen = cfg_rwd["velocity_penalty_coef"] * payload_vel_norm
+        vel_pen = cfg_rwd.get("velocity_penalty_coef", 0.005) * payload_vel_norm
         reward -= float(np.clip(vel_pen, 0.0, 0.5))
 
-        # (4) 【新增】绳摆角惩罚：惩罚 EE XY 与 payload XY 的偏差（米）
-        #     摆角越小 → payload 越接近 EE 正下方 → 绳子越竖直（防摆目标）
-        #     偏差 clip 到 [0, 0.1] 防止初始大偏差过度惩罚
         swing_offset = float(np.linalg.norm(ee_xy - payload_xy))
-        reward -= cfg_rwd["swing_penalty_coef"] * float(np.clip(swing_offset, 0.0, 0.1))
+        reward -= cfg_rwd.get("swing_penalty_coef", 0.02) * float(np.clip(swing_offset, 0.0, 0.1))
 
-        # ======================================================================
-        # 3. 进展奖励（Dense Progress Reward，势能差密集奖励）
-        # ======================================================================
-        if self._planned_path is not None and not self.reached_final:
-            target_wp    = self._planned_path[self.current_wp_idx]
-            current_dist = float(np.linalg.norm(current_payload_pos - target_wp))
-
-            if self.last_dist is not None:
-                # 靠近航点 → 正奖励；远离 → 负奖励
-                # [CFG-3] 新版系数降低（10.0 vs 旧版 50.0），clip 收紧（±0.5 vs ±2.0）
-                progress = cfg_rwd["progress_coef"] * (self.last_dist - current_dist)
-                progress_clip = cfg_rwd.get("progress_clip", 0.5)
-                reward  += float(np.clip(progress, -progress_clip, progress_clip))
 
         # ======================================================================
         # 4. 终止条件判定（优先级：成功 > 碰撞 > 砸地 > 出界）
         # ======================================================================
-
-        # (1) 成功判定（已到达最后航点 + 多条件门控）
-        #     [BUG-11 保留] 旧版多条件门控：速度 + 高度 + 水平距离
         if self.reached_final:
             vel_xy        = float(np.linalg.norm(payload_vxy))
             dist_to_final = float(np.linalg.norm(payload_xy - self.target_pos))
 
-            if dist_to_final < 0.05 and vel_xy < 0.1 and abs(payload_vz) < 0.2:
-                reward  += cfg_rwd["success_bonus"]
+            if dist_to_final < 0.03 and vel_xy < 0.1 and abs(payload_vz) < 0.2:
+                reward  += cfg_rwd.get("success_bonus", 10.0)
                 success  = True
                 done     = True
-                return reward/10, done, success
+                return reward, done, success
             else:
-                # 到达航点区域但条件不满足（速度过大/偏离），视为摔机
-                reward += cfg_rwd["crash_penalty"]
+                reward += cfg_rwd.get("crash_penalty", -10.0)
                 done    = True
-                return reward/10, done, success
+                return reward, done, success
 
-        # (2) 碰撞惩罚
         payload_radius = self.config["planning"]["payload_radius"]
         for (ox, oy, orad) in self._obstacles:
             dist_to_obs = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
             if dist_to_obs < (orad + payload_radius):
-                reward += cfg_rwd["collision_penalty"]
+                reward += cfg_rwd.get("collision_penalty", -10.0)
                 done    = True
-                return reward/10, done, success
+                return reward, done, success
 
-        # (3) 坠毁惩罚：高度极低且正在快速下坠
         if (payload_z < cfg_logic["crash_z_threshold"] and
                 payload_vz < cfg_logic["crash_vz_threshold"]):
-            reward += cfg_rwd["crash_penalty"]
+            reward += cfg_rwd.get("crash_penalty", -10.0)
             done    = True
-            return reward/10, done, success
+            return reward, done, success
 
-        # (4) 出界判定
         dist_to_target_xy = float(np.linalg.norm(payload_xy - self.target_pos))
         if dist_to_target_xy > cfg_logic["out_of_bounds_dist"]:
-            reward += cfg_rwd["out_of_bounds_penalty"]
+            reward += cfg_rwd.get("out_of_bounds_penalty", -10.0)
             done    = True
-            return reward/10, done, success
+            return reward, done, success
 
         # ======================================================================
-        # 5. 【新增】航点里程碑奖励（在切换航点时给予小额正向奖励）
-        #    注意：航点切换逻辑在 step() 中执行，_compute_reward 在切换后调用。
-        #    因此此处通过检测 last_wp_idx != current_wp_idx 判定本步是否发生了切换。
-        #    由于 step() 已在 _compute_reward 调用前更新 current_wp_idx，
-        #    我们用实例变量 _wp_just_advanced（由 step 设置）来传递信号。
+        # 5. 【修改核心】航点里程碑奖励（基础保留 + 动态比例阶段叠加）
         # ======================================================================
-        # 实现说明：
-        #   在 step() 的航点状态机中，当 self.current_wp_idx 递增时，
-        #   设置 self._wp_just_advanced = True，此处消费并清零。
-        #   若 step() 未修改此标志（当前版本未显式设置），则降级为无里程碑奖励。
         if getattr(self, '_wp_just_advanced', False):
+            # 5.1 基础航点奖励 (可选)
             reward += cfg_rwd.get("waypoint_bonus", 0.0)
-            self._wp_just_advanced = False   # 消费信号
+            
+            # 5.2 均分总奖池作为过点奖励
+            if self._planned_path is not None:
+                total_wps = len(self._planned_path)
+                total_stage_reward = cfg_rwd.get("total_stage_reward", 1.0)
+                
+                stage_bonus = total_stage_reward / max(1, total_wps)
+                reward += stage_bonus
 
-        return reward/10, done, success
+            self._wp_just_advanced = False
+
+        return reward, done, success
  
     # ==========================================================================
     # _get_obs()

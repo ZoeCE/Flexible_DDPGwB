@@ -380,6 +380,7 @@ def train(log_dir: str, custom_config: dict = None):
     #    将完整 config 传入 env，env 内部会深度合并，不再需要手工拆分子字典
     # ──────────────────────────────────────────────────────────────────────────
     print("[Train] 初始化仿真环境...")
+    # 通过 config dict 覆盖默认配置
     env = CableRobotEnvWithObstacles(config=config)
 
     # 动态读取状态维度（由 env 内部 n_obstacles 决定）
