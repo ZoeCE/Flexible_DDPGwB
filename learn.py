@@ -5,8 +5,8 @@ import os
 from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 
 from agent import WBAgent
-from mujoco_env import CableRobotEnvWithObstacles
-from nmpc_controller import NMPCTrajectoryTracker
+from mujoco_env_new import CableRobotEnvWithObstacles
+from nmpc_controller_new import NMPCTrajectoryTracker
 
 from ipdb import set_trace as xxxx
 
@@ -90,7 +90,7 @@ def nmpc_wrapper(state_input, env_wp_idx=None):
     actions = []
     for s in states:
         # 直接调用更新后的 3D NMPC 控制器
-        act = nmpc_instance.get_tracking_action(s, env_wp_idx=env_wp_idx)
+        act = nmpc_instance.compute_action(s, target_yaw=0.0)
         actions.append(act)
 
     actions = np.array(actions, dtype=np.float32)
@@ -101,28 +101,19 @@ def train(log_dir):
     global nmpc_instance
 
     # 实例化 3D 环境，包含障碍物
-    env = CableRobotEnvWithObstacles(
-        render=False, 
-        n_obstacles=3,
-        latency_steps=1,
-        force_noise_level=0.08,
-        control_freq_hz=10,
-        init_velocity_scale=0.08,
-        init_position_range=0.00,  # 关键：消除初始随机偏移，防止起飞剧烈摇摆
-        obstacle_radius_range=(0.01, 0.02),
-        path_width=0.12,
-        default_start_xy=[0.2, 0.2],
-        default_target_xy=[0.5, 0.5],
-        payload_radius=0.10,       # 关键：增大避障安全距离，防止刮蹭碰撞
-        planning_margin=0.10,      # 关键：增大规划边距
-        planning_grid_res=0.02
-    )
+    # 通过 config 字典覆盖 DEFAULT_CONFIG 中的参数
+    custom_config = {
+        "sim": {
+            "render": False  # 在这里设置是否渲染
+        }
+    }
+    env = CableRobotEnvWithObstacles(config=custom_config)
     nmpc_instance = NMPCTrajectoryTracker()
 
     MAX_ACTION = 0.5
     # 维度严格对齐环境的 23 维和控制器的 3 维输出
-    STATE_DIM  = 23   # 10(base) + 9(obs) + 4(z_info)
-    ACTION_DIM = 3    # ax, ay, az
+    STATE_DIM  = 31  # 10(base) + 9(obs) + 4(z_info)
+    ACTION_DIM = 6    # ax, ay, az
 
     def env_aware_nmpc_wrapper(state_input):
         # 核心逻辑：只有在单步交互（非 batch）时，才强制让 NMPC 读取环境同步的路点索引
@@ -210,9 +201,12 @@ def train(log_dir):
                 agent.epsilon = 1.0
 
             state = env.reset()
-            nmpc_instance.reset_state_machine()
+            # 直接删掉 nmpc_instance.reset_state_machine() 相关的代码
+            # 获取当前目标位置（用于喂给新版 NMPC）
+            target_pos = env.target_pos
+            target_yaw = 0.0  # 或者从 info 里取
             if hasattr(env, "get_planned_path"):
-                nmpc_instance.set_trajectory(env.get_planned_path())
+                nmpc_instance.set_path(env.get_planned_path())
 
             episode_reward = 0.0
             step_count     = 0
@@ -220,37 +214,75 @@ def train(log_dir):
             episode_success = False
 
             while True:
-                # Agent 根据当前 state 和 3D 专家推演动作
-                action, is_network, base_action_val = agent.act(state)
+                # ------------------------------------------------------------------
+                # 1. 动态获取当前环境的 3D 目标航点 (与环境内部状态机完美对齐)
+                # ------------------------------------------------------------------
+                if env._planned_path is not None and not env.reached_final:
+                    current_target_3d = env._planned_path[env.current_wp_idx]
+                else:
+                    current_target_3d = env.target_pos  # 最终目标
+
+                # 替换旧版 env_aware_nmpc_wrapper，直接使用新版即时控制器
+                base_action_val = nmpc_instance.compute_action(state, target_yaw=0.0)
+
+                # ------------------------------------------------------------------
+                # 2. Agent 决策与探索噪声注入
+                # ------------------------------------------------------------------
+                # Agent 根据当前 state 预测动作 (如果内部未启用专家机制，act_val可忽略)
+                action, is_network, _ = agent.act(state)
 
                 if not is_network:
                     action_exec = action.copy()
                     ratio_count += 1
                 else:
-                    # 探索噪声依然适配 3D
+                    # 探索噪声依然适配 3D (6D动作)
                     action_exec = action + np.random.normal(0, EXPLORE_NOISE, size=ACTION_DIM)
 
+                # 动作裁剪与 NaN 异常保护 (若网络崩溃，用专家动作托底)
                 action_exec = np.clip(action_exec, -MAX_ACTION, MAX_ACTION)
                 if np.isnan(action_exec).any():
                     action_exec = base_action_val.copy()
                     ratio_count += 1
 
-                # 环境执行 3D 动作
-                next_state, reward, done, success = env.step(action_exec)
+                # ------------------------------------------------------------------
+                # 3. 环境执行 3D 动作 (完美对接 Gymnasium 5 元组返回)
+                # ------------------------------------------------------------------
+                # 修正点：env.step 返回 obs, reward, terminated, truncated, info
+                next_state, reward, terminated, truncated, info = env.step(action_exec)
+                
+                # 合并终止条件与提取成功标志
+                done = terminated or truncated
+                success = info.get("is_success", False)
                 
                 if success:
                     episode_success = True
 
-                # 获取下一个状态的专家动作，env_aware 保证了航点逻辑与环境底层同步
-                next_base_action_val = env_aware_nmpc_wrapper(next_state) if not done \
-                                       else np.zeros(ACTION_DIM, dtype=np.float32)
+                # ------------------------------------------------------------------
+                # 4. 计算 Next State 的专家动作 (用于入池)
+                # ------------------------------------------------------------------
+                if not done:
+                    # 环境步进后，航点 idx 可能已更新，需重新获取以保证严格同步
+                    if env._planned_path is not None and not env.reached_final:
+                        next_target_3d = env._planned_path[env.current_wp_idx]
+                    else:
+                        next_target_3d = env.target_pos
+                        
+                    next_base_action_val = nmpc_instance.compute_action(next_state, target_yaw=0.0)
+                else:
+                    next_base_action_val = np.zeros(ACTION_DIM, dtype=np.float32)
 
-                # 将统一的 3 维数据存入回放池
+                # ------------------------------------------------------------------
+                # 5. 存入回放池并触发训练
+                # ------------------------------------------------------------------
+                # 保持你原来的参数顺序：state, action, base_action, next_base_action, next_state, reward, done
                 agent.remember(state, action_exec, base_action_val, next_base_action_val, next_state, reward, done)
 
                 if agent.buffer.size > 1024:
                     loss_c, loss_a, loss_bc = agent.train(1)
 
+                # ------------------------------------------------------------------
+                # 6. 状态流转与统计更新
+                # ------------------------------------------------------------------
                 state          = next_state
                 episode_reward += reward
                 step_count     += 1
@@ -258,9 +290,9 @@ def train(log_dir):
 
                 progress.update(task_id, advance=1)
 
-                if done or step_count >= 150:
+                # env.step 内部已经处理了超时逻辑并返回 terminated=True，直接判定 done 即可
+                if done:
                     break
-
             # ----------------------------------------------------------------
             # Episode 指标汇总
             # ----------------------------------------------------------------

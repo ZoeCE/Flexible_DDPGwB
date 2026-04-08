@@ -190,9 +190,9 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
     
     for ep in range(n_episodes):
         obs = env.reset()
-        if render:
-            print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
-            input()
+        # if render:
+            # print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
+            # input()
 
         # =========================================================
         # 【新增修改点 1】：在每回合开始时，将环境生成的 A* 路径传给 Controller
@@ -250,10 +250,9 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 
             # === 4. 回合结束判定与结算 ===
             if is_done or step >= 200:
-                if render:
-                    status = "✅ Success" if success else "❌ Failed"
-                    col_status = " (Collision!)" if episode_collision else ""
-                    print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
+                status = "✅ Success" if success else "❌ Failed"
+                col_status = " (Collision!)" if episode_collision else ""
+                print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
                 
                 # 【修复 3】补全平均步数和碰撞的统计累加逻辑
                 if success:

@@ -269,7 +269,7 @@ class NMPCTrajectoryTracker:
         # 切换路径时清空热启动，防止上一回合的解偏离新问题区域
         self.mpc.last_sol = None
         self.mpc.last_az  = 0.0
-        print(f"[Tracker] 路径已载入，共 {len(self.path)} 个航点")
+        # print(f"[Tracker] 路径已载入，共 {len(self.path)} 个航点")
 
     def compute_action(self, obs, target_yaw=0.0):
         """

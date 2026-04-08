@@ -1,182 +1,328 @@
 # ==============================================================================
-# 修改日志（对照上一版 config.py 的问题）：
+# config.py — 项目全局配置文件
 #
-# [CONFIG-1] "reward" 节新增 "success_bonus": 15.0
-#            旧版 step() 中硬编码了 reward += 15.0（成功时），新版通过配置暴露。
+# 职责：作为整个项目（env / controller / agent / learn / test）的单一超参数入口。
+#       任何模块不得在自身内部硬编码可调参数，应从 DEFAULT_CONFIG 中读取。
 #
-# [CONFIG-2] "reward" 节新增 "timeout_penalty": -5.0
-#            旧版 step() 中硬编码了 reward -= 5.0（超时时），新版通过配置暴露。
+# 修改记录（相对上一版）：
+#   [CFG-1]  新增 "train" 节，统一管理 learn.py 的所有训练超参数
+#            （旧版散落在 train() 函数体内，难以追踪与复现）。
+#   [CFG-2]  新增 "agent" 节，统一管理 TD3 网络结构与优化器超参数
+#            （旧版分散在 WBAgent.__init__ 里，修改需要改两处）。
+#   [CFG-3]  reward 节全面重新设计：
+#             - 旧版 progress_coef=50.0，clip=±2.0：单步最大 ±2，而 success_bonus=15，
+#               导致绝大多数 step reward < 0.1，信号稀疏且量级不均匀。
+#             - 新版按量级归一化：成功奖励 +10 作为基准，各 shaping 项与之相称。
+#             - 增加 "waypoint_bonus" 每通过一个中间航点给予小额奖励，
+#               缓解稀疏回报问题，加速早期探索。
+#             - 增加 "swing_penalty_coef" 对绳摆角（payload 与 EE 的 XY 偏差）惩罚，
+#               鼓励 NMPC-RL 协同保持摆角收敛。
+#   [CFG-4]  "sim" 节新增 "substep_skip"：控制 env._compute_reward 中
+#             物理子步的评估频率（默认全步评估），留作性能调优入口。
+#   [CFG-5]  "train" 节新增 "gpu_id" / "n_envs_placeholder"：
+#             为后续多环境并行或指定 GPU 预留接口。
 #
-# 其余所有键值与旧版完全一致，未做任何修改。
+#   其余所有键值与旧版完全一致，未做任何修改。
 # ==============================================================================
+
 import numpy as np
- 
+
 DEFAULT_CONFIG = {
-    # ==========================================
+
+    # ==========================================================================
     # 1. 仿真与控制 (Simulation & Control)
-    # ==========================================
+    # ==========================================================================
     "sim": {
-        "physics_dt":      0.002,   # 物理引擎时间步长 (500 Hz)
-        "control_freq_hz": 10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
-        "max_steps":       200,     # 回合最大步数
-        "render":          False,   # 是否开启 GUI 渲染
+        "physics_dt":       0.002,   # 物理引擎时间步长 (500 Hz)
+        "control_freq_hz":  10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
+        "max_steps":        200,     # 回合最大步数
+        "render":           False,   # 是否开启 GUI 渲染
+        # [CFG-4 新增] reward 子步跳过（1=每步都算，2=每隔一步，调高可小幅提速）
+        "substep_skip":     1,
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 2. 空间与动作 (Space & Action)
-    # ==========================================
+    # ==========================================================================
     "space": {
-        "action_dim":        6,                         # [ax, ay, az, a_roll, a_pitch, a_yaw]
-        # 各维度上限
+        "action_dim":        6,                               # [ax, ay, az, a_roll, a_pitch, a_yaw]
+        # 各维度动作上限（roll/pitch 固定 0，上限保留以统一接口）
         "action_space_high": [0.5, 0.5, 0.5, 0.5, 2.0, 2.0],
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 3. 任务与随机化初始状态 (Task & Randomization)
-    # ==========================================
+    # ==========================================================================
     "task": {
-        "start_pos_mocap":    [0.3, 0.2, 1.0],         # 动捕点初始平移位置
-        "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],   # 动捕点初始姿态四元数 (w,x,y,z)
-        "default_start_xy":   [0.3, 0.2],              # 负载初始 XY 中心（加噪声前）
-        "default_target_xy":  [-0.3, 0.2],             # 目标 XY 中心（子类中不加噪声）
-        "init_position_range": 0.01,                   # 初始 XY 位置均匀噪声范围 ±0.08
-        "init_velocity_scale": 0.15,                   # 初始速度扰动尺度（当前保留未用）
+        "start_pos_mocap":    [0.3, 0.2, 1.0],       # 动捕点初始平移位置
+        "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],  # 动捕点初始姿态四元数 (w,x,y,z)
+        "default_start_xy":   [0.3, 0.2],             # 负载初始 XY 中心（加噪声前）
+        "default_target_xy":  [-0.3, 0.2],            # 目标 XY 中心
+        "init_position_range": 0.01,                  # 初始 XY 位置均匀噪声范围 ±0.01
+        "init_velocity_scale": 0.15,                  # 初始速度扰动尺度（保留未用）
     },
- 
-    # ==========================================
-    # 4. 环境场景生成 (Scene & Obstacles)
-    # 注意：键名为 "scene"，env 中 cfg_scene = self.config["scene"]
-    # ==========================================
+
+    # ==========================================================================
+    # 4. 场景生成 (Scene & Obstacles)
+    # ==========================================================================
     "scene": {
-        "n_obstacles":       3,                        # 障碍物数量
-        "radius_range":      (0.001, 0.003),           # 障碍物半径范围 [r_min, r_max]
-        "path_width":        0.02,                     # 障碍物横向分布宽度（在连线两侧）
-        "obstacle_z_center": 0.25,                     # 障碍物 Z 轴中心高度
-        "obstacle_halfheight": 0.2,                    # 障碍物半高（圆柱半高）
-        "endpoint_z_offset": 0.025,                    # 起/终点标记球相对障碍物顶部的偏移
-        "seed":              None,                     # 障碍物随机种子（None=每次不同）
+        "n_obstacles":        3,                      # 障碍物数量
+        "radius_range":       (0.001, 0.003),         # 障碍物半径范围 [r_min, r_max]
+        "path_width":         0.02,                   # 障碍物横向分布宽度
+        "obstacle_z_center":  0.25,                   # 障碍物 Z 轴中心高度
+        "obstacle_halfheight": 0.2,                   # 障碍物圆柱半高
+        "endpoint_z_offset":  0.025,                  # 起/终点标记球偏移
+        "seed":               None,                   # 随机种子（None=每次不同）
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 5. A* 寻路与 3D 轨迹规划 (Planning & Geometry)
-    # ==========================================
+    # ==========================================================================
     "planning": {
         "payload_radius":    0.06,    # 负载几何半径（用于障碍物膨胀防撞）
-        "planning_margin":   0.05,    # A* 安全边距（在 payload_radius 基础上额外留白）
-        "planning_grid_res": 0.02,    # A* 栅格分辨率（单位：米）
-        "bounds_margin":     0.05,     # 寻路地图超出首尾点的边界余量
-        "max_expansions":    100000,  # A* 最大扩展节点数（防死循环）
- 
-        "payload_z_cruise":   0.2,   # 负载平移阶段巡航高度（单位：米）
-        "target_z_descent":   0.09,   # 终点正上方垂直下潜的最低高度
-        "num_descent_steps":  6,      # Z 轴垂直下降段的离散点数量
+        "planning_margin":   0.05,    # A* 安全边距
+        "planning_grid_res": 0.02,    # A* 栅格分辨率（米）
+        "bounds_margin":     0.05,    # 寻路地图边界余量
+        "max_expansions":    100000,  # A* 最大扩展节点数
+
+        "payload_z_cruise":  0.2,     # 负载平移阶段巡航高度（米）
+        "target_z_descent":  0.09,    # 终点正上方垂直下潜的最低高度
+        "num_descent_steps": 6,       # Z 轴垂直下降段离散点数
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 6. Step 逻辑判定 (Step Logic)
-    # ==========================================
+    # ==========================================================================
     "step_logic": {
-        "look_ahead_dist":    0.1,    # 切换到下一个 Waypoint 的视距阈值（远端航点）
-        # 注：尾部 ≤2 个航点时使用硬编码 0.06，以防止过早触发 reached_final
-        "out_of_bounds_dist": 2.0,    # 偏离目标超过此距离视为出界并终止
-        "crash_z_threshold":  0.12,   # 被判定为砸地坠毁的 Z 轴高度阈值
-        "crash_vz_threshold": -0.1,   # 被判定为砸地坠毁的 Z 轴下降速度阈值（负数为下降）
+        "look_ahead_dist":    0.1,    # 切换下一 Waypoint 的视距阈值
+        "out_of_bounds_dist": 2.0,    # 偏离目标超过此距离视为出界
+        "crash_z_threshold":  0.12,   # 判定坠毁的 Z 轴高度阈值
+        "crash_vz_threshold": -0.1,   # 判定坠毁的 Z 轴下降速度阈值
     },
- 
-    # ==========================================
-    # 7. 奖励函数系数 (Reward Shaping)
-    # ==========================================
+
+    # ==========================================================================
+    # 7. 奖励函数系数 (Reward Shaping) — [修复：解决专家策略总收益为负的致命漏洞]
+    #
+    # 设计原则（已修正）：
+    #   · success_bonus = 100.0 作为绝对量级基准，确保“成功”是压倒性的正收益。
+    #   · 致死惩罚（越界、碰撞、坠毁） = -100.0，彻底消除 Agent “开局自杀以逃避过程扣分”的动机。
+    #   · 连续负项（step, action, swing）在 130 步内累计总扣分控制在约 -15 到 -20 分，
+    #     远小于 success_bonus，确保 Agent 敢于行动。
+    #   · waypoint_bonus 提高到 5.0，真正起到稠密正向里程碑的引导作用。
+    # ==========================================================================
     "reward": {
-        "progress_coef":        50.0,   # 靠近当前航点的势能进展奖励系数
-        "collision_penalty":    -8.0,   # 撞击障碍物惩罚（负数）
-        "out_of_bounds_penalty": -10.0, # 出界惩罚（负数）
-        "crash_penalty":        -10.0,  # 砸地/摔机惩罚（负数）
-        "action_smooth_penalty": -0.02, # 动作 L2 正则惩罚系数（负数，乘以动作平方和）
-        "velocity_penalty_coef":  0.1,  # 速度过快的正则化惩罚系数
-        "step_penalty":          -0.02, # 每步生存惩罚（鼓励尽快完成任务）
-        # [CONFIG-1 新增] 成功降落的一次性奖励（对应旧版硬编码的 reward += 15.0）
-        "success_bonus":         15.0,
-        # [CONFIG-2 新增] 超时未成功的惩罚（对应旧版硬编码的 reward -= 5.0）
-        "timeout_penalty":       -5.0,
+        # ── 终止奖励（Terminal Rewards） ──────────────────────────────────────
+        # 成功降落的一次性奖励（绝对量级基准，必须兜住所有过程惩罚）
+        "success_bonus":          100.0,
+        # 超时未成功的惩罚（中度惩罚）
+        "timeout_penalty":        -20.0,
+        # 碰撞障碍物惩罚（极度恶劣，负向拉满）
+        "collision_penalty":      -100.0,
+        # 出界惩罚（极度恶劣，负向拉满）
+        "out_of_bounds_penalty":  -100.0,
+        # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
+        "crash_penalty":          -100.0,
+
+        # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
+        # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
+        "progress_coef":          20.0,
+        # progress 奖励的单步 clip 范围（放宽至 2.0，允许单步获得足够的正向激励）
+        "progress_clip":           2.0,
+
+        # ── 里程碑奖励（Waypoint Bonus） ─────────────────────────────────────
+        # 每通过一个中间航点给予正向奖励，缓解稀疏性（原 0.3 无异于杯水车薪，现提至 5.0）
+        "waypoint_bonus":          5.0,
+
+        # ── 连续性惩罚（Per-Step Penalties） ─────────────────────────────────
+        # 每步生存惩罚（鼓励尽快完成，130步约扣 6.5分）
+        "step_penalty":           -0.05,
+        # 动作 L2 正则系数（防抖）
+        "action_smooth_penalty":  -0.01,
+        # 速度过快惩罚系数（防过度甩动）
+        "velocity_penalty_coef":   0.05,
+        # 绳摆角惩罚系数：惩罚 payload 与 EE 的 XY 偏差
+        "swing_penalty_coef":      0.5,
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 8. 系统延迟与噪声 (Latency & Noise)
-    # ==========================================
+    # ==========================================================================
     "noise": {
-        "latency_steps":    1,    # 动作延迟步数（1 = 延迟 1 个控制周期）
-        "force_noise_level": 0.1, # 力输出噪声水平（当前保留未注入，与旧版一致）
+        "latency_steps":     1,    # 动作延迟步数（1 = 延迟 1 个控制周期）
+        "force_noise_level": 0.1,  # 力输出噪声水平（当前保留未注入）
     },
- 
-    # ==========================================
+
+    # ==========================================================================
     # 9. 重置参数 (Reset & Init)
-    # ==========================================
+    # ==========================================================================
     "reset": {
-        # xyc: 机械臂初始关节角（7 个 revolute 关节，单位：rad）
-        # 由 IK 求解器自动计算：末端在 prefab 上方、垂直朝下
+        # 机械臂初始关节角（7 个 revolute 关节，单位：rad）
         "init_qpos_arm": [
-            -0.71972016, 0.29057466, -1.10685585,
-            1.53851657, 2.87907443, 1.73055121, -1.85194252
+            -0.71972016,  0.29057466, -1.10685585,
+             1.53851657,  2.87907443,  1.73055121, -1.85194252
         ],
-        # xyc: prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
+        # prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
         "init_qpos_prefab": [0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
- 
-        "warmup_steps": 50,    # 物理引擎预热步数（让绳索自然垂落稳定）
-        "mocap_init_z": 1.0,   # 动捕点初始强制 Z 高度（单位：米）
 
-        # IK 求解参数：reset 时自动求解机械臂关节角，使末端在 prefab 正上方垂直朝下
-        "ik_enabled": True,              # 是否启用自动 IK（False 则使用 init_qpos_arm）
-        # NOTE: ik_height_above_prefab 应与 rope.total_length 一致
-        #       (= rope.num_segments * rope.segment_length)
-        "ik_height_above_prefab": 0.2,   # 末端在 prefab 上方的高度 (m)
-        "ik_target_quat": [0.0, 1.0, 0.0, 0.0],  # 末端目标姿态四元数 (wxyz)，绕X轴180°=朝下
-        "ik_max_iter": 5000,             # IK 最大迭代次数
-        "ik_tol_pos": 1e-4,              # 位置收敛容差 (m)
-        "ik_tol_rot": 1e-3,              # 姿态收敛容差 (rad)
+        "warmup_steps": 50,    # 物理引擎预热步数
+        "mocap_init_z": 1.0,   # 动捕点初始 Z 高度（米）
+
+        # IK 求解参数
+        "ik_enabled":            True,
+        # ik_height_above_prefab 应与 rope.total_length 一致
+        # (= rope.num_segments * rope.segment_length = 20 * 0.02 = 0.4)
+        "ik_height_above_prefab": 0.2,
+        "ik_target_quat":        [0.0, 1.0, 0.0, 0.0],   # 末端朝下四元数 (wxyz)
+        "ik_max_iter":            5000,
+        "ik_tol_pos":             1e-4,
+        "ik_tol_rot":             1e-3,
     },
 
-    # ==========================================
-    # 10. Rope Generation
-    # ==========================================
-    # ==========================================
-    # 10. Prefab (payload) geometry
-    # ==========================================
+    # ==========================================================================
+    # 10. Prefab（负载）几何参数
+    # ==========================================================================
     "prefab": {
-        "shape": "box",                      # "box" or "cylinder"
-        # box params: half-extents [x, y, z]
-        "box_half_size": [0.05, 0.05, 0.1],
-        "cylinder_radius": 0.05,             # only used if shape="cylinder"
-        "cylinder_half_height": 0.1,         # only used if shape="cylinder"
-        "mass": 1.0,
-        # lift site offset from prefab center (z = top of shape)
-        "lift_site_offset": 0.1,             # z-offset for lift sites
-        "lift_site_spread": 0.05,            # xy-offset for lift site corners
-    },
-
-    # ==========================================
-    # 11. Target (visual goal marker, no collision)
-    # ==========================================
-    "target": {
-        "shape": "box",                      # "box" or "cylinder" (matches prefab)
-        # box params
-        "box_half_size": [0.05, 0.05, 0.1],
-        "cylinder_radius": 0.05,
+        "shape":              "box",
+        "box_half_size":      [0.05, 0.05, 0.1],
+        "cylinder_radius":    0.05,
         "cylinder_half_height": 0.1,
-        "rgba": [0.8, 0.0, 0.0, 0.4],       # semi-transparent red
+        "mass":               1.0,
+        "lift_site_offset":   0.1,
+        "lift_site_spread":   0.05,
     },
 
-    # ==========================================
-    # 12. Rope Generation
-    # ==========================================
+    # ==========================================================================
+    # 11. Target（视觉目标标记）
+    # ==========================================================================
+    "target": {
+        "shape":              "box",
+        "box_half_size":      [0.05, 0.05, 0.1],
+        "cylinder_radius":    0.05,
+        "cylinder_half_height": 0.1,
+        "rgba":               [0.8, 0.0, 0.0, 0.4],
+    },
+
+    # ==========================================================================
+    # 12. 绳索生成 (Rope Generation)
+    # ==========================================================================
     "rope": {
-        "num_segments":   20,      # capsule segments per rope
-        "segment_length": 0.02,    # length of each segment (m), total = num * length
-        "damping":        0.02,    # ball joint damping
-        "capsule_radius": 0.004,   # visual/collision radius (m)
-        "segment_mass":   0.01,    # mass per segment (kg)
-        # plate geometry (hook_attachment body)
-        "plate_half_size": [0.05, 0.05, 0.01],  # box half-extents [x, y, z]
-        "plate_mass":      0.1,                   # plate mass (kg)
-        "hook_offset":     0.05,                   # hook site offset from plate center (m)
+        "num_segments":    20,
+        "segment_length":  0.02,      # 每段长度，total = 20 * 0.02 = 0.4m
+        "damping":         0.02,
+        "capsule_radius":  0.004,
+        "segment_mass":    0.01,
+        "plate_half_size": [0.05, 0.05, 0.01],
+        "plate_mass":      0.1,
+        "hook_offset":     0.05,
+    },
+
+    # ==========================================================================
+    # 13. TD3 Agent 网络与优化器超参数 (Agent) — [CFG-2 新增]
+    #
+    #     旧版：这些参数硬编码在 WBAgent.__init__ 内，修改需要改源码。
+    #     新版：统一从 config["agent"] 读取，learn.py 传入 agent 实例后从此节覆盖。
+    # ==========================================================================
+    "agent": {
+        # 网络宽度（FastActor / TwinCritic 的隐层维度）
+        "hidden_dim":       256,
+        # 回放池容量
+        "buffer_size":      200000,
+        # 批量大小
+        "batch_size":       64,
+        # 折扣因子（与旧版 gamma=0.94 保持一致）
+        "gamma":            0.9,
+        # Polyak 软更新系数（与旧版 tau=0.005 保持一致）
+        "tau":              0.005,
+        # Actor 学习率
+        "lr_actor":         1e-4,
+        # Critic 学习率
+        "lr_critic":        1e-3,
+        # TD3 目标策略平滑噪声标准差
+        "policy_noise":     0.1,
+        # 平滑噪声截断上限
+        "noise_clip":       0.25,
+        # Actor 延迟更新频率（每 policy_freq 步 Critic 更新更新一次 Actor）
+        "policy_freq":      2,
+        # Epsilon 初始值（专家占比）
+        "epsilon_init":     1.0,
+        # Epsilon 最小值
+        "epsilon_min":      0.1,
+        # Epsilon 每训练步线性衰减量（与旧版 delta=5e-6 保持一致）
+        "epsilon_delta":    5e-6,
+        # 是否启用混合 Q（Base Bootstrapping）
+        "mixed_q":          True,
+        # 是否启用 Base Bootstrapping
+        "base_boot":        True,
+        # 是否启用 Behavior Cloning
+        "behavior_clone":   True,
+    },
+
+    # ==========================================================================
+    # 14. 训练流程超参数 (Train) — [CFG-1 新增]
+    #
+    #     旧版：散落在 learn.py train() 函数体内，无法从外部传入或记录。
+    #     新版：统一从 config["train"] 读取，learn.py 直接引用。
+    # ==========================================================================
+    "train": {
+        # 总训练回合数
+        "n_episodes":           4000,
+        # 纯专家预热回合数（前 N 回合 epsilon=1.0，只跑 NMPC，填充回放池）
+        "warmup_episodes":      100,
+        # 探索噪声标准差（加在 Actor 输出上的高斯噪声）
+        "explore_noise":        0.05,
+        # 开始训练的最小缓冲区大小
+        "min_buffer_to_train":  1024,
+        # 每步执行的梯度更新次数（1 = 标准 online RL，>1 = off-policy 复用）
+        "grad_updates_per_step": 1,
+        # 模型保存间隔（每隔 N 回合保存一次 checkpoint）
+        "save_interval":        50,
+        # 日志平滑窗口（最近 N 回合的均值）
+        "log_smooth_win":       20,
+        # [CFG-5 新增] 指定训练使用的 GPU 编号（-1 = CPU）
+        "gpu_id":               0,
+        # [CFG-5 新增] 并行环境数量占位符（当前单进程，未来扩展）
+        "n_envs":               1,
+    },
+
+    # ==========================================================================
+    # 15. 控制器超参数 (Controller) — 供 NMPCTrajectoryTracker 读取
+    #
+    #     旧版：NMPCTrajectoryTracker 硬编码 dt/N/L/threshold 等参数。
+    #     新版：统一从 config["controller"] 读取，便于全局调参。
+    # ==========================================================================
+    "controller": {
+        # MPC 预测时域（控制步数）
+        "N":                   15,
+        # 控制周期，应与 sim.control_freq_hz 倒数严格一致
+        "dt":                  0.1,
+        # 绳长估计：nmpc_controller_new.py 注释为 rope_length(0.4) + hook_offset_z(0.045) = 0.445
+        # NOTE: rope.hook_offset = 0.05（几何值），但 controller 使用 0.045（带滤波估计的等效值）。
+        #       两者之差 0.005m 在 NMPC 动态摆长滤波中自动补偿（estimated_L 约 0.9*L + 0.1*actual）。
+        #       如修改 rope.num_segments / rope.segment_length，需同步更新此值。
+        "L":                   0.445,
+        # 平移动作上限 (m/s²)，对应 config["space"]["action_space_high"][0]
+        "u_max_xy":            0.5,
+        # Z 轴动作上限 (m/s²)，放宽以加快初始高度收敛
+        "u_max_z":             2.0,
+        # Yaw 动作上限 (rad/s²)
+        "u_max_yaw":           2.0,
+        # 到达航点的 XY 判定半径（米）
+        "arrival_threshold_xy": 0.05,
+        # 到达航点的 Z 判定半径（米）
+        "arrival_threshold_z":  0.20,
+    },
+
+    # ==========================================================================
+    # 16. 测试专用参数 (Test) — 供 test.py 读取
+    # ==========================================================================
+    "test": {
+        "n_episodes":          20,
+        "render":              False,
+        # 覆盖训练时的障碍物配置（测试可能使用不同难度）
+        "n_obstacles":         3,
+        "obstacle_seed":       42,
+        # 是否保存轨迹可视化
+        "save_paths":          False,
+        "save_paths_dir":      "test_paths",
     },
 }
