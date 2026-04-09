@@ -33,7 +33,7 @@ DEFAULT_CONFIG = {
     # 1. 仿真与控制 (Simulation & Control)
     # ==========================================================================
     "sim": {
-        "physics_dt":       0.002,   # 物理引擎时间步长 (500 Hz)
+        "physics_dt":       0.005,   # 物理引擎时间步长 (500 Hz)
         "control_freq_hz":  10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
         "max_steps":        200,     # 回合最大步数
         "render":           False,   # 是否开启 GUI 渲染
@@ -114,13 +114,13 @@ DEFAULT_CONFIG = {
         # 成功降落的一次性奖励（绝对量级基准，必须兜住所有过程惩罚）
         "success_bonus":          1.0,
         # 超时未成功的惩罚（中度惩罚）
-        "timeout_penalty":        -1.0,
+        "timeout_penalty":        -3.0,
         # 碰撞障碍物惩罚（极度恶劣，负向拉满）
-        "collision_penalty":      -1.0,
+        "collision_penalty":      -3.0,
         # 出界惩罚（极度恶劣，负向拉满）
-        "out_of_bounds_penalty":  -1.0,
+        "out_of_bounds_penalty":  -3.0,
         # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
-        "crash_penalty":          -1.0,
+        "crash_penalty":          -3.0,
 
         # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
         # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
@@ -163,7 +163,7 @@ DEFAULT_CONFIG = {
         # prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
         "init_qpos_prefab": [0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
 
-        "warmup_steps": 50,    # 物理引擎预热步数
+        "warmup_steps": 30,    # 物理引擎预热步数
         "mocap_init_z": 1.0,   # 动捕点初始 Z 高度（米）
 
         # IK 求解参数
@@ -205,8 +205,8 @@ DEFAULT_CONFIG = {
     # 12. 绳索生成 (Rope Generation)
     # ==========================================================================
     "rope": {
-        "num_segments":    20,
-        "segment_length":  0.02,      # 每段长度，total = 20 * 0.02 = 0.4m
+        "num_segments":    10,
+        "segment_length":  0.04,      # 每段长度，total = 20 * 0.02 = 0.4m
         "damping":         0.02,
         "capsule_radius":  0.004,
         "segment_mass":    0.01,
@@ -226,7 +226,7 @@ DEFAULT_CONFIG = {
         # 批量大小
         "batch_size":       64,
         # 【关键修复】折扣因子：根据之前的深度推演，坚决锁定 0.99
-        "gamma":            0.99,
+        "gamma":            0.95,
         # Polyak 软更新系数
         "tau":              0.005,
         # Actor 学习率

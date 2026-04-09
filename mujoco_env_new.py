@@ -251,7 +251,7 @@ class CableRobotEnvWithObstacles:
         self.model = mujoco.MjModel.from_xml_path(base_xml_path)
         self.data  = mujoco.MjData(self.model)
         self.model.opt.timestep = self.physics_dt
- 
+        
         # ----------------------------------------------------------------------
         # 【核心修复】：让 Pinocchio 只加载纯净的机械臂模型
         # ----------------------------------------------------------------------
@@ -266,7 +266,7 @@ class CableRobotEnvWithObstacles:
         if not os.path.exists(arm_model_path):
             raise FileNotFoundError(f"找不到纯机械臂模型文件: {arm_model_path}，请提供仅包含机械臂的 URDF 或 XML。")
  
-        try:
+        '''try:
             # 如果是 URDF 文件，用 buildModelFromUrdf
             if arm_model_path.endswith(".urdf"):
                 self.model_pin = pin.buildModelFromUrdf(arm_model_path)
@@ -282,7 +282,25 @@ class CableRobotEnvWithObstacles:
             
         except Exception as e:
             print(f"❌ Pinocchio 加载机械臂模型失败: {e}")
+            raise e'''
+        
+        # =====================================================================
+        # 实例化 IK 求解器 (MuJoCo 原生单步微分版本)
+        # =====================================================================
+        try:
+            # 注意：这里的 MPCPinocchioIKSolver 已经是重写后的底层 MuJoCo 求解器
+            # 直接传入环境现有的 self.model 和 self.data 即可！
+            # 彻底告别单独维护一个 pure_arm_model_name 和多余的 pinocchio 数据。
+            self.ik_solver = NativeIKSolver(self.model, self.data)
+            
+            print("✅ IK Solver (MuJoCo Native) 初始化成功！")
+            
+        except Exception as e:
+            print(f"❌ IK Solver 初始化失败: {e}")
             raise e
+            
+        
+
  
         # ======================================================================
         # 7. MuJoCo 对象 ID 寻址
@@ -1351,4 +1369,148 @@ class MPCPinocchioIKSolver:
             return current_q
  
         # 如果你的模型包含夹爪等额外自由度，确保只返回前 7 个 arm 关节
-        return q_sol[:7]
+        # return q_sol[:7]
+
+import numpy as np
+import mujoco
+
+
+class NativeIKSolver:
+    def __init__(self, mj_model, mj_data, collision_model=None):
+        self.model = mj_model
+        self.data = mj_data
+        self.target_frame = "link7" 
+        
+        self.obj_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SITE, self.target_frame)
+        self.is_site = True
+        if self.obj_id == -1:
+            self.obj_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, self.target_frame)
+            self.is_site = False
+        if self.obj_id == -1:
+            raise ValueError(f"❌ 严重错误: 找不到 '{self.target_frame}'！")
+
+        self.damping = 2e-2  
+        
+        # 【优化 1】降低并细化零空间增益
+        self.nullspace_gain = 0.05 
+        
+        self.w_pos = 1.0   
+        self.w_rot_base = 0.15 # 改为基础旋转权重
+        
+        self.q_min = self.model.jnt_range[:7, 0]
+        self.q_max = self.model.jnt_range[:7, 1]
+        self.jnt_limited = self.model.jnt_limited[:7]
+        
+        # 计算关节的“安全边距” (例如距离极限 15% 的区域)
+        self.q_margin = 0.15 * (self.q_max - self.q_min)
+
+    def solve_4d(self, current_q, target_x, target_y, target_z, target_yaw):
+        roll, pitch, yaw = np.pi, 0.0, target_yaw
+        R_x = np.array([[1, 0, 0], [0, np.cos(roll), -np.sin(roll)], [0, np.sin(roll), np.cos(roll)]])
+        R_y = np.array([[np.cos(pitch), 0, np.sin(pitch)], [0, 1, 0], [-np.sin(pitch), 0, np.cos(pitch)]])
+        R_z = np.array([[np.cos(yaw), -np.sin(yaw), 0], [np.sin(yaw), np.cos(yaw), 0], [0, 0, 1]])
+        R = R_z @ R_y @ R_x
+        
+        target_pos = np.array([target_x, target_y, target_z])
+        target_quat = np.zeros(4)
+        mujoco.mju_mat2Quat(target_quat, R.flatten())
+
+        backup_qpos = self.data.qpos.copy()
+        q_guess = current_q.copy()
+        
+        max_iters = 5
+
+        for i in range(max_iters):
+            self.data.qpos[:7] = q_guess
+            mujoco.mj_kinematics(self.model, self.data)
+            mujoco.mj_comPos(self.model, self.data)
+
+            if self.is_site:
+                current_pos = self.data.site_xpos[self.obj_id]
+                current_mat = self.data.site_xmat[self.obj_id].reshape(3, 3)
+            else:
+                current_pos = self.data.xpos[self.obj_id]
+                current_mat = self.data.xmat[self.obj_id].reshape(3, 3)
+
+            current_quat = np.zeros(4)
+            mujoco.mju_mat2Quat(current_quat, current_mat.flatten())
+
+            pos_err = target_pos - current_pos
+            rot_err = np.zeros(3)
+            neg_quat = np.zeros(4)
+            mujoco.mju_negQuat(neg_quat, current_quat)
+            err_quat = np.zeros(4)
+            mujoco.mju_mulQuat(err_quat, target_quat, neg_quat)
+            if err_quat[0] < 0:
+                err_quat = -err_quat
+            mujoco.mju_quat2Vel(rot_err, err_quat, 1.0) 
+
+            p_norm_raw = np.linalg.norm(pos_err)
+            r_norm_raw = np.linalg.norm(rot_err)
+
+            if p_norm_raw < 1e-3 and r_norm_raw < 1e-2:
+                break
+
+            # =========================================================
+            # 【核心优化 1】动态姿态权重衰减 (Dynamic Weighting)
+            # 如果平移误差很大，说明机械臂正在“吃力”地够目标。
+            # 此时自动衰减姿态权重，全力保障 XYZ 到达率。
+            # =========================================================
+            # 衰减公式: w_rot = w_rot_base * (0.02 / (0.02 + p_norm_raw))
+            dynamic_w_rot = self.w_rot_base * (0.02 / (0.02 + p_norm_raw))
+
+            # 误差截断 (Clamping) 保持不变
+            if p_norm_raw > 0.05:
+                pos_err = (pos_err / p_norm_raw) * 0.05
+            if r_norm_raw > 0.15:
+                rot_err = (rot_err / r_norm_raw) * 0.15
+
+            jacp = np.zeros((3, self.model.nv))
+            jacr = np.zeros((3, self.model.nv))
+            if self.is_site:
+                mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.obj_id)
+            else:
+                mujoco.mj_jacBody(self.model, self.data, jacp, jacr, self.obj_id)
+            J = np.vstack([jacp, jacr])[:, :7]
+
+            J_w = J.copy()
+            J_w[:3, :] *= self.w_pos
+            J_w[3:, :] *= dynamic_w_rot  # 使用动态权重
+            
+            error_w = np.concatenate([pos_err * self.w_pos, rot_err * dynamic_w_rot])
+            
+            JJT_w = J_w @ J_w.T
+            diag = (self.damping**2) * np.eye(6)
+            dq = J_w.T @ np.linalg.solve(JJT_w + diag, error_w)
+
+            # =========================================================
+            # 【核心优化 2】死区零空间投影 (Deadband Nullspace)
+            # 只有当关节逼近极限（进入 margin 区域）时，才产生拉回力。
+            # 正常工作范围内 (grad = 0)，绝不干扰末端追踪！
+            # =========================================================
+            grad = np.zeros(7)
+            for j in range(7):
+                if self.jnt_limited[j]:
+                    if q_guess[j] > self.q_max[j] - self.q_margin[j]:
+                        grad[j] = (self.q_max[j] - self.q_margin[j]) - q_guess[j] # 负向拉回
+                    elif q_guess[j] < self.q_min[j] + self.q_margin[j]:
+                        grad[j] = (self.q_min[j] + self.q_margin[j]) - q_guess[j] # 正向拉回
+
+            # 仅当有拉回需求时，才进行零空间运算（节省算力且避免干扰）
+            if np.any(grad != 0):
+                I = np.eye(7)
+                J_inv = J.T @ np.linalg.solve(J @ J.T + diag, np.eye(6)) 
+                dq += (I - J_inv @ J) @ (self.nullspace_gain * grad)
+
+            dq = np.clip(dq, -0.1, 0.1)
+            q_guess += dq
+            
+            for j in range(7):
+                if self.jnt_limited[j]:
+                    q_guess[j] = np.clip(q_guess[j], self.q_min[j], self.q_max[j])
+
+        self.data.qpos[:] = backup_qpos
+        mujoco.mj_kinematics(self.model, self.data)
+        mujoco.mj_comPos(self.model, self.data)
+
+        return q_guess
