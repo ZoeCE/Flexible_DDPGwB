@@ -112,15 +112,15 @@ DEFAULT_CONFIG = {
     "reward": {
         # ── 终止奖励（Terminal Rewards） ──────────────────────────────────────
         # 成功降落的一次性奖励（绝对量级基准，必须兜住所有过程惩罚）
-        "success_bonus":          20.0,
+        "success_bonus":          1.0,
         # 超时未成功的惩罚（中度惩罚）
-        "timeout_penalty":        -10.0,
+        "timeout_penalty":        -1.0,
         # 碰撞障碍物惩罚（极度恶劣，负向拉满）
-        "collision_penalty":      -20.0,
+        "collision_penalty":      -1.0,
         # 出界惩罚（极度恶劣，负向拉满）
-        "out_of_bounds_penalty":  -20.0,
+        "out_of_bounds_penalty":  -1.0,
         # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
-        "crash_penalty":          -20.0,
+        "crash_penalty":          -1.0,
 
         # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
         # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
@@ -130,7 +130,7 @@ DEFAULT_CONFIG = {
 
         # ── 里程碑奖励（Waypoint Bonus） ─────────────────────────────────────
         # 每通过一个中间航点给予正向奖励，缓解稀疏性
-        "waypoint_bonus":          0.5,
+        "waypoint_bonus":          0.05,
 
         # ── 连续性惩罚（Per-Step Penalties） ─────────────────────────────────
         # 每步生存惩罚（鼓励尽快完成，130步约扣 0.65分）
@@ -226,7 +226,7 @@ DEFAULT_CONFIG = {
         # 批量大小
         "batch_size":       64,
         # 【关键修复】折扣因子：根据之前的深度推演，坚决锁定 0.99
-        "gamma":            0.985,
+        "gamma":            0.99,
         # Polyak 软更新系数
         "tau":              0.005,
         # Actor 学习率

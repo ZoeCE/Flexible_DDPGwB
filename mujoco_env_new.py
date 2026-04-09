@@ -868,7 +868,7 @@ class CableRobotEnvWithObstacles:
         # 6. 奖励计算与终止判定
         # ======================================================================
         reward, done, success = self._compute_reward(effective_action)
-        # print(reward)
+        # print(reward) # zxy
  
         # [BUG-8 修复] current_step 在步末递增，与旧版对齐
         self.current_step += 1
@@ -974,7 +974,7 @@ class CableRobotEnvWithObstacles:
 
         ee_xy = self.current_mocap_pos[:2]
 
-        # ======================================================================
+        '''# ======================================================================
         # 2. 连续性惩罚（每步）
         # ======================================================================
         reward += cfg_rwd.get("step_penalty", -0.005)
@@ -984,7 +984,7 @@ class CableRobotEnvWithObstacles:
         reward -= float(np.clip(vel_pen, 0.0, 0.5))
 
         swing_offset = float(np.linalg.norm(ee_xy - payload_xy))
-        reward -= cfg_rwd.get("swing_penalty_coef", 0.02) * float(np.clip(swing_offset, 0.0, 0.1))
+        reward -= cfg_rwd.get("swing_penalty_coef", 0.02) * float(np.clip(swing_offset, 0.0, 0.1))'''
 
 
         # ======================================================================
@@ -995,16 +995,16 @@ class CableRobotEnvWithObstacles:
             dist_to_final = float(np.linalg.norm(payload_xy - self.target_pos))
 
             if dist_to_final < 0.03 and vel_xy < 0.1 and abs(payload_vz) < 0.2:
-                reward  += cfg_rwd.get("success_bonus", 10.0)
+                reward  += cfg_rwd.get("success_bonus", 1.0)
                 success  = True
                 done     = True
                 return reward, done, success
             else:
-                reward += cfg_rwd.get("crash_penalty", -10.0)
+                reward += cfg_rwd.get("crash_penalty", -1.0)
                 done    = True
                 return reward, done, success
 
-        payload_radius = self.config["planning"]["payload_radius"]
+        '''payload_radius = self.config["planning"]["payload_radius"]
         for (ox, oy, orad) in self._obstacles:
             dist_to_obs = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
             if dist_to_obs < (orad + payload_radius):
@@ -1022,22 +1022,22 @@ class CableRobotEnvWithObstacles:
         if dist_to_target_xy > cfg_logic["out_of_bounds_dist"]:
             reward += cfg_rwd.get("out_of_bounds_penalty", -10.0)
             done    = True
-            return reward, done, success
+            return reward, done, success'''
 
         # ======================================================================
         # 5. 【修改核心】航点里程碑奖励（基础保留 + 动态比例阶段叠加）
         # ======================================================================
-        if getattr(self, '_wp_just_advanced', False):
+        if getattr(self, '_wp_just_advanced', True):
             # 5.1 基础航点奖励 (可选)
-            reward += cfg_rwd.get("waypoint_bonus", 0.0)
+            reward += cfg_rwd.get("waypoint_bonus", 0.05)
             
-            # 5.2 均分总奖池作为过点奖励
+            '''# 5.2 均分总奖池作为过点奖励
             if self._planned_path is not None:
                 total_wps = len(self._planned_path)
                 total_stage_reward = cfg_rwd.get("total_stage_reward", 1.0)
                 
                 stage_bonus = total_stage_reward / max(1, total_wps)
-                reward += stage_bonus
+                reward += stage_bonus'''
 
             self._wp_just_advanced = False
 
