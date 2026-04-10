@@ -159,7 +159,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
     if mode == 'actor_obstacles':
         print(f"Loading Actor model from {log_dir}/ckpt_latest.pt ...")
         device = get_device(device_id)
-        model_path = os.path.join(log_dir, 'ckpt_ep2550.pt')
+        model_path = os.path.join(log_dir, 'ckpt_latest.pt')
 
         # 1. 准备 max_action
         # 根据你的环境，如果是 6 维动作，通常是 [0.5, 0.5, 2.0, 2.0, 2.0, 2.0] 之类的
