@@ -258,7 +258,7 @@ DEFAULT_CONFIG = {
         # 每个 env step 衰减一次（FIX-6）
         # 希望在 ~150000 steps（约 1000 回合 × 140 步/回合 × 1 step/衰减）
         # 从 1.0 衰减到 0.05，则 delta = (1.0 - 0.05) / 150000 ≈ 6.3e-6
-        "epsilon_delta":        6.3e-6,
+        "epsilon_delta":        1e-6,
     
         # ── 状态归一化 ──────────────────────────────────────────────────────────
         # warm_start: 归一化器样本数低于此值时不做归一化（防早期方差坍塌）
@@ -278,7 +278,7 @@ DEFAULT_CONFIG = {
  
 # ── train 节补充 ──────────────────────────────────────────────────────────────
     "train": {
-        "n_episodes":           4000,
+        "n_episodes":           8000,
         "warmup_episodes":      100,       # 纯专家预热，填充回放池
         "explore_noise":        0.1,       # Actor 探索 σ（相对 max_action 的比例，0.1 = 10%）
         "min_buffer_to_train":  2048,      # buffer 未满 2048 前不训练

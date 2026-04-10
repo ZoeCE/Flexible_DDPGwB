@@ -13,7 +13,7 @@ from mujoco_env import CableRobotEnv
 from mujoco_env_new import CableRobotEnvWithObstacles
 from nmpc_controller_new import NMPCController4D, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
-from agent_old import FastActor 
+from agent import Actor 
 
 def get_device(gpu_id):
     if torch.cuda.is_available() and gpu_id >= 0:
@@ -34,7 +34,7 @@ def run_test(mode, log_dir, n_episodes, render, device_id=0):
     if mode == 'actor':
         print(f"Loading Actor model from {log_dir}/actor.pt ...")
         device = get_device(device_id)
-        model_path = os.path.join(log_dir, 'actor.pt')
+        model_path = os.path.join(log_dir, 'ckpt_latest.pt')
         if not os.path.exists(model_path):
             print(f"Error: Model not found at {model_path}")
             return
@@ -157,18 +157,30 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
 
     # 模型加载与初始化
     if mode == 'actor_obstacles':
-        print(f"Loading Actor model from {log_dir}/actor.pt ...")
+        print(f"Loading Actor model from {log_dir}/ckpt_latest.pt ...")
         device = get_device(device_id)
-        model_path = os.path.join(log_dir, 'actor.pt')
-        if not os.path.exists(model_path):
-            print(f"Error: Model not found at {model_path}")
-            return
-        
-        try:
-            actor_model = torch.load(model_path, map_location=device, weights_only=False)
-        except TypeError:
-            actor_model = torch.load(model_path, map_location=device)
+        model_path = os.path.join(log_dir, 'ckpt_ep2550.pt')
+
+        # 1. 准备 max_action
+        # 根据你的环境，如果是 6 维动作，通常是 [0.5, 0.5, 2.0, 2.0, 2.0, 2.0] 之类的
+        # 这里建议手动定义或从 config 导入
+        max_action = np.array([0.5, 0.5, 0.5, 2.0, 2.0, 2.0], dtype=np.float32)
+
+        # 2. 实例化 Actor，传入缺失的 max_action
+        # 注意：这里确保 Actor 已经在 test.py 开头从 agent 导入
+        actor_model = Actor(state_dim=31, action_dim=6, max_action=max_action).to(device)
+
+        # 3. 加载权重
+        checkpoint = torch.load(model_path, map_location=device)
+            
+        # 根据你 save 的逻辑，提取 "actor" 键
+        if isinstance(checkpoint, dict) and "actor" in checkpoint:
+            actor_model.load_state_dict(checkpoint["actor"])
+        else:
+            actor_model.load_state_dict(checkpoint)
+
         actor_model.eval()
+        print("Actor model loaded successfully.")
         
     elif mode in ['obstacles', 'obstacles_base']:
         print("Initializing NMPC Trajectory Tracker (Following 3D path)...")
