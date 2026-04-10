@@ -561,10 +561,8 @@ def train(log_dir: str, custom_config: dict = None):
                 # [LEARN-3c] 每步执行 GRAD_UPDATES 次更新以提高 GPU 利用率
                 # 仅在回放池充足时开始训练
                 if agent.buffer.size > MIN_BUFFER:
-                    for _ in range(GRAD_UPDATES):
-                        lc, la, lbc = agent.train(1)
-                    # 保留最后一次更新的 loss（用于日志）
-                    loss_c, loss_a, loss_bc = lc, la, lbc
+                    # 直接将批量更新次数传给 agent，网络更新多次，但 epsilon 只衰减 1 次
+                    loss_c, loss_a, loss_bc = agent.train(GRAD_UPDATES)
 
                 # ── Step 7: 状态转移与统计更新 ─────────────────────────────────
                 state          = next_state

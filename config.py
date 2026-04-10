@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
     "sim": {
         "physics_dt":       0.005,   # 物理引擎时间步长 (500 Hz)
         "control_freq_hz":  10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
-        "max_steps":        200,     # 回合最大步数
+        "max_steps":        150,     # 回合最大步数
         "render":           False,   # 是否开启 GUI 渲染
         # [CFG-4 新增] reward 子步跳过（1=每步都算，2=每隔一步，调高可小幅提速）
         "substep_skip":     1,
@@ -226,7 +226,7 @@ DEFAULT_CONFIG = {
         # 批量大小
         "batch_size":       64,
         # 【关键修复】折扣因子：根据之前的深度推演，坚决锁定 0.99
-        "gamma":            0.95,
+        "gamma":            0.99,
         # Polyak 软更新系数
         "tau":              0.005,
         # Actor 学习率
@@ -244,7 +244,7 @@ DEFAULT_CONFIG = {
         # Epsilon 最小值
         "epsilon_min":      0.1,
         # Epsilon 每训练步线性衰减量
-        "epsilon_delta":    5e-6,
+        "epsilon_delta":    2e-6,
         # 是否启用混合 Q（Base Bootstrapping）
         "mixed_q":          True,
         # 是否启用 Base Bootstrapping

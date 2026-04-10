@@ -268,13 +268,13 @@ class WBAgent:
             (state, action, base_action, next_base_action,
              next_state, reward, done) = self.buffer.sample(self.batch_size)
 
-            si               = np_to_tensor(state)
-            ai               = np_to_tensor(action)
-            base_action_t    = np_to_tensor(base_action)
-            next_base_act_t  = np_to_tensor(next_base_action)
-            s_i              = np_to_tensor(next_state)
-            ri               = np_to_tensor(reward)
-            di               = np_to_tensor(done)
+            si               = np_to_tensor(state).float()
+            ai               = np_to_tensor(action).float()
+            base_action_t    = np_to_tensor(base_action).float()
+            next_base_act_t  = np_to_tensor(next_base_action).float()
+            s_i              = np_to_tensor(next_state).float()
+            ri               = np_to_tensor(reward).float()
+            di               = np_to_tensor(done).float()
 
             # ================================================================
             # 【TD3 机制 1】Target Policy Smoothing
@@ -304,7 +304,7 @@ class WBAgent:
                 if self.base_boot:
                     tQ1_base, tQ2_base = self.target_critic(s_i, next_base_act_t)
                     target_Q_base = torch.min(tQ1_base, tQ2_base)
-                    target_Q = torch.max(target_Q, target_Q_base)
+                    target_Q = 0.5 * target_Q + 0.5 * target_Q_base # zxy
 
                 yi = ri + self.gamma * (1.0 - di) * target_Q
 

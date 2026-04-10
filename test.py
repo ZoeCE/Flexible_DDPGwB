@@ -250,7 +250,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
                 time.sleep(0.01) # 控制渲染帧率
                 
             # === 4. 回合结束判定与结算 ===
-            if is_done or step >= 200:
+            if is_done or step >= 150:
                 status = "✅ Success" if success else "❌ Failed"
                 col_status = " (Collision!)" if episode_collision else ""
                 print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
