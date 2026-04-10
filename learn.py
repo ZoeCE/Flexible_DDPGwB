@@ -4,7 +4,7 @@ import csv
 import os
 from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 
-from agent import WBAgent
+from agent_old import WBAgent
 from mujoco_env_new import CableRobotEnvWithObstacles
 from nmpc_controller_new import NMPCTrajectoryTracker
 
@@ -154,7 +154,7 @@ def train(log_dir):
     )
     logger.update_config({
         "n_episodes":      n_episodes,
-        "max_steps_per_ep": 150,
+        "max_steps_per_ep": 200,
         "state_dim":       STATE_DIM,
         "action_dim":      ACTION_DIM,
         "max_action":      MAX_ACTION,
@@ -190,7 +190,7 @@ def train(log_dir):
     )
 
     with progress:
-        task_id = progress.add_task('[red]Training...', total=n_episodes * 150)
+        task_id = progress.add_task('[red]Training...', total=n_episodes * 200)
 
         for episode in range(n_episodes):
             if episode < WARMUP_EPISODES:

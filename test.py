@@ -13,7 +13,7 @@ from mujoco_env import CableRobotEnv
 from mujoco_env_new import CableRobotEnvWithObstacles
 from nmpc_controller_new import NMPCController4D, NMPCTrajectoryTracker
 # 引入 Agent 网络定义 (必须，否则 torch.load 报错)
-from agent import FastActor 
+from agent_old import FastActor 
 
 def get_device(gpu_id):
     if torch.cuda.is_available() and gpu_id >= 0:
@@ -129,14 +129,14 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             "control_freq_hz": 10,
         },
         "task": {
-            "default_start_xy": default_start_xy or [0.3, 0.2],
-            "default_target_xy": default_target_xy or [-0.3, 0.2],
-            "init_position_range": 0.00,
+            "default_start_xy": default_start_xy or [0.3, 0.15],
+            "default_target_xy": default_target_xy or [-0.3, 0.15],
+            "init_position_range": 0.02,
             "init_velocity_scale": 0.08,
         },
         "scene": {
             "n_obstacles": n_obstacles,
-            "radius_range": (0.01, 0.02),
+            "radius_range": (0.02, 0.04),
             "path_width": 0.2,
             "seed": obstacle_seed,
         },
@@ -235,6 +235,7 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             # 合并终止和截断标志作为最终的 is_done
             is_done = terminated or truncated
             success = info.get("is_success", False)
+            is_collision = info.get("is_collision")
             
             # 累加这一步的奖励到回合总分
             episode_reward += step_reward
@@ -243,14 +244,14 @@ def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3
             
             # === 3. 碰撞与渲染处理 ===
             # (如果碰到障碍物，由于惩罚大，判定为 collision)
-            if step_reward <= -5.0 and not success: 
+            if is_collision == True: 
                 episode_collision = True
                 
             if render:
                 time.sleep(0.01) # 控制渲染帧率
                 
             # === 4. 回合结束判定与结算 ===
-            if is_done or step >= 150:
+            if is_done or step >= 200:
                 status = "✅ Success" if success else "❌ Failed"
                 col_status = " (Collision!)" if episode_collision else ""
                 print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")

@@ -375,7 +375,8 @@ class CableRobotEnvWithObstacles:
 
         # 【新增】：定义机械臂基座为虚拟障碍物
         base_xy = np.array([0.0, 0.0])
-        base_radius = 0.15  # 假设机械臂基座和第一关节占据的物理半径约为 0.15 米
+        base_radius1 = 0.20
+        base_radius2 = 0.05  # 假设机械臂基座和第一关节占据的物理半径约为 0.15 米
 
         # ======================================================================
         # 步骤 1：在两点连线附近随机生成障碍物
@@ -406,7 +407,7 @@ class CableRobotEnvWithObstacles:
                 
                 if (d_start >= (min_clearance + r) and 
                     d_target >= (min_clearance + r) and 
-                    d_base >= (min_clearance + r + base_radius)):
+                    d_base >= (min_clearance + r + base_radius2)):
                     obstacles.append((float(center[0]), float(center[1]), float(r)))
                     break
             else:
@@ -418,7 +419,7 @@ class CableRobotEnvWithObstacles:
         # 步骤 2：2D A* 路径规划
         # ======================================================================
         # 【修改】：将基座加入专门用于寻路的“规划障碍物”列表
-        planning_obstacles = obstacles + [(0.0, 0.0, base_radius)]
+        planning_obstacles = obstacles + [(0.0, 0.0, base_radius1)]
 
         grid_res = scene_plan_config["planning_grid_res"]
         xs = [start_xy[0], target_xy[0]]
@@ -885,7 +886,7 @@ class CableRobotEnvWithObstacles:
         # ======================================================================
         # 6. 奖励计算与终止判定
         # ======================================================================
-        reward, done, success = self._compute_reward(effective_action)
+        reward, done, success, is_collision = self._compute_reward(effective_action)
         # print(reward) # zxy
  
         # [BUG-8 修复] current_step 在步末递增，与旧版对齐
@@ -902,6 +903,7 @@ class CableRobotEnvWithObstacles:
             "is_success":      success,
             "current_wp_idx":  self.current_wp_idx,
             "reached_final":   self.reached_final,
+            "is_collision":    is_collision
         }
  
         # Gymnasium 标准格式：obs, reward, terminated, truncated, info
@@ -972,6 +974,7 @@ class CableRobotEnvWithObstacles:
         reward  = 0.0
         done    = False
         success = False
+        is_collision = False
 
         cfg_rwd   = self.config["reward"]
         cfg_logic = self.config["step_logic"]
@@ -1016,27 +1019,35 @@ class CableRobotEnvWithObstacles:
                 reward  += cfg_rwd.get("success_bonus", 1.0)
                 success  = True
                 done     = True
-                return reward, done, success
+                return reward, done, success, is_collision
             else:
                 reward += cfg_rwd.get("crash_penalty", -1.0)
                 done    = True
-                return reward, done, success
+                return reward, done, success, is_collision
 
-        '''payload_radius = self.config["planning"]["payload_radius"]
+        payload_radius = self.config["planning"]["payload_radius"]
         for (ox, oy, orad) in self._obstacles:
             dist_to_obs = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
             if dist_to_obs < (orad + payload_radius):
-                reward += cfg_rwd.get("collision_penalty", -10.0)
+                reward += cfg_rwd.get("collision_penalty", -1.0)
                 done    = True
-                return reward, done, success
+                is_collision = True
+                return reward, done, success, is_collision
+            
+        if float(np.linalg.norm(payload_xy - np.array([0,0]))) < 0.03:  # 走捷径
+            reward += cfg_rwd.get("collision_penalty", -1.0)
+            done    = True
+            is_collision = True
+            return reward, done, success, is_collision
 
         if (payload_z < cfg_logic["crash_z_threshold"] and
                 payload_vz < cfg_logic["crash_vz_threshold"]):
-            reward += cfg_rwd.get("crash_penalty", -10.0)
+            reward += cfg_rwd.get("crash_penalty", -1.0)
             done    = True
-            return reward, done, success
+            is_collision = True
+            return reward, done, success, is_collision
 
-        dist_to_target_xy = float(np.linalg.norm(payload_xy - self.target_pos))
+        ''''dist_to_target_xy = float(np.linalg.norm(payload_xy - self.target_pos))
         if dist_to_target_xy > cfg_logic["out_of_bounds_dist"]:
             reward += cfg_rwd.get("out_of_bounds_penalty", -10.0)
             done    = True
@@ -1059,7 +1070,7 @@ class CableRobotEnvWithObstacles:
 
             self._wp_just_advanced = False
 
-        return reward, done, success
+        return reward, done, success, is_collision
  
     # ==========================================================================
     # _get_obs()

@@ -35,7 +35,7 @@ DEFAULT_CONFIG = {
     "sim": {
         "physics_dt":       0.005,   # 物理引擎时间步长 (500 Hz)
         "control_freq_hz":  10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
-        "max_steps":        150,     # 回合最大步数
+        "max_steps":        200,     # 回合最大步数
         "render":           False,   # 是否开启 GUI 渲染
         # [CFG-4 新增] reward 子步跳过（1=每步都算，2=每隔一步，调高可小幅提速）
         "substep_skip":     1,
@@ -54,12 +54,12 @@ DEFAULT_CONFIG = {
     # 3. 任务与随机化初始状态 (Task & Randomization)
     # ==========================================================================
     "task": {
-        "start_pos_mocap":    [0.3, 0.2, 1.0],       # 动捕点初始平移位置
+        "start_pos_mocap":    [0.3, 0.15, 1.0],       # 动捕点初始平移位置
         "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],  # 动捕点初始姿态四元数 (w,x,y,z)
-        "default_start_xy":   [0.3, 0.2],             # 负载初始 XY 中心（加噪声前）
+        "default_start_xy":   [0.3, 0.15],             # 负载初始 XY 中心（加噪声前）
         "default_target_xy":  [-0.3, 0.2],            # 目标 XY 中心
-        "init_position_range": 0.01,                  # 初始 XY 位置均匀噪声范围 ±0.01
-        "init_velocity_scale": 0.15,                  # 初始速度扰动尺度（保留未用）
+        "init_position_range": 0.02,                  # 初始 XY 位置均匀噪声范围 ±0.01
+        "init_velocity_scale": 0.08,                  # 初始速度扰动尺度（保留未用）
     },
 
     # ==========================================================================
@@ -67,8 +67,8 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     "scene": {
         "n_obstacles":        3,                      # 障碍物数量
-        "radius_range":       (0.001, 0.003),         # 障碍物半径范围 [r_min, r_max]
-        "path_width":         0.02,                   # 障碍物横向分布宽度
+        "radius_range":       (0.02, 0.04),         # 障碍物半径范围 [r_min, r_max]
+        "path_width":         0.2,                   # 障碍物横向分布宽度
         "obstacle_z_center":  0.25,                   # 障碍物 Z 轴中心高度
         "obstacle_halfheight": 0.2,                   # 障碍物圆柱半高
         "endpoint_z_offset":  0.025,                  # 起/终点标记球偏移
@@ -79,7 +79,7 @@ DEFAULT_CONFIG = {
     # 5. A* 寻路与 3D 轨迹规划 (Planning & Geometry)
     # ==========================================================================
     "planning": {
-        "payload_radius":    0.06,    # 负载几何半径（用于障碍物膨胀防撞）
+        "payload_radius":    0.04,    # 负载几何半径（用于障碍物膨胀防撞）
         "planning_margin":   0.05,    # A* 安全边距
         "planning_grid_res": 0.02,    # A* 栅格分辨率（米）
         "bounds_margin":     0.05,    # 寻路地图边界余量
@@ -97,8 +97,8 @@ DEFAULT_CONFIG = {
         # 【极其关键的修复】：放宽视距阈值，允许 NMPC 抄近道时能正确触发进度与航点奖励
         "look_ahead_dist":    0.25,   # 原为 0.1，现放宽至 0.25
         "out_of_bounds_dist": 2.0,    # 偏离目标超过此距离视为出界
-        "crash_z_threshold":  0.12,   # 判定坠毁的 Z 轴高度阈值
-        "crash_vz_threshold": -0.1,   # 判定坠毁的 Z 轴下降速度阈值
+        "crash_z_threshold":  0.15,   # 判定坠毁的 Z 轴高度阈值
+        "crash_vz_threshold": -0.05,   # 判定坠毁的 Z 轴下降速度阈值
     },
 
     # ==========================================================================
@@ -116,11 +116,11 @@ DEFAULT_CONFIG = {
         # 超时未成功的惩罚（中度惩罚）
         "timeout_penalty":        -3.0,
         # 碰撞障碍物惩罚（极度恶劣，负向拉满）
-        "collision_penalty":      -3.0,
+        "collision_penalty":      -5.0,
         # 出界惩罚（极度恶劣，负向拉满）
         "out_of_bounds_penalty":  -3.0,
         # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
-        "crash_penalty":          -3.0,
+        "crash_penalty":          -5.0,
 
         # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
         # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
@@ -183,7 +183,7 @@ DEFAULT_CONFIG = {
     "prefab": {
         "shape":              "box",
         "box_half_size":      [0.05, 0.05, 0.1],
-        "cylinder_radius":    0.05,
+        "cylinder_radius":    0.04,
         "cylinder_half_height": 0.1,
         "mass":               1.0,
         "lift_site_offset":   0.1,
@@ -219,63 +219,75 @@ DEFAULT_CONFIG = {
     # 13. TD3 Agent 网络与优化器超参数 (Agent)
     # ==========================================================================
     "agent": {
-        # 网络宽度（FastActor / TwinCritic 的隐层维度）
-        "hidden_dim":       256,
-        # 回放池容量
-        "buffer_size":      200000,
-        # 批量大小
-        "batch_size":       64,
-        # 【关键修复】折扣因子：根据之前的深度推演，坚决锁定 0.99
-        "gamma":            0.99,
-        # Polyak 软更新系数
-        "tau":              0.005,
-        # Actor 学习率
-        "lr_actor":         1e-4,
-        # Critic 学习率
-        "lr_critic":        1e-3,
-        # TD3 目标策略平滑噪声标准差
-        "policy_noise":     0.1,
-        # 平滑噪声截断上限
-        "noise_clip":       0.25,
-        # Actor 延迟更新频率
-        "policy_freq":      2,
-        # Epsilon 初始值（专家占比）
-        "epsilon_init":     1.0,
-        # Epsilon 最小值
-        "epsilon_min":      0.1,
-        # Epsilon 每训练步线性衰减量
-        "epsilon_delta":    2e-6,
-        # 是否启用混合 Q（Base Bootstrapping）
-        "mixed_q":          True,
-        # 是否启用 Base Bootstrapping
-        "base_boot":        True,
-        # 是否启用 Behavior Cloning
-        "behavior_clone":   True,
-    },
-
-    # ==========================================================================
-    # 14. 训练流程超参数 (Train)
-    # ==========================================================================
+        # ── 网络结构 ───────────────────────────────────────────────────────────
+        "hidden_dim":           256,
+    
+        # ── 回放池 ─────────────────────────────────────────────────────────────
+        "buffer_size":          300_000,   # 适当增大，容纳更多专家经验
+    
+        # ── 优化 ───────────────────────────────────────────────────────────────
+        "batch_size":           256,       # 原 64 太小，256 梯度方差更小
+        "gamma":                0.99,
+        "tau":                  0.005,
+        "lr_actor":             3e-4,      # Actor/Critic 同量级，收敛更稳
+        "lr_critic":            3e-4,
+    
+        # ── TD3 噪声 ────────────────────────────────────────────────────────────
+        "policy_noise":         0.1,       # target policy smoothing σ（相对 max_action 的比例）
+        "noise_clip":           0.25,      # 噪声截断（相对 max_action 的比例）
+        "policy_freq":          2,
+    
+        # ── 梯度 clip ──────────────────────────────────────────────────────────
+        "critic_grad_clip":     1.0,
+        "actor_grad_clip":      1.0,       # 【FIX-7 新增，原版硬编码未暴露到 config】
+    
+        # ── Critic Loss 类型 ────────────────────────────────────────────────────
+        "critic_loss_type":     "huber",   # "huber" 或 "mse"
+    
+        # ── Target Q 限幅（FIX-4 重新启用）─────────────────────────────────────
+        # 本任务理论最大累积回报约 ±15（140步，稀疏奖励），设 ±20 留有余量
+        "target_q_clip":        20.0,
+    
+        # ── Behavior Cloning ────────────────────────────────────────────────────
+        "behavior_clone":       True,
+        "bc_alpha":             2.5,       # TD3+BC 论文默认值，lambda = alpha / E[|Q|]
+    
+        # ── Epsilon 探索 ────────────────────────────────────────────────────────
+        "epsilon_init":         1.0,
+        "epsilon_min":          0.05,
+        # 每个 env step 衰减一次（FIX-6）
+        # 希望在 ~150000 steps（约 1000 回合 × 140 步/回合 × 1 step/衰减）
+        # 从 1.0 衰减到 0.05，则 delta = (1.0 - 0.05) / 150000 ≈ 6.3e-6
+        "epsilon_delta":        6.3e-6,
+    
+        # ── 状态归一化 ──────────────────────────────────────────────────────────
+        # warm_start: 归一化器样本数低于此值时不做归一化（防早期方差坍塌）
+        # 已在 RunningMeanStd 内部处理，此处记录设计意图
+        # "state_norm_warm_start": 200,   （在 agent.py 中硬编码为 200，可按需暴露）
+    
+        # ── 奖励归一化（延伸-1，建议先关，稳定后再开）──────────────────────────
+        "use_reward_norm":      False,
+    
+        # ── 已废弃（移除，勿使用）──────────────────────────────────────────────
+        # mixed_q:     False,    # → 移除（base_boot 混合Q已证明是Q爆炸根源）
+        # base_boot:   False,   # → 移除
+        # "reward_clip": None,    → 移除（用 target_q_clip 代替）
+        # "bc_coef":     1.0,     → 移除（由 lmbda 动态调整替代）
+        # "bc_weight_min/max":    → 移除
+},
+ 
+# ── train 节补充 ──────────────────────────────────────────────────────────────
     "train": {
-        # 总训练回合数
         "n_episodes":           4000,
-        # 纯专家预热回合数（前 N 回合 epsilon=1.0，只跑 NMPC，填充回放池）
-        "warmup_episodes":      100,
-        # 探索噪声标准差（加在 Actor 输出上的高斯噪声）
-        "explore_noise":        0.05,
-        # 开始训练的最小缓冲区大小
-        "min_buffer_to_train":  1024,
-        # 每步执行的梯度更新次数（1 = 标准 online RL，>1 = off-policy 复用）
-        "grad_updates_per_step": 1,
-        # 模型保存间隔（每隔 N 回合保存一次 checkpoint）
+        "warmup_episodes":      100,       # 纯专家预热，填充回放池
+        "explore_noise":        0.1,       # Actor 探索 σ（相对 max_action 的比例，0.1 = 10%）
+        "min_buffer_to_train":  2048,      # buffer 未满 2048 前不训练
+        "grad_updates_per_step":1,         # 每 step 更新 1 次，防过拟合（稳定后可调至 2）
         "save_interval":        50,
-        # 日志平滑窗口（最近 N 回合的均值）
         "log_smooth_win":       20,
-        # 指定训练使用的 GPU 编号（-1 = CPU）
         "gpu_id":               0,
-        # 并行环境数量占位符（当前单进程，未来扩展）
         "n_envs":               1,
-    },
+},
 
     # ==========================================================================
     # 15. 控制器超参数 (Controller) — 供 NMPCTrajectoryTracker 读取
