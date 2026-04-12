@@ -1,451 +1,375 @@
-import torch
-import numpy as np
-import argparse
-import time
+# ==============================================================================
+# test.py — 统一测试脚本（PPO / TD3 / NMPC）
+#
+# 支持的测试模式：
+#   --mode ppo          : 加载 PPOAgent checkpoint，使用 Actor 输出 7D 关节角
+#   --mode td3          : 加载 TD3Agent checkpoint，使用 Actor 输出 7D 关节角
+#   --mode nmpc         : 仅使用 NMPC + IK 专家控制器（基准测试）
+#   --mode manual       : 键盘手动控制（调试用）
+#
+# 新版与旧版差异：
+#   [TEST-NEW-1] 动作空间：7D 关节角
+#     - 不再直接执行末端加速度
+#     - Actor 输出 → 直接下发给 MuJoCo 位置执行器
+#   [TEST-NEW-2] 统一 Agent 加载接口
+#     - PPO 和 TD3 均使用 agent.load() 加载 checkpoint
+#     - 根据 --mode 自动选择 Agent 类
+#   [TEST-NEW-3] 专家控制器测试模式
+#     - nmpc 模式：JointSpaceExpert 直接产生关节角并执行
+# ==============================================================================
+ 
 import os
 import sys
-
-
-from ipdb import set_trace as xxxx
-
-# 引入环境和控制器
-from mujoco_env import CableRobotEnv
+import copy
+import time
+import argparse
+import numpy as np
+import torch
+ 
+from config import DEFAULT_CONFIG
 from mujoco_env_new import CableRobotEnvWithObstacles
-from nmpc_controller_new import NMPCController4D, NMPCTrajectoryTracker
-# 引入 Agent 网络定义 (必须，否则 torch.load 报错)
-from agent import Actor 
-
-def get_device(gpu_id):
+from controller import JointSpaceExpert
+from agent import PPOAgent, TD3Agent
+ 
+ 
+# ==============================================================================
+# 工具函数
+# ==============================================================================
+ 
+def get_device(gpu_id: int) -> torch.device:
     if torch.cuda.is_available() and gpu_id >= 0:
         return torch.device(f"cuda:{gpu_id}")
     return torch.device("cpu")
-
-def run_test(mode, log_dir, n_episodes, render, device_id=0):
+ 
+ 
+def build_config(args) -> dict:
+    """从命令行参数构建测试配置。"""
+    config = copy.deepcopy(DEFAULT_CONFIG)
+    config["sim"]["render"] = args.render
+    config["scene"]["n_obstacles"] = args.obstacles
+    config["scene"]["seed"] = args.seed
+    config["train"]["gpu_id"] = args.gpu
+ 
+    # 覆盖起终点（如有）
+    if args.start_xy:
+        config["task"]["default_start_xy"] = list(map(float, args.start_xy.split(",")))
+    if args.target_xy:
+        config["task"]["default_target_xy"] = list(map(float, args.target_xy.split(",")))
+ 
+    return config
+ 
+ 
+def print_summary(mode: str, n_episodes: int, success_count: int,
+                  collision_count: int, total_steps_success: int,
+                  elapsed: float):
+    avg_steps = total_steps_success / max(success_count, 1)
+    print("\n" + "="*55)
+    print(f"  测试模式：{mode.upper()}")
+    print(f"  总回合数：{n_episodes}")
+    print(f"  成功率：  {success_count}/{n_episodes} "
+          f"({success_count/n_episodes*100:.2f}%)")
+    print(f"  碰撞率：  {collision_count}/{n_episodes} "
+          f"({collision_count/n_episodes*100:.2f}%)")
+    print(f"  成功平均步数：{avg_steps:.1f}")
+    print(f"  耗时：{elapsed:.1f}s")
+    print("="*55 + "\n")
+ 
+ 
+# ==============================================================================
+# 通用测试循环
+# ==============================================================================
+ 
+def run_test(mode: str, config: dict, n_episodes: int,
+             ckpt_path: str = None, gpu_id: int = 0,
+             save_paths_dir: str = None):
     """
-    统一的测试主循环 (针对基础 2D 环境，无障碍物)
+    统一测试主循环。
+    mode: "ppo" | "td3" | "nmpc"
     """
-    # 1. 初始化环境
-    env = CableRobotEnv(render=render)
-    
-    # 2. 初始化策略 (Actor 或 Base)
-    actor_model = None
-    nmpc_controller = None
-    
-    if mode == 'actor':
-        print(f"Loading Actor model from {log_dir}/actor.pt ...")
-        device = get_device(device_id)
-        model_path = os.path.join(log_dir, 'ckpt_latest.pt')
-        if not os.path.exists(model_path):
-            print(f"Error: Model not found at {model_path}")
-            return
-        try:
-            # weights_only=False 解决 PyTorch 2.6+ 兼容性
-            actor_model = torch.load(model_path, map_location=device, weights_only=False)
-            actor_model.eval()
-        except Exception as e:
-            print(f"Error loading model: {e}")
-            return
-    elif mode == 'base':
-        print("Initializing NMPC Controller (Base)...")
-        nmpc_controller = NMPCController()
-    
-    # 3. 开始测试循环
-    success_count = 0
-    total_steps_success = 0
-    
-    print("*******************************************")
-    print(f"Start Testing [{mode.upper()}] for {n_episodes} episodes...")
-    print(f"Render: {'ON' if render else 'OFF'}")
-    print("*******************************************")
-    
-    start_time = time.time()
-    
-    for i in range(n_episodes):
-        obs = env.reset()
-        target_pos = env.target_pos # 仅 Base 需要用到绝对坐标
-        step = 0
-        episode_reward = 0
-        
-        while True:
-            # --- 策略决策 ---
-            if mode == 'actor':
-                # RL Agent: 输入 State -> 输出 Action
-                s_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    action = actor_model(s_tensor).cpu().numpy()[0]
-            else:
-                # NMPC Base: 输入 State + Target -> 输出 Action
-                nmpc_state = obs[:8]
-                action = nmpc_controller.get_action(nmpc_state, target_pos)
-            
-            # --- 环境交互 ---
-            next_obs, reward, done, success = env.step(action)
-            
-            obs = next_obs
-            episode_reward += reward
-            step += 1
-            
-            # 渲染延时，方便肉眼观察
-            if render:
-                time.sleep(0.02)
-            
-            # --- 结束判定 ---
-            if done or step >= 500:
-                # 只有在渲染模式下才打印每一局的详情，避免刷屏
-                if render:
-                    print(f"Ep {i+1}: Steps={step}, R={reward:.2f}, Success={success}")
-                
-                if success: 
-                    success_count += 1
-                    total_steps_success += step
-                break
-        
-        # 进度条 (非渲染模式下显示)
-        if not render and (i+1) % 10 == 0:
-            print(f"Progress: {i+1}/{n_episodes} | Current SR: {success_count/(i+1)*100:.1f}%")
-
-    end_time = time.time()
-    avg_steps = total_steps_success / success_count if success_count > 0 else 0
-    
-    print("\n" + "="*30)
-    print(f"Final Result [{mode.upper()}]:")
-    print(f"Total Episodes: {n_episodes}")
-    print(f"Success Rate:   {success_count}/{n_episodes} ({success_count/n_episodes*100:.2f}%)")
-    print(f"Avg Steps:      {avg_steps:.1f}")
-    print(f"Time Elapsed:   {end_time - start_time:.2f}s")
-    print("="*30 + "\n")
-
-
-def run_test_obstacles(mode, log_dir, n_episodes=10, render=False, n_obstacles=3,
-                       obstacle_seed=42, save_paths_dir=None,
-                       payload_radius=0.6, planning_margin=0.5, planning_grid_res=0.02,
-                       default_start_xy=None, default_target_xy=None, device_id=0):
-    """带障碍物避碰的 NMPC 测试：CableRobotEnvWithObstacles + NMPCTrajectoryTracker。"""
-    
-    # 通过 config dict 覆盖默认配置
-    test_config = {
-        "sim": {
-            "render": render,
-            "control_freq_hz": 10,
-        },
-        "task": {
-            "default_start_xy": default_start_xy or [0.3, 0.15],
-            "default_target_xy": default_target_xy or [-0.3, 0.15],
-            "init_position_range": 0.02,
-            "init_velocity_scale": 0.08,
-        },
-        "scene": {
-            "n_obstacles": n_obstacles,
-            "radius_range": (0.02, 0.04),
-            "path_width": 0.2,
-            "seed": obstacle_seed,
-        },
-        "noise": {
-            "latency_steps": 1,
-            "force_noise_level": 0.08,
-        },
-        "planning": {
-            "payload_radius": payload_radius,
-            "planning_margin": planning_margin,
-            "planning_grid_res": planning_grid_res,
-        },
-    }
-    env = CableRobotEnvWithObstacles(config=test_config)
-
-    actor_model = None
-    nmpc_controller = None
-
-    # 模型加载与初始化
-    if mode == 'actor_obstacles':
-        print(f"Loading Actor model from {log_dir}/ckpt_latest.pt ...")
-        device = get_device(device_id)
-        model_path = os.path.join(log_dir, 'ckpt_latest.pt')
-
-        # 1. 准备 max_action
-        # 根据你的环境，如果是 6 维动作，通常是 [0.5, 0.5, 2.0, 2.0, 2.0, 2.0] 之类的
-        # 这里建议手动定义或从 config 导入
-        max_action = np.array([0.5, 0.5, 0.5, 2.0, 2.0, 2.0], dtype=np.float32)
-
-        # 2. 实例化 Actor，传入缺失的 max_action
-        # 注意：这里确保 Actor 已经在 test.py 开头从 agent 导入
-        actor_model = Actor(state_dim=31, action_dim=6, max_action=max_action).to(device)
-
-        # 3. 加载权重
-        checkpoint = torch.load(model_path, map_location=device)
-            
-        # 根据你 save 的逻辑，提取 "actor" 键
-        if isinstance(checkpoint, dict) and "actor" in checkpoint:
-            actor_model.load_state_dict(checkpoint["actor"])
+    env = CableRobotEnvWithObstacles(config=config)
+    STATE_DIM  = env.state_dim
+    ACTION_DIM = config["space"]["action_dim"]
+    ACT_LOW    = np.array(config["space"]["action_space_low"])
+    ACT_HIGH   = np.array(config["space"]["action_space_high"])
+ 
+    # ── Agent / 专家初始化 ────────────────────────────────────────────────────
+    agent  = None
+    expert = None
+ 
+    if mode == "ppo":
+        print(f"[Test] 加载 PPO checkpoint: {ckpt_path}")
+        agent = PPOAgent(None, STATE_DIM, ACTION_DIM, config=config)
+        if ckpt_path and os.path.exists(ckpt_path):
+            agent.load(ckpt_path, map_location=get_device(gpu_id))
+            print("  ✅ 模型加载成功")
         else:
-            actor_model.load_state_dict(checkpoint)
-
-        actor_model.eval()
-        print("Actor model loaded successfully.")
-        
-    elif mode in ['obstacles', 'obstacles_base']:
-        print("Initializing NMPC Trajectory Tracker (Following 3D path)...")
-        nmpc_controller = NMPCTrajectoryTracker(dt=0.1, N=15, L=0.445)
-
-    if save_paths_dir is not None:
+            print(f"  ⚠️  找不到 checkpoint，使用随机初始化策略: {ckpt_path}")
+        # 专家仅用于 nmpc 基准对比，ppo 模式不需要
+        # 但保留 expert 以便 rollout 时记录 BC 差距（可选）
+        expert = JointSpaceExpert(config, env.ik_solver)
+ 
+    elif mode == "td3":
+        print(f"[Test] 加载 TD3 checkpoint: {ckpt_path}")
+        agent = TD3Agent(None, STATE_DIM, ACTION_DIM, config=config)
+        if ckpt_path and os.path.exists(ckpt_path):
+            agent.load(ckpt_path, map_location=get_device(gpu_id))
+            print("  ✅ 模型加载成功")
+        else:
+            print(f"  ⚠️  找不到 checkpoint，使用随机初始化策略")
+        expert = JointSpaceExpert(config, env.ik_solver)
+ 
+    elif mode == "nmpc":
+        print("[Test] 使用 NMPC + IK 专家控制器（纯专家基准）")
+        expert = JointSpaceExpert(config, env.ik_solver)
+ 
+    else:
+        raise ValueError(f"未知测试模式: {mode}")
+ 
+    if save_paths_dir:
         os.makedirs(save_paths_dir, exist_ok=True)
-
-    # 统计变量
-    success_count = 0
-    total_steps_success = 0
-    collision_count = 0
-    
-    print("*******************************************")
-    print(f"Start Testing [{mode.upper()}] for {n_episodes} episodes...")
-    print(f"Render: {'ON' if render else 'OFF'}, Obstacles: {n_obstacles}")
-    print("*******************************************")
-    
-    start_time = time.time()
-    
+ 
+    # ── 测试循环 ──────────────────────────────────────────────────────────────
+    success_count        = 0
+    collision_count      = 0
+    total_steps_success  = 0
+    is_ppo               = (mode == "ppo")
+    is_td3               = (mode == "td3")
+ 
+    print("*" * 55)
+    print(f"  开始测试 [{mode.upper()}] | {n_episodes} 回合 | "
+          f"渲染: {'开' if config['sim']['render'] else '关'}")
+    print("*" * 55)
+ 
+    t_start = time.time()
+ 
     for ep in range(n_episodes):
         obs = env.reset()
-        # if render:
-            # print(f"\n[Ep {ep+1}] Reset done. Press Enter to start simulation...")
-            # input()
-
-        # =========================================================
-        # 【新增修改点 1】：在每回合开始时，将环境生成的 A* 路径传给 Controller
-        # =========================================================
-        if mode in ['obstacles', 'obstacles_base']:
-            if hasattr(env, '_planned_path') and env._planned_path is not None:
-                nmpc_controller.set_path(env._planned_path)
+        current_q = env.data.qpos[:7].copy()
+ 
+        if expert is not None:
+            expert.reset(obs, current_q)
+            planned_path = env.get_planned_path()
+            if planned_path is not None:
+                expert.set_path(planned_path)
             else:
-                nmpc_controller.set_path([env.target_pos])  # 兜底：只有一个目标点
-            
-        step = 0
-        episode_reward = 0.0      # 用于统计回合总分
-        episode_collision = False
-        
-        # 【修复 1】预先定义 info 字典，使得第一步 NMPC 就能拿到正确的 current_wp_idx
-        info = {"current_wp_idx": 0, "reached_final": False}
-        
-        # ！！！【删除废弃逻辑】！！！
-        # 旧版本需要用 nmpc_controller.set_trajectory() 传整个路径进去。
-        # 新版本的 NMPCTrajectoryTracker 非常极简，完全依赖环境的 obs 驱动，不需要这些多余的状态机！
-            
+                print(f"  [Warn] Ep {ep+1}: 路径规划失败")
+ 
+        ep_reward = 0.0; step = 0
+        ep_success = False; ep_collision = False
+ 
+        # 保存路径（可选）
+        trajectory = []
+ 
         while True:
-            # === 1. 动作计算逻辑 ===
-            if mode == 'actor_obstacles':
-                s_tensor = torch.FloatTensor(obs).unsqueeze(0).to(device)
-                with torch.no_grad():
-                    action = actor_model(s_tensor).cpu().numpy()[0]
-            else:
-                # =========================================================
-                # 【新增修改点 2】：直接调用极简接口，不再需要手动解析 target_z
-                # 删除原先的 target_z = target_wp[2] 等相关逻辑
-                # =========================================================
-                action = nmpc_controller.compute_action(obs, target_yaw=0.0)
-            
-            # === 2. 环境推演 ===
-            # Gymnasium 标准 5 返回值
-            next_obs, step_reward, terminated, truncated, info = env.step(action)
-            
-            # 合并终止和截断标志作为最终的 is_done
-            is_done = terminated or truncated
-            success = info.get("is_success", False)
-            is_collision = info.get("is_collision")
-            
-            # 累加这一步的奖励到回合总分
-            episode_reward += step_reward
+            # ── 选择动作 ────────────────────────────────────────────────────
+            if mode == "nmpc":
+                # 纯专家：NMPC → IK → 关节角
+                current_q = env.data.qpos[:7].copy().astype(np.float32)
+                action = expert.compute_joint_target(obs, current_q)
+                action = np.clip(action, ACT_LOW, ACT_HIGH)
+ 
+            elif mode == "ppo":
+                norm_obs = agent.normalize_obs(obs, update=False)
+                action, _, _ = agent.act(norm_obs, deterministic=True)
+ 
+            elif mode == "td3":
+                norm_obs = agent.normalize_obs(obs, update=False)
+                action, _ = agent.act(obs)
+ 
+            # NaN 保护
+            if np.isnan(action).any():
+                current_q = env.data.qpos[:7].copy().astype(np.float32)
+                action    = expert.compute_joint_target(obs, current_q) if expert else ACT_LOW
+ 
+            # ── 环境推进 ────────────────────────────────────────────────────
+            next_obs, reward, terminated, truncated, info = env.step(action)
+            done = terminated or truncated
+ 
+            ep_reward += reward; step += 1
+ 
+            if info.get("is_success"):    ep_success   = True
+            if info.get("is_collision"):  ep_collision = True
+ 
+            if save_paths_dir:
+                trajectory.append(env.data.body("prefab").xpos.copy())
+ 
+            if config["sim"]["render"]:
+                time.sleep(0.01)
+ 
             obs = next_obs
-            step += 1
-            
-            # === 3. 碰撞与渲染处理 ===
-            # (如果碰到障碍物，由于惩罚大，判定为 collision)
-            if is_collision == True: 
-                episode_collision = True
-                
-            if render:
-                time.sleep(0.01) # 控制渲染帧率
-                
-            # === 4. 回合结束判定与结算 ===
-            if is_done or step >= 200:
-                status = "✅ Success" if success else "❌ Failed"
-                col_status = " (Collision!)" if episode_collision else ""
-                print(f"Ep {ep+1:3d} | {status}{col_status} | Total Reward: {episode_reward:7.2f} | Steps: {step:3d}")
-                
-                # 【修复 3】补全平均步数和碰撞的统计累加逻辑
-                if success:
-                    success_count += 1
-                    total_steps_success += step
-                if episode_collision:
-                    collision_count += 1
-                    
-                break # 跳出当前回合的 while 循环，进入下一个 Episode
-    
-    # 【修复 4】补充 end_time 记录，防止最后报错
-    end_time = time.time()
-    avg_steps = (total_steps_success / success_count) if success_count > 0 else 0
-    
-    print("\n" + "="*50)
-    print(f"Final Result [{mode.upper()}]:")
-    print(f"Total Episodes: {n_episodes}")
-    print(f"Success Rate:   {success_count}/{n_episodes} ({success_count/n_episodes*100:.2f}%)")
-    print(f"Collision Rate: {collision_count}/{n_episodes} ({collision_count/n_episodes*100:.2f}%)")
-    print(f"Avg Steps:      {avg_steps:.1f}")
-    print(f"Time Elapsed:   {end_time - start_time:.2f}s")
-    print("="*50 + "\n")
-
-def run_manual(n_obstacles=3, obstacle_seed=42, default_start_xy=None,
-               default_target_xy=None, payload_radius=0.10,
-               planning_margin=0.10, planning_grid_res=0.02):
-    """Manual keyboard control mode for debugging."""
-    import mujoco
-
-    test_config = {
-        "sim": {"render": True, "control_freq_hz": 10},
-        "task": {
-            "default_start_xy": default_start_xy or [0.2, 0.2],
-            "default_target_xy": default_target_xy or [0.5, 0.5],
-            "init_position_range": 0.00,
-            "init_velocity_scale": 0.08,
-        },
-        "scene": {
-            "n_obstacles": n_obstacles,
-            "radius_range": (0.01, 0.02),
-            "path_width": 0.12,
-            "seed": obstacle_seed,
-        },
-        "noise": {"latency_steps": 1, "force_noise_level": 0.08},
-        "planning": {
-            "payload_radius": payload_radius,
-            "planning_margin": planning_margin,
-            "planning_grid_res": planning_grid_res,
-        },
+            if done: break
+ 
+        # ── 回合结算 ─────────────────────────────────────────────────────────
+        if ep_success:    success_count += 1;   total_steps_success += step
+        if ep_collision:  collision_count += 1
+ 
+        status  = "✅ 成功" if ep_success   else "❌ 失败"
+        col_str = " (碰撞!)" if ep_collision else ""
+        print(f"  Ep {ep+1:3d} | {status}{col_str} | "
+              f"总奖励: {ep_reward:7.2f} | 步数: {step:3d}")
+ 
+        # 保存轨迹
+        if save_paths_dir and trajectory:
+            import csv
+            fpath = os.path.join(save_paths_dir, f"ep{ep+1:03d}.csv")
+            with open(fpath, "w", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["x", "y", "z"])
+                w.writerows(trajectory)
+ 
+    # ── 汇总 ──────────────────────────────────────────────────────────────────
+    elapsed = time.time() - t_start
+    print_summary(mode, n_episodes, success_count, collision_count,
+                  total_steps_success, elapsed)
+ 
+    env.close()
+    return {
+        "success_rate":  success_count / n_episodes,
+        "collision_rate": collision_count / n_episodes,
+        "avg_steps":     total_steps_success / max(success_count, 1),
     }
-    env = CableRobotEnvWithObstacles(config=test_config)
-
-    # Shared state for keyboard callback
-    key_state = {
-        "paused": True,  # start paused after reset
-        "move": np.zeros(4),  # [ax, ay, az, yaw] accumulator
-    }
-    MOVE_STEP = 0.3  # acceleration magnitude per key
-
-    def key_callback(keycode):
-        # GLFW key codes - use arrow keys + numpad to avoid MuJoCo viewer conflicts
-        KEY_SPACE = 32
-        KEY_RIGHT = 262; KEY_LEFT = 263  # X axis
-        KEY_UP = 264; KEY_DOWN = 265     # Y axis
-        KEY_PERIOD = 46; KEY_COMMA = 44  # Z axis: ,=down .=up
-        KEY_LBRACKET = 91; KEY_RBRACKET = 93  # yaw: [=CCW ]=CW
-
+ 
+ 
+# ==============================================================================
+# 手动控制模式
+# ==============================================================================
+ 
+def run_manual(config: dict):
+    """键盘手动控制，用于调试。控制 4D 加速度（通过专家内部积分→IK执行）。"""
+    config["sim"]["render"] = True
+    env = CableRobotEnvWithObstacles(config=config)
+    expert = JointSpaceExpert(config, env.ik_solver)
+ 
+    key_state = {"paused": True, "acc": np.zeros(4)}  # [ax, ay, az, ayaw]
+    STEP = 0.3
+ 
+    def key_cb(keycode):
+        KEY_SPACE=32; KEY_R=262; KEY_L=263; KEY_U=264; KEY_D=265
+        KEY_UP_Z=46; KEY_DN_Z=44; KEY_YL=91; KEY_YR=93
         if keycode == KEY_SPACE:
             key_state["paused"] = not key_state["paused"]
-            status = "PAUSED" if key_state["paused"] else "RUNNING"
-            print(f"  [{status}]")
-            return
-
-        m = key_state["move"]
-        if keycode == KEY_UP:        m[1] += MOVE_STEP   # +Y
-        elif keycode == KEY_DOWN:    m[1] -= MOVE_STEP   # -Y
-        elif keycode == KEY_RIGHT:   m[0] += MOVE_STEP   # +X
-        elif keycode == KEY_LEFT:    m[0] -= MOVE_STEP   # -X
-        elif keycode == KEY_PERIOD:  m[2] += MOVE_STEP   # +Z (up)
-        elif keycode == KEY_COMMA:   m[2] -= MOVE_STEP   # -Z (down)
-        elif keycode == KEY_LBRACKET:  m[3] += 0.5       # yaw CCW
-        elif keycode == KEY_RBRACKET:  m[3] -= 0.5       # yaw CW
-
-    # Store callback on env so reset() can reuse it when relaunching viewer
-    env._key_callback = key_callback
-
-    # Relaunch viewer with key callback
-    if env.viewer is not None:
-        try:
-            env.viewer.close()
-        except Exception:
-            pass
+            print("PAUSED" if key_state["paused"] else "RUNNING"); return
+        a = key_state["acc"]
+        if keycode == KEY_R: a[0] += STEP
+        elif keycode == KEY_L: a[0] -= STEP
+        elif keycode == KEY_U: a[1] += STEP
+        elif keycode == KEY_D: a[1] -= STEP
+        elif keycode == KEY_UP_Z: a[2] += STEP
+        elif keycode == KEY_DN_Z: a[2] -= STEP
+        elif keycode == KEY_YL: a[3] += 0.5
+        elif keycode == KEY_YR: a[3] -= 0.5
+ 
+    env._key_callback = key_cb
+    if env.viewer: env.viewer.close()
+ 
+    import mujoco
     env.viewer = mujoco.viewer.launch_passive(
-        env.model, env.data, key_callback=key_callback
+        env.model, env.data, key_callback=key_cb
     )
-
-    print("=" * 50)
-    print("MANUAL CONTROL MODE")
-    print("  Arrow keys = move XY")
-    print("  , / .      = move Z down/up")
-    print("  [ / ]      = yaw CCW/CW")
-    print("  SPACE      = pause/resume")
-    print("  Close viewer window to exit")
-    print("=" * 50)
-
+ 
+    print("="*50)
+    print("手动控制模式")
+    print("  方向键 = XY 移动  , / . = Z 升降  [ / ] = 偏航  SPACE = 暂停")
+    print("  关闭窗口退出")
+    print("="*50)
+ 
     obs = env.reset()
-    print("\n[Reset done] Simulation PAUSED. Press SPACE in viewer to start.")
-
+    current_q = env.data.qpos[:7].copy()
+    expert.reset(obs, current_q)
+    planned_path = env.get_planned_path()
+    if planned_path: expert.set_path(planned_path)
+    print("[重置完成] 已暂停，按 SPACE 开始")
+ 
     while env.viewer.is_running():
         if key_state["paused"]:
-            env.viewer.sync()
-            time.sleep(0.02)
-            continue
-
-        # Read and reset accumulated key input as action
-        action = key_state["move"].copy()
-        key_state["move"][:] = 0.0
-
-        next_obs, reward, done, _, info = env.step(action)
-        success = info.get("is_success", False)
-        obs = next_obs
-
+            env.viewer.sync(); time.sleep(0.02); continue
+ 
+        # 用手动输入的 4D 加速度覆盖专家内部 MPC（通过修改 expert 的积分状态）
+        acc = key_state["acc"].copy(); key_state["acc"][:] = 0.0
+        dt  = expert.dt
+        expert._ee_pos += expert._ee_vel * dt + 0.5 * acc[:3] * dt**2
+        expert._ee_vel += acc[:3] * dt
+        expert._ee_yaw += acc[3] * dt
+        if expert._ee_pos[2] < 0.25:
+            expert._ee_pos[2] = 0.25; expert._ee_vel[2] = 0.0
+ 
+        current_q = env.data.qpos[:7].copy().astype(np.float32)
+        action = env.ik_solver.solve_4d(
+            current_q, expert._ee_pos[0], expert._ee_pos[1],
+            expert._ee_pos[2], expert._ee_yaw
+        )
+        action = np.clip(action, env.action_space_low, env.action_space_high)
+ 
+        obs, reward, done, _, info = env.step(action)
         if done:
-            status = "SUCCESS" if success else "DONE"
-            print(f"  [{status}] reward={reward:.2f}")
-            print("  Resetting... Press SPACE to start next episode.")
+            status = "成功✅" if info.get("is_success") else "结束"
+            print(f"  [{status}] 奖励={reward:.2f}")
             obs = env.reset()
+            current_q = env.data.qpos[:7].copy()
+            expert.reset(obs, current_q)
+            planned_path = env.get_planned_path()
+            if planned_path: expert.set_path(planned_path)
             key_state["paused"] = True
-
+            print("[重置完成] 已暂停")
+ 
         time.sleep(0.02)
-
-    print("Viewer closed. Exiting.")
-
-
-if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='Test Cable Robot Policy')
-
-    parser.add_argument('--mode', type=str, default='actor_obstacles',
-                        choices=['base', 'actor', 'obstacles', 'obstacles_base',
-                                 'actor_obstacles', 'manual'],
-                        help='Test mode')
-    parser.add_argument('--render', action='store_true', help='Enable MuJoCo rendering')
-    parser.add_argument('--episodes', type=int, default=10, help='Number of test episodes')
-    parser.add_argument('--dir', type=str, default='saves/nmpc_experiment_0.95', help='Directory with actor.pt')
-
-    # 障碍物模式专用参数
-    parser.add_argument('--obstacles', type=int, default=3, help='[obstacles] Number of obstacles per episode')
-    parser.add_argument('--seed', type=int, default=42, help='[obstacles] Obstacle RNG seed')
-    parser.add_argument('--save_paths_dir', type=str, default=None,
-                        help='[obstacles] Save planned 3D paths as CSV to this dir')
-    parser.add_argument('--payload_radius', type=float, default=0.06, help='[obstacles] Payload safety radius (m)')
-    parser.add_argument('--planning_margin', type=float, default=0.05, help='[obstacles] Planning margin (m)')
-    parser.add_argument('--planning_grid_res', type=float, default=0.02, help='[obstacles] Grid resolution (m)')
-
+ 
+    print("窗口已关闭。")
+    env.close()
+ 
+ 
+# ==============================================================================
+# 命令行入口
+# ==============================================================================
+ 
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="索驱动机器人测试脚本")
+ 
+    parser.add_argument("--mode",     type=str, default="ppo",
+                        choices=["ppo", "td3", "nmpc", "manual"],
+                        help="测试模式")
+    parser.add_argument("--ckpt",     type=str, default=None,
+                        help="checkpoint 路径（ppo/td3 模式必填）")
+    parser.add_argument("--log-dir",  type=str, default="saves/ppo_run",
+                        help="若 --ckpt 未指定，从此目录自动找 ckpt_latest.pt")
+    parser.add_argument("--episodes", type=int, default=20)
+    parser.add_argument("--render",   action="store_true")
+    parser.add_argument("--gpu",      type=int, default=0)
+ 
+    # 场景参数
+    parser.add_argument("--obstacles",  type=int, default=3)
+    parser.add_argument("--seed",       type=int, default=42)
+    parser.add_argument("--start-xy",   type=str, default=None, dest="start_xy",
+                        help="起始 XY，例如 '0.3,0.15'")
+    parser.add_argument("--target-xy",  type=str, default=None, dest="target_xy",
+                        help="目标 XY，例如 '-0.3,0.2'")
+    parser.add_argument("--save-paths", type=str, default=None, dest="save_paths_dir",
+                        help="保存轨迹 CSV 的目录")
+ 
     args = parser.parse_args()
-
-    # 路由及参数传递：基础 2D 环境与 3D 障碍物环境的分流
-    if args.mode in ['actor', 'base']:
-        run_test(mode=args.mode, log_dir=args.dir, n_episodes=args.episodes, render=args.render)
-    elif args.mode == 'manual':
-        run_manual(
-            n_obstacles=args.obstacles,
-            obstacle_seed=args.seed,
-            payload_radius=args.payload_radius,
-            planning_margin=args.planning_margin,
-            planning_grid_res=args.planning_grid_res,
-        )
-    elif args.mode in ['obstacles', 'obstacles_base', 'actor_obstacles']:
-        run_test_obstacles(
-            mode=args.mode,
-            log_dir=args.dir,
-            n_episodes=args.episodes,
-            render=args.render,
-            n_obstacles=args.obstacles,
-            obstacle_seed=args.seed,
-            save_paths_dir=args.save_paths_dir,
-            payload_radius=args.payload_radius,
-            planning_margin=args.planning_margin,
-            planning_grid_res=args.planning_grid_res
-        )
+ 
+    config = build_config(args)
+ 
+    # 自动推断 checkpoint 路径
+    ckpt_path = args.ckpt
+    if ckpt_path is None and args.mode in ["ppo", "td3"]:
+        ckpt_path = os.path.join(args.log_dir, "ckpt_latest.pt")
+        if not os.path.exists(ckpt_path):
+            ckpt_path = os.path.join(args.log_dir, "ckpt_best.pt")
+        if not os.path.exists(ckpt_path):
+            print(f"[Warn] 未找到 checkpoint，将使用随机初始化策略。"
+                  f"（搜索路径：{args.log_dir}）")
+            ckpt_path = None
+ 
+    if args.mode == "manual":
+        run_manual(config)
     else:
-        run_test(args.mode, args.dir, args.episodes, args.render)
+        run_test(
+            mode=args.mode,
+            config=config,
+            n_episodes=args.episodes,
+            ckpt_path=ckpt_path,
+            gpu_id=args.gpu,
+            save_paths_dir=args.save_paths_dir,
+        )
+ 

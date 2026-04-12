@@ -1,28 +1,33 @@
 # ==============================================================================
-# config.py — 项目全局配置文件
+# config.py — 项目全局配置（PPO + TD3 双框架统一配置版）
 #
-# 职责：作为整个项目（env / controller / agent / learn / test）的单一超参数入口。
-#       任何模块不得在自身内部硬编码可调参数，应从 DEFAULT_CONFIG 中读取。
+# 架构变更说明（相对 TD3 版本）：
 #
-# 修改记录（相对上一版）：
-#   [CFG-1]  新增 "train" 节，统一管理 learn.py 的所有训练超参数
-#            （旧版散落在 train() 函数体内，难以追踪与复现）。
-#   [CFG-2]  新增 "agent" 节，统一管理 TD3 网络结构与优化器超参数
-#            （旧版分散在 WBAgent.__init__ 里，修改需要改两处）。
-#   [CFG-3]  reward 节全面重新设计：
-#             - 旧版 progress_coef=50.0，clip=±2.0：单步最大 ±2，而 success_bonus=15，
-#               导致绝大多数 step reward < 0.1，信号稀疏且量级不均匀。
-#             - 新版按量级归一化：成功奖励 +10 作为基准，各 shaping 项与之相称。
-#             - 增加 "waypoint_bonus" 每通过一个中间航点给予小额奖励，
-#               缓解稀疏回报问题，加速早期探索。
-#             - 增加 "swing_penalty_coef" 对绳摆角（payload 与 EE 的 XY 偏差）惩罚，
-#               鼓励 NMPC-RL 协同保持摆角收敛。
-#   [CFG-4]  "sim" 节新增 "substep_skip"：控制 env._compute_reward 中
-#             物理子步的评估频率（默认全步评估），留作性能调优入口。
-#   [CFG-5]  "train" 节新增 "gpu_id" / "n_envs_placeholder"：
-#             为后续多环境并行或指定 GPU 预留接口。
+# [ARCH-1] Action Space 重定义
+#   旧版：Actor 输出 6D 末端加速度 [ax, ay, az, a_roll, a_pitch, a_yaw]
+#   新版：Actor 直接输出 7D 关节角目标 [q1..q7]（关节空间控制）
+#   优势：
+#     - 消除了 IK 求解在训练梯度链中引入的不可微性
+#     - BC 监督信号直接定义在关节空间，物理意义清晰
+#     - PPO 的策略分布（高斯分布）在关节空间更接近等方，收敛更稳定
+#     - NMPC → IK 仍在 controller 中完整保留，作为 BC 标签生成器
 #
-#   其余所有键值与旧版完全一致，未做任何修改。
+# [ARCH-2] Controller 职责重定义
+#   旧版：controller 直接参与控制链（输出动作执行）
+#   新版：controller 仅作为"专家标签生成器"
+#     - 每 step 由 NMPC 计算 4D 加速度 → IK 解算 7 关节角 → 作为 BC 监督目标
+#     - 实际执行动作：Actor 网络输出的 7 关节角
+#     - 训练初期 epsilon 调度保留（可选）
+#
+# [ARCH-3] PPO 专属配置节新增
+#   - ppo_agent: 所有 PPO 超参数
+#   - 同时保留 td3_agent 节，支持双框架对比训练
+#
+# [ARCH-4] 奖励重设计（配合关节空间控制）
+#   - 保留原有 waypoint/collision/success 奖励
+#   - 新增 joint_limit_penalty：关节角接近极限时惩罚
+#   - 新增 smoothness_penalty：相邻步关节角变化量惩罚（防抖动）
+#   - 移除 action_smooth_penalty（原来针对加速度，现在改为关节空间正则）
 # ==============================================================================
 
 import numpy as np
@@ -30,151 +35,138 @@ import numpy as np
 DEFAULT_CONFIG = {
 
     # ==========================================================================
-    # 1. 仿真与控制 (Simulation & Control)
+    # 1. 仿真与控制
     # ==========================================================================
     "sim": {
-        "physics_dt":       0.005,   # 物理引擎时间步长 (500 Hz)
-        "control_freq_hz":  10,      # 控制频率 (10 Hz)，每控制步执行 50 次物理步
+        "physics_dt":       0.005,   # 物理引擎时间步长（500 Hz）
+        "control_freq_hz":  10,      # 控制频率（10 Hz），每控制步 50 次物理步
         "max_steps":        200,     # 回合最大步数
-        "render":           False,   # 是否开启 GUI 渲染
-        # [CFG-4 新增] reward 子步跳过（1=每步都算，2=每隔一步，调高可小幅提速）
+        "render":           False,
         "substep_skip":     1,
     },
 
     # ==========================================================================
-    # 2. 空间与动作 (Space & Action)
+    # 2. 空间与动作（新版：关节空间 7D）
     # ==========================================================================
     "space": {
-        "action_dim":        6,                               # [ax, ay, az, a_roll, a_pitch, a_yaw]
-        # 各维度动作上限（roll/pitch 固定 0，上限保留以统一接口）
-        "action_space_high": [0.5, 0.5, 0.5, 0.5, 2.0, 2.0],
+        # [ARCH-1] 动作维度改为 7（7 个关节角目标）
+        "action_dim":        7,
+        # 关节角上限（rad），与 KUKA iiwa14 关节限位对齐
+        # iiwa14 关节范围: ±2.967, ±2.094, ±2.967, ±2.094, ±2.967, ±2.094, ±3.054
+        "action_space_high": [2.967, 2.094, 2.967, 2.094, 2.967, 2.094, 3.054],
+        "action_space_low":  [-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -3.054],
+
+        # 末端执行器空间（用于 controller 内部计算，非 RL 直接输出）
+        "ee_action_high":    [0.5, 0.5, 2.0, 2.0],   # [ax, ay, az, ayaw]
     },
 
     # ==========================================================================
-    # 3. 任务与随机化初始状态 (Task & Randomization)
+    # 3. 任务与随机化初始状态
     # ==========================================================================
     "task": {
-        "start_pos_mocap":    [0.3, 0.15, 1.0],       # 动捕点初始平移位置
-        "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],  # 动捕点初始姿态四元数 (w,x,y,z)
-        "default_start_xy":   [0.3, 0.15],             # 负载初始 XY 中心（加噪声前）
-        "default_target_xy":  [-0.3, 0.2],            # 目标 XY 中心
-        "init_position_range": 0.02,                  # 初始 XY 位置均匀噪声范围 ±0.01
-        "init_velocity_scale": 0.08,                  # 初始速度扰动尺度（保留未用）
+        "start_pos_mocap":    [0.3, 0.15, 1.0],
+        "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],
+        "default_start_xy":   [0.3, 0.15],
+        "default_target_xy":  [-0.3, 0.2],
+        "init_position_range": 0.02,
+        "init_velocity_scale": 0.08,
     },
 
     # ==========================================================================
-    # 4. 场景生成 (Scene & Obstacles)
+    # 4. 场景生成
     # ==========================================================================
     "scene": {
-        "n_obstacles":        3,                      # 障碍物数量
-        "radius_range":       (0.02, 0.04),         # 障碍物半径范围 [r_min, r_max]
-        "path_width":         0.2,                   # 障碍物横向分布宽度
-        "obstacle_z_center":  0.25,                   # 障碍物 Z 轴中心高度
-        "obstacle_halfheight": 0.2,                   # 障碍物圆柱半高
-        "endpoint_z_offset":  0.025,                  # 起/终点标记球偏移
-        "seed":               None,                   # 随机种子（None=每次不同）
+        "n_obstacles":        3,
+        "radius_range":       (0.02, 0.04),
+        "path_width":         0.2,
+        "obstacle_z_center":  0.25,
+        "obstacle_halfheight": 0.2,
+        "endpoint_z_offset":  0.025,
+        "seed":               None,
     },
 
     # ==========================================================================
-    # 5. A* 寻路与 3D 轨迹规划 (Planning & Geometry)
+    # 5. A* 寻路与 3D 轨迹规划
     # ==========================================================================
     "planning": {
-        "payload_radius":    0.04,    # 负载几何半径（用于障碍物膨胀防撞）
-        "planning_margin":   0.05,    # A* 安全边距
-        "planning_grid_res": 0.02,    # A* 栅格分辨率（米）
-        "bounds_margin":     0.05,    # 寻路地图边界余量
-        "max_expansions":    100000,  # A* 最大扩展节点数
-
-        "payload_z_cruise":  0.2,     # 负载平移阶段巡航高度（米）
-        "target_z_descent":  0.09,    # 终点正上方垂直下潜的最低高度
-        "num_descent_steps": 6,       # Z 轴垂直下降段离散点数
+        "payload_radius":    0.04,
+        "planning_margin":   0.05,
+        "planning_grid_res": 0.02,
+        "bounds_margin":     0.05,
+        "max_expansions":    100000,
+        "payload_z_cruise":  0.2,
+        "target_z_descent":  0.09,
+        "num_descent_steps": 6,
     },
 
     # ==========================================================================
-    # 6. Step 逻辑判定 (Step Logic)
+    # 6. Step 逻辑判定
     # ==========================================================================
     "step_logic": {
-        # 【极其关键的修复】：放宽视距阈值，允许 NMPC 抄近道时能正确触发进度与航点奖励
-        "look_ahead_dist":    0.25,   # 原为 0.1，现放宽至 0.25
-        "out_of_bounds_dist": 2.0,    # 偏离目标超过此距离视为出界
-        "crash_z_threshold":  0.15,   # 判定坠毁的 Z 轴高度阈值
-        "crash_vz_threshold": -0.05,   # 判定坠毁的 Z 轴下降速度阈值
+        "look_ahead_dist":    0.25,
+        "out_of_bounds_dist": 2.0,
+        "crash_z_threshold":  0.15,
+        "crash_vz_threshold": -0.05,
     },
 
     # ==========================================================================
-    # 7. 奖励函数系数 (Reward Shaping) — [修复：解决专家策略总收益为负的致命漏洞]
-    #
-    # 设计原则（已修正为 /10 缩放版本，完美适配 Critic 拟合范围）：
-    #   · success_bonus = 10.0 作为绝对量级基准，确保“成功”是压倒性的正收益。
-    #   · 致死惩罚（越界、碰撞、坠毁） = -10.0，彻底消除 Agent “开局自杀以逃避过程扣分”的动机。
-    #   · waypoint_bonus 提高到 0.5，真正起到稠密正向里程碑的引导作用。
+    # 7. 奖励函数系数（关节空间版本重设计）
     # ==========================================================================
     "reward": {
-        # ── 终止奖励（Terminal Rewards） ──────────────────────────────────────
-        # 成功降落的一次性奖励（绝对量级基准，必须兜住所有过程惩罚）
-        "success_bonus":          1.0,
-        # 超时未成功的惩罚（中度惩罚）
-        "timeout_penalty":        -3.0,
-        # 碰撞障碍物惩罚（极度恶劣，负向拉满）
-        "collision_penalty":      -5.0,
-        # 出界惩罚（极度恶劣，负向拉满）
-        "out_of_bounds_penalty":  -3.0,
-        # 坠毁/砸地/甩机惩罚（极度恶劣，负向拉满）
-        "crash_penalty":          -5.0,
+        # ── 终止奖励 ──────────────────────────────────────────────────────────
+        "success_bonus":          3.0,    # 提高成功奖励量级（解决 step_penalty 淹没问题）
+        "timeout_penalty":        -1.0,   # 超时惩罚（较轻，避免 Agent 过早自杀）
+        "collision_penalty":      -3.0,   # 碰撞障碍物
+        "out_of_bounds_penalty":  -3.0,   # 出界
+        "crash_penalty":          -3.0,   # 坠毁
 
-        # ── 进展奖励（Dense Progress Reward） ────────────────────────────────
-        # 势能进展系数（靠近当前航点的距离差 × coef，再 clip）
-        "progress_coef":          2.0,
-        # progress 奖励的单步 clip 范围（允许单步获得足够的正向激励）
-        "progress_clip":           0.2,
+        # ── 进展奖励 ──────────────────────────────────────────────────────────
+        "progress_coef":          2.0,    # 势能进展系数
+        "progress_clip":          0.2,    # 单步进展奖励上限
 
-        # ── 里程碑奖励（Waypoint Bonus） ─────────────────────────────────────
-        # 每通过一个中间航点给予正向奖励，缓解稀疏性
-        "waypoint_bonus":          0.05,
+        # ── 里程碑奖励 ────────────────────────────────────────────────────────
+        "waypoint_bonus":         0.1,    # 每过一个航点的奖励（提高到 0.1）
 
-        # ── 连续性惩罚（Per-Step Penalties） ─────────────────────────────────
-        # 每步生存惩罚（鼓励尽快完成，130步约扣 0.65分）
-        "step_penalty":           -0.05,
-        # 动作 L2 正则系数（防抖）
-        "action_smooth_penalty":  -0.01,
-        # 速度过快惩罚系数（防过度甩动）
-        "velocity_penalty_coef":   0.01,
-        # 绳摆角惩罚系数：惩罚 payload 与 EE 的 XY 偏差
-        "swing_penalty_coef":      0.05,
+        # ── 连续性惩罚（每步）────────────────────────────────────────────────
+        "step_penalty":          -0.005,  # 极小步惩罚（140步只扣 0.7）
+        "velocity_penalty_coef":  0.005,  # 速度过快惩罚
+
+        # ── 关节空间专属惩罚（新增）─────────────────────────────────────────
+        # 关节角相邻步变化量 L2 惩罚（防止关节抖动）
+        "joint_smooth_penalty":  -0.002,
+        # 关节角接近关节限位惩罚（当关节角在极限 10% 范围内时触发）
+        "joint_limit_penalty":   -0.05,
+        "joint_limit_margin":     0.1,   # 极限边距比例（占关节范围的 10%）
+
+        # ── 摆角惩罚 ──────────────────────────────────────────────────────────
+        "swing_penalty_coef":     0.02,
     },
 
     # ==========================================================================
-    # 8. 系统延迟与噪声 (Latency & Noise)
+    # 8. 系统延迟与噪声
     # ==========================================================================
     "noise": {
-        "latency_steps":     1,    # 动作延迟步数（1 = 延迟 1 个控制周期）
-        "force_noise_level": 0.1,  # 力输出噪声水平（当前保留未注入）
+        "latency_steps":     1,
+        "force_noise_level": 0.1,
     },
 
     # ==========================================================================
-    # 9. 重置参数 (Reset & Init)
+    # 9. 重置参数
     # ==========================================================================
     "reset": {
-        # 机械臂初始关节角（7 个 revolute 关节，单位：rad）
         "init_qpos_arm": [
             -0.71972016,  0.29057466, -1.10685585,
              1.53851657,  2.87907443,  1.73055121, -1.85194252
         ],
-        # prefab（负载）初始 free joint 位姿 [x, y, z, qw, qx, qy, qz]
         "init_qpos_prefab": [0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
-
-        "warmup_steps": 30,    # 物理引擎预热步数
-        "mocap_init_z": 1.0,   # 动捕点初始 Z 高度（米）
-
-        # IK 求解参数
-        "ik_enabled":            True,
-        # ik_height_above_prefab 应与 rope.total_length 一致
-        # (= rope.num_segments * rope.segment_length = 20 * 0.02 = 0.4)
+        "warmup_steps":      30,
+        "mocap_init_z":      1.0,
+        "ik_enabled":        True,
         "ik_height_above_prefab": 0.2,
-        "ik_target_quat":        [0.0, 1.0, 0.0, 0.0],   # 末端朝下四元数 (wxyz)
-        "ik_max_iter":            5000,
-        "ik_tol_pos":             1e-4,
-        "ik_tol_rot":             1e-3,
+        "ik_target_quat":    [0.0, 1.0, 0.0, 0.0],
+        "ik_max_iter":       5000,
+        "ik_tol_pos":        1e-4,
+        "ik_tol_rot":        1e-3,
     },
 
     # ==========================================================================
@@ -202,11 +194,11 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 12. 绳索生成 (Rope Generation)
+    # 12. 绳索生成
     # ==========================================================================
     "rope": {
         "num_segments":    10,
-        "segment_length":  0.04,      # 每段长度，total = 20 * 0.02 = 0.4m
+        "segment_length":  0.04,
         "damping":         0.02,
         "capsule_radius":  0.004,
         "segment_mass":    0.01,
@@ -216,112 +208,123 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 13. TD3 Agent 网络与优化器超参数 (Agent)
-    # ==========================================================================
-    "agent": {
-        # ── 网络结构 ───────────────────────────────────────────────────────────
-        "hidden_dim":           256,
-    
-        # ── 回放池 ─────────────────────────────────────────────────────────────
-        "buffer_size":          300_000,   # 适当增大，容纳更多专家经验
-    
-        # ── 优化 ───────────────────────────────────────────────────────────────
-        "batch_size":           256,       # 原 64 太小，256 梯度方差更小
-        "gamma":                0.99,
-        "tau":                  0.005,
-        "lr_actor":             3e-4,      # Actor/Critic 同量级，收敛更稳
-        "lr_critic":            3e-4,
-    
-        # ── TD3 噪声 ────────────────────────────────────────────────────────────
-        "policy_noise":         0.1,       # target policy smoothing σ（相对 max_action 的比例）
-        "noise_clip":           0.25,      # 噪声截断（相对 max_action 的比例）
-        "policy_freq":          2,
-    
-        # ── 梯度 clip ──────────────────────────────────────────────────────────
-        "critic_grad_clip":     1.0,
-        "actor_grad_clip":      1.0,       # 【FIX-7 新增，原版硬编码未暴露到 config】
-    
-        # ── Critic Loss 类型 ────────────────────────────────────────────────────
-        "critic_loss_type":     "huber",   # "huber" 或 "mse"
-    
-        # ── Target Q 限幅（FIX-4 重新启用）─────────────────────────────────────
-        # 本任务理论最大累积回报约 ±15（140步，稀疏奖励），设 ±20 留有余量
-        "target_q_clip":        20.0,
-    
-        # ── Behavior Cloning ────────────────────────────────────────────────────
-        "behavior_clone":       True,
-        "bc_alpha":             2.5,       # TD3+BC 论文默认值，lambda = alpha / E[|Q|]
-    
-        # ── Epsilon 探索 ────────────────────────────────────────────────────────
-        "epsilon_init":         1.0,
-        "epsilon_min":          0.05,
-        # 每个 env step 衰减一次（FIX-6）
-        # 希望在 ~150000 steps（约 1000 回合 × 140 步/回合 × 1 step/衰减）
-        # 从 1.0 衰减到 0.05，则 delta = (1.0 - 0.05) / 150000 ≈ 6.3e-6
-        "epsilon_delta":        1e-6,
-    
-        # ── 状态归一化 ──────────────────────────────────────────────────────────
-        # warm_start: 归一化器样本数低于此值时不做归一化（防早期方差坍塌）
-        # 已在 RunningMeanStd 内部处理，此处记录设计意图
-        # "state_norm_warm_start": 200,   （在 agent.py 中硬编码为 200，可按需暴露）
-    
-        # ── 奖励归一化（延伸-1，建议先关，稳定后再开）──────────────────────────
-        "use_reward_norm":      False,
-    
-        # ── 已废弃（移除，勿使用）──────────────────────────────────────────────
-        # mixed_q:     False,    # → 移除（base_boot 混合Q已证明是Q爆炸根源）
-        # base_boot:   False,   # → 移除
-        # "reward_clip": None,    → 移除（用 target_q_clip 代替）
-        # "bc_coef":     1.0,     → 移除（由 lmbda 动态调整替代）
-        # "bc_weight_min/max":    → 移除
-},
- 
-# ── train 节补充 ──────────────────────────────────────────────────────────────
-    "train": {
-        "n_episodes":           8000,
-        "warmup_episodes":      100,       # 纯专家预热，填充回放池
-        "explore_noise":        0.1,       # Actor 探索 σ（相对 max_action 的比例，0.1 = 10%）
-        "min_buffer_to_train":  2048,      # buffer 未满 2048 前不训练
-        "grad_updates_per_step":1,         # 每 step 更新 1 次，防过拟合（稳定后可调至 2）
-        "save_interval":        50,
-        "log_smooth_win":       20,
-        "gpu_id":               0,
-        "n_envs":               1,
-},
-
-    # ==========================================================================
-    # 15. 控制器超参数 (Controller) — 供 NMPCTrajectoryTracker 读取
+    # 13. NMPC 控制器（BC 标签生成器）
     # ==========================================================================
     "controller": {
-        # MPC 预测时域（控制步数）
-        "N":                   15,
-        # 控制周期，应与 sim.control_freq_hz 倒数严格一致
-        "dt":                  0.1,
-        # 绳长估计
-        "L":                   0.445,
-        # 平移动作上限 (m/s²)
-        "u_max_xy":            0.5,
-        # Z 轴动作上限 (m/s²)
-        "u_max_z":             2.0,
-        # Yaw 动作上限 (rad/s²)
-        "u_max_yaw":           2.0,
-        # 到达航点的 XY 判定半径（米）
+        "N":                    15,
+        "dt":                   0.1,
+        "L":                    0.445,
+        "u_max_xy":             0.5,
+        "u_max_z":              2.0,
+        "u_max_yaw":            2.0,
         "arrival_threshold_xy": 0.05,
-        # 到达航点的 Z 判定半径（米）
         "arrival_threshold_z":  0.20,
     },
 
     # ==========================================================================
-    # 16. 测试专用参数 (Test) — 供 test.py 读取
+    # 14. PPO Agent 超参数（主训练框架）
+    # ==========================================================================
+    "ppo_agent": {
+        # ── 网络结构 ──────────────────────────────────────────────────────────
+        "hidden_dim":            256,
+        "n_layers":              3,         # MLP 层数（Actor 和 Critic 共用）
+
+        # ── 训练核心 ──────────────────────────────────────────────────────────
+        "lr_actor":              3e-4,
+        "lr_critic":             3e-4,
+        "gamma":                 0.99,
+        "gae_lambda":            0.95,      # GAE 优势估计平滑系数
+        "clip_eps":              0.2,       # PPO clip 范围
+        "value_loss_coef":       0.5,       # Critic loss 系数
+        "entropy_coef":          0.005,     # 熵正则（鼓励探索）
+        "max_grad_norm":         0.5,       # 梯度裁剪上限
+
+        # ── 训练批次 ──────────────────────────────────────────────────────────
+        "n_steps":               2048,      # 每次 rollout 收集的 env steps
+        "n_epochs":              10,        # 每次 rollout 数据的训练轮数
+        "batch_size":            256,       # minibatch size
+        "normalize_advantages":  True,      # 对 advantage 做 batch 内归一化
+
+        # ── 行为克隆（BC）────────────────────────────────────────────────────
+        "behavior_clone":        True,
+        "bc_coef_init":          1.0,       # BC Loss 初始权重
+        "bc_coef_final":         0.05,      # BC Loss 最终权重（退火到此值）
+        "bc_anneal_steps":       500000,    # BC 系数退火的总 env steps 数
+        # BC Loss 类型: "mse"=均方误差(硬克隆), "nll"=负对数似然(软引导)
+        "bc_loss_type":          "mse",
+
+        # ── 状态归一化 ────────────────────────────────────────────────────────
+        "use_obs_norm":          True,      # 是否对观测做 running normalization
+        "obs_norm_clip":         10.0,      # 归一化后的 clip 范围
+
+        # ── 动作分布 ──────────────────────────────────────────────────────────
+        # PPO 使用高斯策略：action = tanh(mean) * scale + offset
+        # log_std 初始值（对应标准差 ~0.5，适合关节空间微调）
+        "log_std_init":         -0.7,
+        "log_std_min":          -4.0,       # 最小允许的 log_std（防止过于确定性）
+        "log_std_max":           1.0,       # 最大允许的 log_std
+
+        # ── 早停 ──────────────────────────────────────────────────────────────
+        "target_kl":             0.02,      # KL 散度早停阈值（超出时停止当前 epoch）
+    },
+
+    # ==========================================================================
+    # 15. TD3 Agent 超参数（保留，用于对比实验）
+    # ==========================================================================
+    "td3_agent": {
+        "hidden_dim":           256,
+        "buffer_size":          300_000,
+        "batch_size":           256,
+        "gamma":                0.99,
+        "tau":                  0.005,
+        "lr_actor":             3e-4,
+        "lr_critic":            3e-4,
+        "policy_noise":         0.1,
+        "noise_clip":           0.25,
+        "policy_freq":          2,
+        "critic_grad_clip":     1.0,
+        "actor_grad_clip":      1.0,
+        "critic_loss_type":     "huber",
+        "target_q_clip":        20.0,
+        "behavior_clone":       True,
+        "bc_alpha":             2.5,
+        "epsilon_init":         1.0,
+        "epsilon_min":          0.2,
+        "epsilon_delta":        3e-7,
+        "use_reward_norm":      False,
+    },
+
+    # ==========================================================================
+    # 16. 训练流程超参数（PPO 主循环）
+    # ==========================================================================
+    "train": {
+        "n_episodes":            8000,      # 总训练回合数（PPO 按 timesteps 控制时此项备用）
+        "total_timesteps":       5_000_000, # PPO 训练总环境步数
+        "warmup_episodes":       100,       # 纯专家预热回合（PPO 中也适用）
+        "explore_noise":         0.05,      # TD3 探索噪声（PPO 框架中不使用）
+        "min_buffer_to_train":   2048,      # TD3 最小 buffer
+        "grad_updates_per_step": 1,
+        "save_interval":         50,        # 每隔多少 episode 保存 checkpoint
+        "eval_interval":         100,       # 每隔多少 episode 做评估
+        "eval_episodes":         10,        # 评估时运行的回合数
+        "log_smooth_win":        20,
+        "gpu_id":                0,
+        "n_envs":                1,
+    },
+
+    # ==========================================================================
+    # 17. 测试专用参数
     # ==========================================================================
     "test": {
-        "n_episodes":          20,
-        "render":              False,
-        # 覆盖训练时的障碍物配置（测试可能使用不同难度）
-        "n_obstacles":         3,
-        "obstacle_seed":       42,
-        # 是否保存轨迹可视化
-        "save_paths":          False,
-        "save_paths_dir":      "test_paths",
+        "n_episodes":         20,
+        "render":             False,
+        "n_obstacles":        3,
+        "obstacle_seed":      42,
+        "save_paths":         False,
+        "save_paths_dir":     "test_paths",
+        # 测试时 checkpoint 路径（可通过命令行覆盖）
+        "ckpt_path":          None,
+        # 测试策略: "ppo" / "td3" / "nmpc"
+        "policy_type":        "ppo",
     },
 }

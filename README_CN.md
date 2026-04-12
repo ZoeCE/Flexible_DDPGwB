@@ -2,6 +2,21 @@
 
 本文档为项目 **BCLearning_with_nmpc** 的详细中文说明，涵盖每个代码文件的功能与主要实现逻辑。
 
+# PPO 训练
+python PPOlearn.py --algo ppo --log-dir saves/ppo_run --timesteps 5000000
+
+# TD3 训练（对比实验）
+python PPOlearn.py --algo td3 --log-dir saves/td3_run --episodes 8000
+
+# 测试 PPO 策略
+python test.py --mode ppo --log-dir saves/ppo_run --episodes 20 --render
+
+# 测试专家控制器（NMPC 基准）
+python test.py --mode nmpc --episodes 20 --render
+
+# 手动控制（调试）
+python test.py --mode manual --obstacles 3
+
 ---
 
 ## 一、项目概述
