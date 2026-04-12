@@ -44,6 +44,7 @@
 # ==============================================================================
 
 import os
+import re
 import copy
 import heapq
 import tempfile
@@ -252,7 +253,8 @@ class CableRobotEnvWithObstacles:
                 attempts += 1
                 t = rng.uniform(0.2, 0.8)
                 s = rng.uniform(-path_width / 2, path_width / 2)
-                center = midpoint + t * L_path * direction + s * perp
+                # [修复] 基准点使用 start_xy，而不是 midpoint
+                center = start_xy + t * L_path * direction + s * perp
                 r      = rng.uniform(r_min, r_max)
                 if (np.linalg.norm(center - start_xy)  < r + min_clearance or
                         np.linalg.norm(center - target_xy) < r + min_clearance or
@@ -341,11 +343,25 @@ class CableRobotEnvWithObstacles:
             path_2d = np.array([g2w(i,j) for (i,j) in path_idx])
 
         z_cruise = scene_plan_config["payload_z_cruise"]
-        path_3d  = [[pt[0], pt[1], z_cruise] for pt in path_2d]
-        last_xy  = path_2d[-1]
+        path_3d = []
+        
+        # 1. 新增：缓慢起升阶段 (Lift phase)
+        first_xy = path_2d[0]
+        num_lift = scene_plan_config.get("num_lift_steps", 5)
+        # 从地面逐步生成向上的航点，使得机械臂会先上拉而不是斜拽
+        for z in np.linspace(0.11, z_cruise, num_lift + 1)[1:]:
+            path_3d.append([float(first_xy[0]), float(first_xy[1]), float(z)])
+            
+        # 2. 巡航阶段 (Cruise phase)
+        for pt in path_2d[1:]:
+            path_3d.append([float(pt[0]), float(pt[1]), float(z_cruise)])
+            
+        # 3. 下降阶段 (Descent phase)
+        last_xy = path_2d[-1]
         for z in np.linspace(z_cruise, scene_plan_config["target_z_descent"],
                              scene_plan_config["num_descent_steps"]+1)[1:]:
             path_3d.append([float(last_xy[0]), float(last_xy[1]), float(z)])
+            
         path_3d = np.array(path_3d)
 
         # XML 注入
@@ -396,7 +412,7 @@ class CableRobotEnvWithObstacles:
 
         # 随机化起始 XY
         noise = self._obstacle_rng.uniform(
-            -self.init_position_range, self.init_position_range, size=2
+            -0.00, 0.00, size=2
         )
         start_xy  = self.default_start_xy + noise
         target_xy = np.array(cfg_task["default_target_xy"])
@@ -411,8 +427,7 @@ class CableRobotEnvWithObstacles:
         self._planned_path = path_3d
 
         # 重载 XML
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml',
-                                          delete=False, encoding='utf-8') as f:
+        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml', dir=self._assets_dir, delete=False, encoding='utf-8') as f:
             f.write(new_xml)
             tmp_path = f.name
         try:
@@ -445,22 +460,67 @@ class CableRobotEnvWithObstacles:
 
         self._reresolve_ids()
 
-        # 初始化 MuJoCo 状态
+        # 初始化 MuJoCo 状态并清理所有关节
         mujoco.mj_resetData(self.model, self.data)
-        init_q = np.array(cfg_reset["init_qpos_arm"], dtype=np.float64)
+        self.data.qpos[:] = 0.0
+        self.data.qvel[:] = 0.0
+
+        # 初始化四元数，防止非法初始状态导致爆仓
+        for j in range(self.model.njnt):
+            adr = self.model.jnt_qposadr[j]
+            jtype = self.model.jnt_type[j]
+            if jtype == mujoco.mjtJoint.mjJNT_BALL:
+                self.data.qpos[adr:adr + 4] = [1, 0, 0, 0]
+            elif jtype == mujoco.mjtJoint.mjJNT_FREE:
+                self.data.qpos[adr + 3:adr + 7] = [1, 0, 0, 0]
+
+        # ---------------------------------------------------------
+        # [修复] 1. 取消硬编码噪声，使用绝对坐标
+        # 注意：你需要把前面的 start_xy 赋值改回无噪声形式，例如：
+        # start_xy = self.default_start_xy.copy()
+        # ---------------------------------------------------------
+
+        # 2. 计算机械臂的初始关节角 (使用 IK)
+        seed_q = np.array(cfg_reset["init_qpos_arm"], dtype=np.float64)
+        start_z = cfg_reset.get("mocap_init_z", 0.4)
+        
+        ik_q = self.ik_solver.solve_4d(
+            current_q=seed_q,
+            target_x=start_xy[0],
+            target_y=start_xy[1],
+            target_z=start_z,
+            target_yaw=0.0
+        )
+        init_q = ik_q.copy() if ik_q is not None else seed_q.copy()
         self.data.qpos[:7] = init_q
 
-        # 负载初始位姿
+        # 3. 计算负载 (prefab) 的初始位姿
         pref_qpos = np.array(cfg_reset["init_qpos_prefab"], dtype=np.float64)
+        pref_qpos[0] = start_xy[0]
+        pref_qpos[1] = start_xy[1]
+        
         pref_jnt  = self.model.body("prefab").jntadr[0]
-        dof_addr  = self.model.jnt_dofadr[pref_jnt]
         qpos_addr = self.model.jnt_qposadr[pref_jnt]
         self.data.qpos[qpos_addr:qpos_addr+7] = pref_qpos
 
-        # 物理预热
+        # ---------------------------------------------------------
+        # [修复] 4. 物理预热：严格锁定位置与速度 (防重力拉扯)
+        # ---------------------------------------------------------
+        arm_qpos_hold = self.data.qpos[:7].copy()
+        prefab_qpos_hold = self.data.qpos[qpos_addr:qpos_addr+7].copy()
+
+        self.data.ctrl[:7] = arm_qpos_hold # 下发初始控制指令
+        
         for _ in range(cfg_reset["warmup_steps"]):
-            self.data.ctrl[:7] = init_q
+            # 每一步物理仿真都强制重写状态，钉死机械臂和负载
+            self.data.qpos[:7] = arm_qpos_hold
+            self.data.qvel[:7] = 0.0
+            self.data.qpos[qpos_addr:qpos_addr+7] = prefab_qpos_hold
+            self.data.qvel[qpos_addr:qpos_addr+6] = 0.0
             mujoco.mj_step(self.model, self.data)
+
+        # 强制更新前向运动学，获取精确的初始状态
+        mujoco.mj_forward(self.model, self.data)
 
         # 状态重置
         self.current_step    = 0

@@ -45,7 +45,7 @@ class NMPCController4D:
     物理模型：3D 小角近似悬吊摆，Z 轴独立通道，偏航直接控制。
     """
 
-    def __init__(self, dt=0.1, N=15, L=0.445,
+    def __init__(self, dt=0.1, N=15, L=0.45,
                  u_max_xy=0.5, u_max_z=2.0, u_max_yaw=2.0):
         self.dt  = dt
         self.N   = N
@@ -87,7 +87,7 @@ class NMPCController4D:
         constraints = []
 
         Q_pos   = np.array([10.0, 10.0, 20.0, 5.0])
-        Q_swing = np.array([50.0, 50.0])
+        Q_swing = np.array([100.0, 100.0])
         Q_vel   = 2.0
         R_acc   = np.array([0.2, 0.2, 0.2, 0.3])
 
@@ -208,9 +208,11 @@ class NMPCTrajectoryTracker:
         payload_x, payload_y = obs[4], obs[5]
         payload_vx, payload_vy = obs[6], obs[7]
 
-        mocap_z   = float(obs[-12])
-        mocap_vz  = float(obs[-11])
-        payload_z = float(obs[-10])
+        # [修复] 替换错误的负向索引
+        mocap_z    = float(obs[-26])  # 原为 -12
+        mocap_vz   = float(obs[-25])  # 原为 -11
+        payload_z  = float(obs[-24])  # 原为 -10
+        payload_vz = float(obs[-23])  # 原为 -9
         mocap_yaw     = float(obs[-4])
         mocap_yaw_vel = float(obs[-3])
 
@@ -309,11 +311,16 @@ class JointSpaceExpert:
             init_q:  机械臂初始关节角 (7,)
         """
         # 从 obs 中读取初始 EE 位姿（与 env.current_mocap_pos 对齐）
-        self._ee_pos  = np.array([obs_xy(env_obs, 0), obs_xy(env_obs, 1),
-                                   float(env_obs[-12])])
-        self._ee_vel  = np.array([env_obs[2], env_obs[3], float(env_obs[-11])])
-        self._ee_yaw  = float(env_obs[-4])
-        self._ee_yaw_vel = float(env_obs[-3])
+        # [修复] 正确读取 X, Y, Z (不要直接用 [:3]，因为 env_obs[2] 是 vx)
+        ee_x = float(env_obs[0])
+        ee_y = float(env_obs[1])
+        ee_z = float(env_obs[-26])  # 新版 ee_z 索引
+        self._ee_pos = np.array([ee_x, ee_y, ee_z], dtype=np.float32)
+        # [修复] 正确读取 vx, vy, vz
+        self._ee_vel = np.array([env_obs[2], env_obs[3], env_obs[-25]], dtype=np.float32)
+        # [修复] 正确读取 yaw 相关的索引
+        self._ee_yaw = float(env_obs[-18])
+        self._ee_yaw_vel = float(env_obs[-17])
         self._last_q  = init_q.copy()
 
         self.tracker.mpc.last_sol = None

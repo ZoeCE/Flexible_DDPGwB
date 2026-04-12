@@ -64,7 +64,7 @@ DEFAULT_CONFIG = {
     # 3. 任务与随机化初始状态
     # ==========================================================================
     "task": {
-        "start_pos_mocap":    [0.3, 0.15, 1.0],
+        "start_pos_mocap":    [0.3, 0.15, 0.5],
         "start_quat_mocap":   [1.0, 0.0, 0.0, 0.0],
         "default_start_xy":   [0.3, 0.15],
         "default_target_xy":  [-0.3, 0.2],
@@ -94,9 +94,10 @@ DEFAULT_CONFIG = {
         "planning_grid_res": 0.02,
         "bounds_margin":     0.05,
         "max_expansions":    100000,
-        "payload_z_cruise":  0.2,
+        "payload_z_cruise":  0.25,
         "target_z_descent":  0.09,
         "num_descent_steps": 6,
+        "num_lift_steps":    5,      # [新增] 将起升动作拆分为5个缓步航点
     },
 
     # ==========================================================================
@@ -158,11 +159,11 @@ DEFAULT_CONFIG = {
             -0.71972016,  0.29057466, -1.10685585,
              1.53851657,  2.87907443,  1.73055121, -1.85194252
         ],
-        "init_qpos_prefab": [0.3, 0.2, 0.1, 1.0, 0.0, 0.0, 0.0],
+        "init_qpos_prefab": [0.3, 0.15, 0.0, 1.0, 0.0, 0.0, 0.0],
         "warmup_steps":      30,
-        "mocap_init_z":      1.0,
+        "mocap_init_z":      0.55,
         "ik_enabled":        True,
-        "ik_height_above_prefab": 0.2,
+        "ik_height_above_prefab": 0.55,
         "ik_target_quat":    [0.0, 1.0, 0.0, 0.0],
         "ik_max_iter":       5000,
         "ik_tol_pos":        1e-4,
@@ -213,12 +214,12 @@ DEFAULT_CONFIG = {
     "controller": {
         "N":                    15,
         "dt":                   0.1,
-        "L":                    0.445,
+        "L":                    0.5,
         "u_max_xy":             0.5,
         "u_max_z":              2.0,
         "u_max_yaw":            2.0,
         "arrival_threshold_xy": 0.05,
-        "arrival_threshold_z":  0.20,
+        "arrival_threshold_z":  0.05,
     },
 
     # ==========================================================================
