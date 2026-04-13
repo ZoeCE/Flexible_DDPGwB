@@ -287,24 +287,49 @@ DEFAULT_CONFIG = {
     # 10. Prefab（负载）几何参数
     # ==========================================================================
     "prefab": {
-        "shape":              "box",
+        # shape: "box", "cylinder", or "composite"
+        # 切换此值即可改变被吊装重物的几何形状
+        # "shape":              "box",
+        "shape":              "composite",
+
+        # --- box 模式参数 ---
         "box_half_size":      [0.05, 0.05, 0.1],
+
+        # --- cylinder 模式参数 ---
         "cylinder_radius":    0.04,
         "cylinder_half_height": 0.1,
-        "mass":               1.0,
+
+        # --- composite 模式参数（多 STL 凸分解拼合体）---
+        # mesh 文件位于 assets/assets/ 下，由 meshdir="assets" 自动解析
+        "mesh_prefix":        "hollow_cylinder_convex",  # stl 文件名前缀
+        "mesh_count":         64,                        # 凸块数量
+
+        # --- 通用参数 ---
+        "mass":               1.0,          # 总质量（composite 模式自动平分到每块）
         "lift_site_offset":   0.1,
         "lift_site_spread":   0.05,
     },
 
     # ==========================================================================
-    # 11. Target（视觉目标标记）
+    # 11. Target（目标位置标记）
     # ==========================================================================
     "target": {
+        # mode: "visual" — 纯视觉半透明标记（无碰撞，原版行为）
+        #        "rebar"  — 地面钢筋桩（有碰撞，模拟真实对接场景）
+        # "mode":               "visual",
+        "mode":               "rebar",
+
+        # --- visual 模式参数 ---
         "shape":              "box",
         "box_half_size":      [0.05, 0.05, 0.1],
         "cylinder_radius":    0.05,
         "cylinder_half_height": 0.1,
         "rgba":               [0.8, 0.0, 0.0, 0.4],
+
+        # --- rebar 模式参数（地面钢筋桩）---
+        "rebar_radius":       0.006,      # 钢筋半径 (m)
+        "rebar_half_height":  0.02,       # 钢筋半高 (m)
+        "rebar_rgba":         [0.8, 0.0, 0.0, 1.0],
     },
 
     # ==========================================================================

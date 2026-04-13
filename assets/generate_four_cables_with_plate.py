@@ -192,10 +192,44 @@ def main():
         pmass = cfg_prefab["mass"]
         p_lift_z = cfg_prefab["lift_site_offset"]
         p_lift_s = cfg_prefab["lift_site_spread"]
-        if pshape == "box":
+
+        if pshape == "composite":
+            # 多 STL 凸分解拼合体：注入 mesh asset 声明 + 多 geom body
+            mesh_prefix = cfg_prefab["mesh_prefix"]
+            mesh_count = cfg_prefab["mesh_count"]
+            piece_mass = pmass / mesh_count
+
+            # Keep generator idempotent: clear any previous mesh declarations
+            # from earlier runs before injecting the current set.
+            demo = re.sub(
+                rf"\n\s*<mesh name=\"{re.escape(mesh_prefix)}_\d+\"[^>]*/>",
+                "",
+                demo,
+            )
+
+            # 在 <asset> 块末尾注入 mesh 声明
+            mesh_assets = "\n".join(
+                f'    <mesh name="{mesh_prefix}_{i}" file="{mesh_prefix}_{i}.stl"/>'
+                for i in range(mesh_count)
+            )
+            demo = re.sub(
+                r'(</asset>)',
+                mesh_assets + r'\n  \1',
+                demo,
+                count=1,
+            )
+
+            # 生成多 geom 行
+            geom_lines = "\n      ".join(
+                f'<geom type="mesh" mesh="{mesh_prefix}_{i}" material="concrete" mass="{piece_mass:.6f}"/>'
+                for i in range(mesh_count)
+            )
+            prefab_geom = geom_lines
+
+        elif pshape == "box":
             bhs = cfg_prefab["box_half_size"]
             prefab_geom = f'<geom type="box" size="{bhs[0]} {bhs[1]} {bhs[2]}" material="concrete" mass="{pmass}"/>'
-        else:
+        else:  # cylinder
             cr = cfg_prefab["cylinder_radius"]
             ch = cfg_prefab["cylinder_half_height"]
             prefab_geom = f'<geom type="cylinder" size="{cr} {ch}" material="concrete" mass="{pmass}"/>'
@@ -221,19 +255,32 @@ def main():
         )
 
         # --- Rewrite target body from config ---
-        tshape = cfg_target["shape"]
-        trgba = cfg_target["rgba"]
-        rgba_str = f"{trgba[0]} {trgba[1]} {trgba[2]} {trgba[3]}"
-        if tshape == "box":
-            ths = cfg_target["box_half_size"]
-            target_geom = f'<geom type="box" size="{ths[0]} {ths[1]} {ths[2]}" pos="0 0 {ths[2]}"'
-        else:
-            tr = cfg_target["cylinder_radius"]
-            th = cfg_target["cylinder_half_height"]
-            target_geom = f'<geom type="cylinder" size="{tr} {th}" pos="0 0 {th}"'
-        target_geom += f'\n            rgba="{rgba_str}" contype="0" conaffinity="0"/>'
+        target_mode = cfg_target.get("mode", "visual")
 
-        target_body = f"""<body name="target" pos="-0.3 0.2 0">
+        if target_mode == "rebar":
+            # 钢筋桩模式：有碰撞的小圆柱
+            rr = cfg_target["rebar_radius"]
+            rh = cfg_target["rebar_half_height"]
+            r_rgba = cfg_target["rebar_rgba"]
+            r_rgba_str = f"{r_rgba[0]} {r_rgba[1]} {r_rgba[2]} {r_rgba[3]}"
+            target_body = f"""<body name="target" pos="0.3 0.25 0">
+      <geom type="cylinder" size="{rr} {rh}" pos="0 0 {rh}"
+            rgba="{r_rgba_str}" contype="1" conaffinity="1"/>
+    </body>"""
+        else:
+            # visual 模式：纯视觉标记，无碰撞
+            tshape = cfg_target["shape"]
+            trgba = cfg_target["rgba"]
+            rgba_str = f"{trgba[0]} {trgba[1]} {trgba[2]} {trgba[3]}"
+            if tshape == "box":
+                ths = cfg_target["box_half_size"]
+                target_geom = f'<geom type="box" size="{ths[0]} {ths[1]} {ths[2]}" pos="0 0 {ths[2]}"'
+            else:
+                tr = cfg_target["cylinder_radius"]
+                th = cfg_target["cylinder_half_height"]
+                target_geom = f'<geom type="cylinder" size="{tr} {th}" pos="0 0 {th}"'
+            target_geom += f'\n            rgba="{rgba_str}" contype="0" conaffinity="0"/>'
+            target_body = f"""<body name="target" pos="0.3 0.25 0">
       {target_geom}
     </body>"""
         demo = re.sub(
@@ -243,8 +290,9 @@ def main():
             count=1,
         )
 
-        # Remove old mesh references if any remain
-        demo = re.sub(r'\s*<mesh name="hollow_cylinder_convex_\d+"[^/]*/>', '', demo)
+        # Remove old mesh references if not in composite mode
+        if pshape != "composite":
+            demo = re.sub(r'\s*<mesh name="hollow_cylinder_convex_\d+"[^/]*/>', '', demo)
         demo = re.sub(r'\s*<material name="steel"[^/]*/>', '', demo)
         demo = re.sub(r'\s*<material name="red"[^/]*/>', '', demo)
 
