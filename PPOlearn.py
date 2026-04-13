@@ -186,33 +186,33 @@ def evaluate(agent, env, expert, n_episodes: int = 10,
 # ==============================================================================
 
 def train_ppo(log_dir: str, config: dict):
-    """PPO + BC 训练循环。"""
+    """PPO + BC 训练循环（修复版）。"""
     cfg_train  = config["train"]
     cfg_ppo    = config["ppo_agent"]
     cfg_sim    = config["sim"]
-
+ 
     TOTAL_STEPS   = int(cfg_train.get("total_timesteps", 5_000_000))
     N_STEPS       = int(cfg_ppo["n_steps"])
     SAVE_INTERVAL = int(cfg_train["save_interval"])
     EVAL_INTERVAL = int(cfg_train.get("eval_interval", 100))
     EVAL_EPS      = int(cfg_train.get("eval_episodes", 10))
     SMOOTH_WIN    = int(cfg_train["log_smooth_win"])
-
+ 
     print("[Train-PPO] 初始化环境...")
     env = CableRobotEnvWithObstacles(config=config)
     STATE_DIM  = env.state_dim
     ACTION_DIM = config["space"]["action_dim"]
     print(f"  state_dim={STATE_DIM}, action_dim={ACTION_DIM}")
-
+ 
     print("[Train-PPO] 初始化 Agent...")
     agent = PPOAgent(log_dir, STATE_DIM, ACTION_DIM, config=config)
-
-    print("[Train-PPO] 初始化专家控制器（BC 标签生成器）...")
+ 
+    print("[Train-PPO] 初始化专家控制器...")
     expert = JointSpaceExpert(config, env.ik_solver)
-
+ 
     logger = Logger(log_dir, "cable_robot_ppo", os.path.basename(log_dir))
     logger.update_config(config)
-
+ 
     log_file = os.path.join(log_dir, "ppo_log.csv")
     with open(log_file, "w", newline="") as f:
         csv.writer(f).writerow([
@@ -221,63 +221,67 @@ def train_ppo(log_dir: str, config: dict):
             "policy_loss", "value_loss", "entropy_loss", "bc_loss",
             "approx_kl", "clip_fraction", "bc_coef",
         ])
-
+ 
     stats    = EpisodeStats(window=SMOOTH_WIN)
     episode  = 0
     total_steps = 0
     best_sr  = 0.0
     t_start  = time.time()
     last_result = agent._last_result
-
+ 
     print(f"[Train-PPO] 开始训练，目标总步数 {TOTAL_STEPS}...")
-
+ 
     while total_steps < TOTAL_STEPS:
-
+ 
         # ── 每回合开始 ──────────────────────────────────────────────────────
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
-        expert.reset(obs, current_q)
-
+ 
+        # [LOOP-1] 传入 env，让 expert 直接读取精确 EE 位置
+        expert.reset(obs, current_q, env=env)
+ 
         planned_path = env.get_planned_path()
         if planned_path is None:
             print(f"[Warn] Ep {episode}: 路径规划失败，跳过。")
             episode += 1; continue
         expert.set_path(planned_path)
-
+ 
         ep_reward = 0.0; ep_steps = 0; ep_success = False
-
-        # ── Rollout 收集 ─────────────────────────────────────────────────────
         rollout_done = False
-
+ 
+        # ── Rollout 收集 ──────────────────────────────────────────────────
         while not rollout_done:
-
-            # 使用 PPO Agent 选择动作
-            norm_obs       = agent.normalize_obs(obs, update=True)
+ 
+            # Step 1: 选择动作
+            norm_obs = agent.normalize_obs(obs, update=True)
             action, log_prob, value = agent.act(norm_obs, deterministic=False)
-
-            # 专家生成 BC 目标
-            current_q  = env.data.qpos[:7].copy().astype(np.float32)
-            bc_target  = expert.compute_joint_target(obs, current_q)
-
-            # 执行动作
+ 
+            # Step 2: BC 目标
+            current_q = env.data.qpos[:7].copy().astype(np.float32)
+            bc_target = expert.compute_joint_target(obs, current_q)
+ 
+            # BC 标签有效性检查
+            if np.any(np.isnan(bc_target)) or np.allclose(bc_target, 0, atol=0.01):
+                bc_target = current_q.copy()
+ 
+            # Step 3: 执行
             next_obs, reward, terminated, truncated, info = env.step(action)
             done = terminated or truncated
-
+ 
             if info.get("is_success"): ep_success = True
             ep_reward += reward; ep_steps += 1; total_steps += 1
             agent.total_steps = total_steps
-
-            # 存入 buffer
+ 
+            # Step 4: 存入 buffer
             agent.buffer.add(
                 norm_obs, action, bc_target,
                 reward, float(done), value, log_prob
             )
-
+ 
             obs = next_obs
-
-            # buffer 满 → 触发更新
+ 
+            # buffer 满时触发更新
             if agent.buffer.full:
-                # 估计最后一步的价值
                 if done:
                     last_val = 0.0
                 else:
@@ -286,46 +290,46 @@ def train_ppo(log_dir: str, config: dict):
                         s_t = torch.tensor(ns_norm, dtype=torch.float32,
                                            device=agent.device).unsqueeze(0)
                         last_val = agent.critic(s_t).item()
-
+ 
                 agent.buffer.compute_returns_and_advantages(
                     last_val, agent.gamma, agent.gae_lambda
                 )
                 last_result = agent.update()
-                rollout_done = True   # rollout 结束，进入下一回合
-
+                rollout_done = True
+ 
             if done:
-                rollout_done = True   # 回合自然结束
-
-        # ── 回合统计 ─────────────────────────────────────────────────────────
+                rollout_done = True
+ 
+        # ── 回合统计 ──────────────────────────────────────────────────────
         stats.update(reward=ep_reward, steps=ep_steps, success=float(ep_success))
         avg_r = stats.mean("reward"); sr = stats.success_rate()
-
+ 
         logger.log(episode, {
-            "reward/episode":         ep_reward,
+            "reward/episode":          ep_reward,
             f"reward/avg{SMOOTH_WIN}": avg_r,
-            "steps/episode":          ep_steps,
-            "env/success":            float(ep_success),
-            "env/success_rate":       sr,
-            "loss/policy":            last_result.policy_loss,
-            "loss/value":             last_result.value_loss,
-            "loss/entropy":           last_result.entropy_loss,
-            "loss/bc":                last_result.bc_loss,
-            "ppo/approx_kl":          last_result.approx_kl,
-            "ppo/clip_fraction":      last_result.clip_fraction,
-            "ppo/bc_coef":            agent.bc_coef,
-            "train/total_steps":      total_steps,
+            "steps/episode":           ep_steps,
+            "env/success":             float(ep_success),
+            "env/success_rate":        sr,
+            "loss/policy":             last_result.policy_loss,
+            "loss/value":              last_result.value_loss,
+            "loss/entropy":            last_result.entropy_loss,
+            "loss/bc":                 last_result.bc_loss,
+            "ppo/approx_kl":           last_result.approx_kl,
+            "ppo/clip_fraction":       last_result.clip_fraction,
+            "ppo/bc_coef":             agent.bc_coef,
+            "train/total_steps":       total_steps,
         })
-
+ 
         mark = "✅" if ep_success else "❌"
         print(
             f"Ep {episode:4d} {mark} | "
             f"R:{ep_reward:7.2f}(avg:{avg_r:6.2f}) | "
             f"SR:{sr*100:5.1f}% | Steps:{ep_steps:3d} | "
-            f"bc_coef:{agent.bc_coef:.3f} | "
+            f"bc:{agent.bc_coef:.3f} | "
             f"Lp:{last_result.policy_loss:.4f} Lv:{last_result.value_loss:.4f} | "
             f"total:{total_steps}"
         )
-
+ 
         with open(log_file, "a", newline="") as f:
             csv.writer(f).writerow([
                 episode, total_steps, ep_reward, avg_r,
@@ -335,42 +339,40 @@ def train_ppo(log_dir: str, config: dict):
                 last_result.approx_kl, last_result.clip_fraction,
                 agent.bc_coef,
             ])
-
-        # ── checkpoint 保存 ──────────────────────────────────────────────────
+ 
         if episode > 0 and episode % SAVE_INTERVAL == 0:
             p = save_checkpoint(agent, log_dir, episode)
             print(f"[Train] Checkpoint → {p}")
-
-        # ── 周期性评估 ───────────────────────────────────────────────────────
+ 
         if episode > 0 and episode % EVAL_INTERVAL == 0:
             eval_cfg = copy.deepcopy(config)
-            eval_cfg["scene"]["seed"] = 42  # 固定 seed 评估
-            eval_env = CableRobotEnvWithObstacles(config=eval_cfg)
+            eval_cfg["scene"]["seed"] = 42
+            eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
             eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
             result = evaluate(agent, eval_env, eval_expert,
                               n_episodes=EVAL_EPS, deterministic=True, algo="ppo")
             eval_env.close()
-
+ 
             print(f"  [Eval] SR={result['success_rate']*100:.1f}% | "
                   f"AvgR={result['avg_reward']:.2f} | "
                   f"AvgSteps={result['avg_steps']:.1f}")
-
+ 
             logger.log(episode, {
                 "eval/success_rate": result["success_rate"],
                 "eval/avg_reward":   result["avg_reward"],
                 "eval/avg_steps":    result["avg_steps"],
             })
-
+ 
             if result["success_rate"] > best_sr:
                 best_sr = result["success_rate"]
                 save_checkpoint(agent, log_dir, episode, tag="best")
-                print(f"  [Eval] 🏆 新最佳 SR: {best_sr*100:.1f}%")
-
+                print(f"  [Eval] 新最佳 SR: {best_sr*100:.1f}%")
+ 
         episode += 1
-
+ 
     save_checkpoint(agent, log_dir, episode, tag="final")
     elapsed = (time.time() - t_start) / 60
-    print(f"\n[Train-PPO] 完成！总步数 {total_steps}，耗时 {elapsed:.1f} 分钟")
+    print(f"\\n[Train-PPO] 完成！总步数 {total_steps}，耗时 {elapsed:.1f} 分钟")
     logger.close()
     return agent
 

@@ -208,7 +208,7 @@ class NMPCController4D:
         cost = 0; constraints = []
 
         Q_pos   = np.array([10.0, 10.0, 20.0, 5.0])
-        Q_swing = np.array([50.0, 50.0])
+        Q_swing = np.array([100.0, 100.0])
         Q_vel   = 2.0
         R_acc   = np.array([0.2, 0.2, 0.2, 0.3])
 

@@ -681,35 +681,50 @@ class CableRobotEnvWithObstacles:
     # _compute_reward()
     # ==========================================================================
 
-    def _compute_reward(self, action: np.ndarray,
-                        current_q: np.ndarray, prev_q: np.ndarray,
-                        obs: np.ndarray):  # [FIX-E4] 接收 obs 参数
-        """奖励计算。[FIX-E4] 不再内部调用 _get_obs()，直接使用传入的 obs。"""
+    # ──────────────────────────────────────────────────────────────────────────────
+    # PATCH 1：mujoco_env_new.py 的 _compute_reward 方法
+    # 替换 CableRobotEnvWithObstacles._compute_reward
+    #
+    # 主要改动：
+    #   [RWD-3] 新增稠密距离进展奖励（势能函数）
+    #   [RWD-4] step_penalty 已在 config 中设为 0，此处逻辑不变
+    #   [RWD-1/2] success_bonus/惩罚量级由 config 控制，此处不变
+    # ──────────────────────────────────────────────────────────────────────────────
+    
+    def _compute_reward(self, action, current_q, prev_q, obs):
+        """
+        奖励计算（修复版）。
+        新增稠密距离进展奖励，填补航点间的信号空洞。
+        """
         reward = 0.0; done = False; success = False; is_collision = False
         cfg_rwd = self.config["reward"]
-
+    
         payload_xy  = obs[4:6]
         payload_vxy = obs[6:8]
         payload_z   = self.data.body('prefab').xpos[2]
         dof_idx     = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz  = self.data.qvel[dof_idx + 2]
-        pl_vel_norm = np.linalg.norm(np.append(payload_vxy, payload_vz))
+        pl_vel_norm = float(np.linalg.norm(np.append(payload_vxy, payload_vz)))
         ee_xy       = self._get_ee_pos()[:2]
-
-        # ── 每步惩罚 ───────────────────────────────────────────────────────
-        reward += float(cfg_rwd.get("step_penalty", -0.005))
-
-        vel_pen = cfg_rwd.get("velocity_penalty_coef", 0.005) * pl_vel_norm
-        reward -= float(np.clip(vel_pen, 0, 0.3))
-
+    
+        # ── 每步惩罚 ──────────────────────────────────────────────────────────
+        # [RWD-4] step_penalty 在新 config 中为 0，保留接口
+        reward += float(cfg_rwd.get("step_penalty", 0.0))
+    
+        # 速度惩罚
+        vel_pen = cfg_rwd.get("velocity_penalty_coef", 0.003) * pl_vel_norm
+        reward -= float(np.clip(vel_pen, 0, 0.2))
+    
+        # 摆角惩罚
         swing = float(np.linalg.norm(ee_xy - payload_xy))
-        reward -= cfg_rwd.get("swing_penalty_coef", 0.02) * float(np.clip(swing, 0, 0.1))
-
-        # [FIX-E8] 强制取负方向惩罚
-        smooth_coef = -abs(float(cfg_rwd.get("joint_smooth_penalty", -0.002)))
-        joint_delta = float(np.linalg.norm(current_q - prev_q))
-        reward += smooth_coef * joint_delta
-
+        reward -= cfg_rwd.get("swing_penalty_coef", 0.01) * float(np.clip(swing, 0, 0.1))
+    
+        # 关节平滑惩罚
+        smooth_coef  = -abs(float(cfg_rwd.get("joint_smooth_penalty", -0.001)))
+        joint_delta  = float(np.linalg.norm(current_q - prev_q))
+        reward      += smooth_coef * joint_delta
+    
+        '''# 关节极限惩罚
         q_range  = self._q_high - self._q_low
         q_margin = self._q_margin_ratio * q_range
         n_near   = sum(
@@ -718,42 +733,69 @@ class CableRobotEnvWithObstacles:
                 current_q[j] < self._q_low[j]  + q_margin[j])
         )
         if n_near > 0:
-            reward -= abs(float(cfg_rwd.get("joint_limit_penalty", -0.05))) * n_near
-
-        # ── 终止条件 ──────────────────────────────────────────────────────
+            reward -= abs(float(cfg_rwd.get("joint_limit_penalty", -0.05))) * n_near'''
+    
+        # ── [RWD-3] 稠密距离进展奖励（势能函数）─────────────────────────────
+        # 计算负载到当前目标航点（或最终目标）的距离进展
+        # 只在非终止状态时计算（终止状态由下方逻辑单独处理）
+        if self._planned_path is not None and not self.reached_final:
+            # 当前目标：当前航点（或最终目标）
+            target_wp = self._planned_path[min(self.current_wp_idx,
+                                                len(self._planned_path) - 1)]
+            curr_dist = float(np.linalg.norm(
+                np.array([payload_xy[0], payload_xy[1], payload_z]) - target_wp
+            ))
+    
+            # 上一步距离（初始化为当前距离，避免第一步虚假奖励）
+            if self.last_dist is None:
+                self.last_dist = curr_dist
+    
+            # 进展 = 上一步距离 - 当前距离（正值=靠近，负值=远离）
+            # 只奖励靠近（clip 下界为 0），不惩罚停滞/远离（那是 policy 学习的代价）
+            progress = float(np.clip(
+                self.last_dist - curr_dist,
+                0.0,
+                cfg_rwd.get("progress_clip", 0.1)
+            ))
+            reward  += cfg_rwd.get("progress_coef", 2.0) * progress
+            # 注意：last_dist 在 step() 的航点状态机中已经更新，
+            # 这里不再重复赋值（step() 末尾会更新 self.last_dist = dist_to_wp）
+    
+        # ── 终止条件 ──────────────────────────────────────────────────────────
         if self.reached_final:
             vel_xy        = float(np.linalg.norm(payload_vxy))
             dist_to_final = float(np.linalg.norm(payload_xy - self.target_pos))
             if dist_to_final < 0.03 and vel_xy < 0.1 and abs(payload_vz) < 0.2:
-                reward += cfg_rwd.get("success_bonus", 3.0)
+                reward += cfg_rwd.get("success_bonus", 10.0)
                 success = True
             else:
-                reward += cfg_rwd.get("crash_penalty", -3.0)
+                reward += cfg_rwd.get("crash_penalty", -5.0)
             done = True
             return reward, done, success, is_collision
-
+    
         for (ox, oy, orad) in self._obstacles:
-            if np.linalg.norm(payload_xy - np.array([ox,oy])) < (orad + self.payload_radius):
-                reward += cfg_rwd.get("collision_penalty", -3.0)
+            if float(np.linalg.norm(payload_xy - np.array([ox,oy]))) < (orad + self.payload_radius):
+                reward += cfg_rwd.get("collision_penalty", -5.0)
                 done = True; is_collision = True
                 return reward, done, success, is_collision
-
-        if np.linalg.norm(payload_xy) < 0.03:
-            reward += cfg_rwd.get("collision_penalty", -3.0)
+    
+        if float(np.linalg.norm(payload_xy)) < 0.03:
+            reward += cfg_rwd.get("collision_penalty", -5.0)
             done = True; is_collision = True
             return reward, done, success, is_collision
-
+    
         cfg_logic = self.config["step_logic"]
         if (payload_z < cfg_logic["crash_z_threshold"] and
                 payload_vz < cfg_logic["crash_vz_threshold"]):
-            reward += cfg_rwd.get("crash_penalty", -3.0)
+            reward += cfg_rwd.get("crash_penalty", -5.0)
             done = True
             return reward, done, success, is_collision
-
+    
+        # 航点里程碑奖励
         if getattr(self, '_wp_just_advanced', False):
-            reward += cfg_rwd.get("waypoint_bonus", 0.1)
+            reward += cfg_rwd.get("waypoint_bonus", 0.15)
             self._wp_just_advanced = False
-
+    
         return reward, done, success, is_collision
 
     # ==========================================================================
