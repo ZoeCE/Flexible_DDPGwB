@@ -38,7 +38,7 @@ DEFAULT_CONFIG = {
     # 1. 仿真与控制
     # ==========================================================================
     "sim": {
-        "physics_dt":       0.005,   # 物理引擎时间步长（500 Hz）
+        "physics_dt":       0.002,   # 物理引擎时间步长（500 Hz）
         "control_freq_hz":  10,      # 控制频率（10 Hz），每控制步 50 次物理步
         "max_steps":        200,     # 回合最大步数
         "render":           False,
@@ -79,8 +79,8 @@ DEFAULT_CONFIG = {
         "n_obstacles":        3,
         "radius_range":       (0.02, 0.04),
         "path_width":         0.2,
-        "obstacle_z_center":  0.25,
-        "obstacle_halfheight": 0.2,
+        "obstacle_z_center":  0.15,
+        "obstacle_halfheight": 0.15,
         "endpoint_z_offset":  0.025,
         "seed":               None,
     },
@@ -94,10 +94,10 @@ DEFAULT_CONFIG = {
         "planning_grid_res": 0.02,
         "bounds_margin":     0.05,
         "max_expansions":    100000,
-        "payload_z_cruise":  0.25,
+        "payload_z_cruise":  0.2,
         "target_z_descent":  0.09,
         "num_descent_steps": 6,
-        "num_lift_steps":    5,      # [新增] 将起升动作拆分为5个缓步航点
+        "num_lift_steps":    3,      # [新增] 将起升动作拆分为5个缓步航点
     },
 
     # ==========================================================================
@@ -160,10 +160,10 @@ DEFAULT_CONFIG = {
              1.53851657,  2.87907443,  1.73055121, -1.85194252
         ],
         "init_qpos_prefab": [0.3, 0.15, 0.0, 1.0, 0.0, 0.0, 0.0],
-        "warmup_steps":      30,
-        "mocap_init_z":      0.55,
+        "warmup_steps":      50,
+        "mocap_init_z":      0.65,
         "ik_enabled":        True,
-        "ik_height_above_prefab": 0.55,
+        "ik_height_above_prefab": 0.65,
         "ik_target_quat":    [0.0, 1.0, 0.0, 0.0],
         "ik_max_iter":       5000,
         "ik_tol_pos":        1e-4,
@@ -200,7 +200,7 @@ DEFAULT_CONFIG = {
     "rope": {
         "num_segments":    10,
         "segment_length":  0.04,
-        "damping":         0.02,
+        "damping":         0.05,
         "capsule_radius":  0.004,
         "segment_mass":    0.01,
         "plate_half_size": [0.05, 0.05, 0.01],
