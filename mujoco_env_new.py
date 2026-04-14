@@ -581,9 +581,9 @@ class CableRobotEnvWithObstacles:
         reward -= cfg_rwd.get("swing_penalty_coef",0.01)*float(np.clip(swing,0,0.1))
         reward += -abs(float(cfg_rwd.get("joint_smooth_penalty",-0.001)))*float(np.linalg.norm(current_q-prev_q))
  
-        q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
+        '''q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
         n_near=sum(1 for j in range(7) if (current_q[j]>self.q_high[j]-q_margin[j] or current_q[j]<self.q_low[j]+q_margin[j]))
-        if n_near>0: reward -= abs(float(cfg_rwd.get("joint_limit_penalty",-0.05)))*n_near
+        if n_near>0: reward -= abs(float(cfg_rwd.get("joint_limit_penalty",-0.05)))*n_near'''
  
         # 稠密距离进展奖励
         if self._planned_path is not None and not self.reached_final:
