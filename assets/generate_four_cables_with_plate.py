@@ -226,13 +226,91 @@ def main():
             )
             prefab_geom = geom_lines
 
+        elif pshape == "socket":
+            # 底部带方孔的方块：用原生 box 基元解析拼合，孔为真正的空洞
+            import numpy as np
+            shs = cfg_prefab["socket_half_size"]         # [hx, hy, hz]
+            hole_sz = cfg_prefab["socket_hole_size"]     # [hole_hx, hole_hy]
+            hole_d = cfg_prefab["socket_hole_depth"]
+            hole_pos = cfg_prefab["socket_hole_positions"]
+
+            hx, hy, hz = shs
+            full_h = hz * 2       # 总高
+            top_h = full_h - hole_d  # 顶部实心层高度
+            bot_h = hole_d           # 底部开孔层高度
+
+            # body 局部坐标：z=0 在几何中心，底面 z=-hz，顶面 z=+hz
+            # 顶部实心板：z 从 (-hz + bot_h) 到 (+hz)
+            top_cz = -hz + bot_h + top_h / 2
+            top_half_z = top_h / 2
+
+            # 底部开孔层：z 从 -hz 到 (-hz + bot_h)
+            bot_cz = -hz + bot_h / 2
+            bot_half_z = bot_h / 2
+
+            # 收集所有孔的 x/y 边界，生成网格切分断点
+            x_cuts = sorted({-hx, hx})
+            y_cuts = sorted({-hy, hy})
+            for (px, py) in hole_pos:
+                x_cuts.extend([px - hole_sz[0]/2, px + hole_sz[0]/2])
+                y_cuts.extend([py - hole_sz[1]/2, py + hole_sz[1]/2])
+            x_cuts = sorted(set(x_cuts))
+            y_cuts = sorted(set(y_cuts))
+
+            # 判断一个网格单元是否落在某个孔内
+            def in_hole(cx, cy):
+                for (px, py) in hole_pos:
+                    if (px - hole_sz[0]/2 - 1e-9 <= cx <= px + hole_sz[0]/2 + 1e-9 and
+                        py - hole_sz[1]/2 - 1e-9 <= cy <= py + hole_sz[1]/2 + 1e-9):
+                        return True
+                return False
+
+            geoms = []
+            n_geom = 0
+            # 顶部实心板（1 个 geom）
+            geoms.append(
+                f'<geom name="socket_top" type="box" '
+                f'size="{hx} {hy} {top_half_z:.6f}" pos="0 0 {top_cz:.6f}" '
+                f'material="concrete"/>'
+            )
+            n_geom += 1
+            # 底部网格：跳过孔所在的单元
+            for ix in range(len(x_cuts) - 1):
+                for iy in range(len(y_cuts) - 1):
+                    x_lo, x_hi = x_cuts[ix], x_cuts[ix + 1]
+                    y_lo, y_hi = y_cuts[iy], y_cuts[iy + 1]
+                    cx = (x_lo + x_hi) / 2
+                    cy = (y_lo + y_hi) / 2
+                    if in_hole(cx, cy):
+                        continue
+                    cell_hx = (x_hi - x_lo) / 2
+                    cell_hy = (y_hi - y_lo) / 2
+                    if cell_hx < 1e-9 or cell_hy < 1e-9:
+                        continue
+                    geoms.append(
+                        f'<geom name="socket_b{n_geom}" type="box" '
+                        f'size="{cell_hx:.6f} {cell_hy:.6f} {bot_half_z:.6f}" '
+                        f'pos="{cx:.6f} {cy:.6f} {bot_cz:.6f}" '
+                        f'material="concrete"/>'
+                    )
+                    n_geom += 1
+
+            piece_mass = pmass / n_geom
+            # 给每个 geom 补上质量
+            geoms = [g.replace('material="concrete"',
+                               f'material="concrete" mass="{piece_mass:.6f}"')
+                     for g in geoms]
+            prefab_geom = "\n      ".join(geoms)
+
         elif pshape == "box":
             bhs = cfg_prefab["box_half_size"]
             prefab_geom = f'<geom type="box" size="{bhs[0]} {bhs[1]} {bhs[2]}" material="concrete" mass="{pmass}"/>'
-        else:  # cylinder
+        elif pshape == "cylinder":
             cr = cfg_prefab["cylinder_radius"]
             ch = cfg_prefab["cylinder_half_height"]
             prefab_geom = f'<geom type="cylinder" size="{cr} {ch}" material="concrete" mass="{pmass}"/>'
+        else:  # composite (mesh STL)
+            pass  # already handled above
 
         prefab_body = f"""<body name="prefab" pos="0.3 0.15 0.5">
       <joint type="free"/>
@@ -258,14 +336,20 @@ def main():
         target_mode = cfg_target.get("mode", "visual")
 
         if target_mode == "rebar":
-            # 钢筋桩模式：有碰撞的小圆柱
+            # 钢筋桩模式：按 rebar_positions 生成多根有碰撞的钢筋
             rr = cfg_target["rebar_radius"]
             rh = cfg_target["rebar_half_height"]
             r_rgba = cfg_target["rebar_rgba"]
             r_rgba_str = f"{r_rgba[0]} {r_rgba[1]} {r_rgba[2]} {r_rgba[3]}"
+            positions = cfg_target["rebar_positions"]
+
+            rebar_geoms = "\n      ".join(
+                f'<geom name="rebar_{i}" type="cylinder" size="{rr} {rh}" '
+                f'pos="{px} {py} {rh}" rgba="{r_rgba_str}" contype="1" conaffinity="1"/>'
+                for i, (px, py) in enumerate(positions)
+            )
             target_body = f"""<body name="target" pos="0.3 0.25 0">
-      <geom type="cylinder" size="{rr} {rh}" pos="0 0 {rh}"
-            rgba="{r_rgba_str}" contype="1" conaffinity="1"/>
+      {rebar_geoms}
     </body>"""
         else:
             # visual 模式：纯视觉标记，无碰撞
@@ -292,7 +376,7 @@ def main():
 
         # Remove old mesh references if not in composite mode
         if pshape != "composite":
-            demo = re.sub(r'\s*<mesh name="hollow_cylinder_convex_\d+"[^/]*/>', '', demo)
+            demo = re.sub(r'\s*<mesh name="\w+_convex_\d+"[^/]*/>', '', demo)
         demo = re.sub(r'\s*<material name="steel"[^/]*/>', '', demo)
         demo = re.sub(r'\s*<material name="red"[^/]*/>', '', demo)
 

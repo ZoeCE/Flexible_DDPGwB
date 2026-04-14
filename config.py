@@ -287,25 +287,39 @@ DEFAULT_CONFIG = {
     # 10. Prefab（负载）几何参数
     # ==========================================================================
     "prefab": {
-        # shape: "box", "cylinder", or "composite"
+        # shape: "box", "cylinder", "composite", or "socket"
         # 切换此值即可改变被吊装重物的几何形状
         # "shape":              "box",
-        "shape":              "composite",
+        "shape":              "socket",
 
-        # --- box 模式参数 ---
+        # --- box 模式参数（实心方块）---
         "box_half_size":      [0.05, 0.05, 0.1],
 
-        # --- cylinder 模式参数 ---
+        # --- cylinder 模式参数（实心圆柱）---
         "cylinder_radius":    0.04,
         "cylinder_half_height": 0.1,
 
         # --- composite 模式参数（多 STL 凸分解拼合体）---
         # mesh 文件位于 assets/assets/ 下，由 meshdir="assets" 自动解析
-        "mesh_prefix":        "hollow_cylinder_convex",  # stl 文件名前缀
-        "mesh_count":         64,                        # 凸块数量
+        # 适用于圆孔等无法用 box 基元精确表达的形状
+        #   "hollow_cylinder_convex" / 64  — 空心圆柱（底部单圆孔）
+        "mesh_prefix":        "hollow_cylinder_convex",
+        "mesh_count":         64,
+
+        # --- socket 模式参数（底部带方孔的方块，用原生 box 基元精确拼合）---
+        # 无需 STL 文件，孔是真正的空洞，钢筋可精确插入
+        "socket_half_size":   [0.05, 0.05, 0.1],    # 外壳半尺寸 [x, y, z]
+        "socket_hole_size":   [0.014, 0.014],        # 方孔截面 [x, y] (m)
+        "socket_hole_depth":  0.06,                  # 方孔深度 (m)，从底面向上
+        "socket_hole_positions": [                   # 孔中心 XY 坐标
+            [ 0.035,  0.035],
+            [ 0.035, -0.035],
+            [-0.035,  0.035],
+            [-0.035, -0.035],
+        ],
 
         # --- 通用参数 ---
-        "mass":               1.0,          # 总质量（composite 模式自动平分到每块）
+        "mass":               1.0,
         "lift_site_offset":   0.1,
         "lift_site_spread":   0.05,
     },
@@ -322,13 +336,28 @@ DEFAULT_CONFIG = {
         # --- visual 模式参数 ---
         "shape":              "box",
         "box_half_size":      [0.05, 0.05, 0.1],
-        "cylinder_radius":    0.05,
+        "cylinder_radius":    0.02,
         "cylinder_half_height": 0.1,
         "rgba":               [0.8, 0.0, 0.0, 0.4],
 
         # --- rebar 模式参数（地面钢筋桩）---
-        "rebar_radius":       0.006,      # 钢筋半径 (m)
-        "rebar_half_height":  0.02,       # 钢筋半高 (m)
+        # 钢筋数量、位置应与 prefab 底部开孔一一对应
+        #
+        # 尺寸关系（以 socket 四方孔为例）：
+        #   孔截面 14×14 mm, 孔深 60 mm  (generate_mesh.py)
+        #   钢筋直径 10 mm (radius=0.005), 高 40 mm (half_height=0.02)
+        #   → 单边间隙 2 mm，插入深度留 20 mm 余量
+        #
+        # 对应 hollow_cylinder（底部单圆孔 r=0.02, 深 60mm）时：
+        #   改为 "rebar_positions": [[0.0, 0.0]]，单根居中
+        "rebar_positions": [             # 每根钢筋相对 target 中心的 XY 偏移
+            [ 0.035,  0.035],
+            [ 0.035, -0.035],
+            [-0.035,  0.035],
+            [-0.035, -0.035],
+        ],
+        "rebar_radius":       0.005,     # 钢筋半径 (m)，需小于孔截面半宽
+        "rebar_half_height":  0.02,      # 钢筋半高 (m)，需小于孔深的一半
         "rebar_rgba":         [0.8, 0.0, 0.0, 1.0],
     },
 

@@ -9,70 +9,6 @@
     <material name="groundplane" rgba="0.3 0.3 0.3 1"/>
     <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
     <material name="target_mat" rgba="0.8 0.0 0.0 0.4"/>
-      <mesh name="hollow_cylinder_convex_0" file="hollow_cylinder_convex_0.stl"/>
-    <mesh name="hollow_cylinder_convex_1" file="hollow_cylinder_convex_1.stl"/>
-    <mesh name="hollow_cylinder_convex_2" file="hollow_cylinder_convex_2.stl"/>
-    <mesh name="hollow_cylinder_convex_3" file="hollow_cylinder_convex_3.stl"/>
-    <mesh name="hollow_cylinder_convex_4" file="hollow_cylinder_convex_4.stl"/>
-    <mesh name="hollow_cylinder_convex_5" file="hollow_cylinder_convex_5.stl"/>
-    <mesh name="hollow_cylinder_convex_6" file="hollow_cylinder_convex_6.stl"/>
-    <mesh name="hollow_cylinder_convex_7" file="hollow_cylinder_convex_7.stl"/>
-    <mesh name="hollow_cylinder_convex_8" file="hollow_cylinder_convex_8.stl"/>
-    <mesh name="hollow_cylinder_convex_9" file="hollow_cylinder_convex_9.stl"/>
-    <mesh name="hollow_cylinder_convex_10" file="hollow_cylinder_convex_10.stl"/>
-    <mesh name="hollow_cylinder_convex_11" file="hollow_cylinder_convex_11.stl"/>
-    <mesh name="hollow_cylinder_convex_12" file="hollow_cylinder_convex_12.stl"/>
-    <mesh name="hollow_cylinder_convex_13" file="hollow_cylinder_convex_13.stl"/>
-    <mesh name="hollow_cylinder_convex_14" file="hollow_cylinder_convex_14.stl"/>
-    <mesh name="hollow_cylinder_convex_15" file="hollow_cylinder_convex_15.stl"/>
-    <mesh name="hollow_cylinder_convex_16" file="hollow_cylinder_convex_16.stl"/>
-    <mesh name="hollow_cylinder_convex_17" file="hollow_cylinder_convex_17.stl"/>
-    <mesh name="hollow_cylinder_convex_18" file="hollow_cylinder_convex_18.stl"/>
-    <mesh name="hollow_cylinder_convex_19" file="hollow_cylinder_convex_19.stl"/>
-    <mesh name="hollow_cylinder_convex_20" file="hollow_cylinder_convex_20.stl"/>
-    <mesh name="hollow_cylinder_convex_21" file="hollow_cylinder_convex_21.stl"/>
-    <mesh name="hollow_cylinder_convex_22" file="hollow_cylinder_convex_22.stl"/>
-    <mesh name="hollow_cylinder_convex_23" file="hollow_cylinder_convex_23.stl"/>
-    <mesh name="hollow_cylinder_convex_24" file="hollow_cylinder_convex_24.stl"/>
-    <mesh name="hollow_cylinder_convex_25" file="hollow_cylinder_convex_25.stl"/>
-    <mesh name="hollow_cylinder_convex_26" file="hollow_cylinder_convex_26.stl"/>
-    <mesh name="hollow_cylinder_convex_27" file="hollow_cylinder_convex_27.stl"/>
-    <mesh name="hollow_cylinder_convex_28" file="hollow_cylinder_convex_28.stl"/>
-    <mesh name="hollow_cylinder_convex_29" file="hollow_cylinder_convex_29.stl"/>
-    <mesh name="hollow_cylinder_convex_30" file="hollow_cylinder_convex_30.stl"/>
-    <mesh name="hollow_cylinder_convex_31" file="hollow_cylinder_convex_31.stl"/>
-    <mesh name="hollow_cylinder_convex_32" file="hollow_cylinder_convex_32.stl"/>
-    <mesh name="hollow_cylinder_convex_33" file="hollow_cylinder_convex_33.stl"/>
-    <mesh name="hollow_cylinder_convex_34" file="hollow_cylinder_convex_34.stl"/>
-    <mesh name="hollow_cylinder_convex_35" file="hollow_cylinder_convex_35.stl"/>
-    <mesh name="hollow_cylinder_convex_36" file="hollow_cylinder_convex_36.stl"/>
-    <mesh name="hollow_cylinder_convex_37" file="hollow_cylinder_convex_37.stl"/>
-    <mesh name="hollow_cylinder_convex_38" file="hollow_cylinder_convex_38.stl"/>
-    <mesh name="hollow_cylinder_convex_39" file="hollow_cylinder_convex_39.stl"/>
-    <mesh name="hollow_cylinder_convex_40" file="hollow_cylinder_convex_40.stl"/>
-    <mesh name="hollow_cylinder_convex_41" file="hollow_cylinder_convex_41.stl"/>
-    <mesh name="hollow_cylinder_convex_42" file="hollow_cylinder_convex_42.stl"/>
-    <mesh name="hollow_cylinder_convex_43" file="hollow_cylinder_convex_43.stl"/>
-    <mesh name="hollow_cylinder_convex_44" file="hollow_cylinder_convex_44.stl"/>
-    <mesh name="hollow_cylinder_convex_45" file="hollow_cylinder_convex_45.stl"/>
-    <mesh name="hollow_cylinder_convex_46" file="hollow_cylinder_convex_46.stl"/>
-    <mesh name="hollow_cylinder_convex_47" file="hollow_cylinder_convex_47.stl"/>
-    <mesh name="hollow_cylinder_convex_48" file="hollow_cylinder_convex_48.stl"/>
-    <mesh name="hollow_cylinder_convex_49" file="hollow_cylinder_convex_49.stl"/>
-    <mesh name="hollow_cylinder_convex_50" file="hollow_cylinder_convex_50.stl"/>
-    <mesh name="hollow_cylinder_convex_51" file="hollow_cylinder_convex_51.stl"/>
-    <mesh name="hollow_cylinder_convex_52" file="hollow_cylinder_convex_52.stl"/>
-    <mesh name="hollow_cylinder_convex_53" file="hollow_cylinder_convex_53.stl"/>
-    <mesh name="hollow_cylinder_convex_54" file="hollow_cylinder_convex_54.stl"/>
-    <mesh name="hollow_cylinder_convex_55" file="hollow_cylinder_convex_55.stl"/>
-    <mesh name="hollow_cylinder_convex_56" file="hollow_cylinder_convex_56.stl"/>
-    <mesh name="hollow_cylinder_convex_57" file="hollow_cylinder_convex_57.stl"/>
-    <mesh name="hollow_cylinder_convex_58" file="hollow_cylinder_convex_58.stl"/>
-    <mesh name="hollow_cylinder_convex_59" file="hollow_cylinder_convex_59.stl"/>
-    <mesh name="hollow_cylinder_convex_60" file="hollow_cylinder_convex_60.stl"/>
-    <mesh name="hollow_cylinder_convex_61" file="hollow_cylinder_convex_61.stl"/>
-    <mesh name="hollow_cylinder_convex_62" file="hollow_cylinder_convex_62.stl"/>
-    <mesh name="hollow_cylinder_convex_63" file="hollow_cylinder_convex_63.stl"/>
   </asset>
 
   <worldbody>
@@ -82,77 +18,37 @@
 
     <!-- target: visual-only goal marker (no collision) -->
     <body name="target" pos="0.3 0.25 0">
-      <geom type="cylinder" size="0.006 0.02" pos="0 0 0.02"
-            rgba="0.8 0.0 0.0 1.0" contype="1" conaffinity="1"/>
+      <geom name="rebar_0" type="cylinder" size="0.005 0.02" pos="0.035 0.035 0.02" rgba="0.8 0.0 0.0 1.0" contype="1" conaffinity="1"/>
+      <geom name="rebar_1" type="cylinder" size="0.005 0.02" pos="0.035 -0.035 0.02" rgba="0.8 0.0 0.0 1.0" contype="1" conaffinity="1"/>
+      <geom name="rebar_2" type="cylinder" size="0.005 0.02" pos="-0.035 0.035 0.02" rgba="0.8 0.0 0.0 1.0" contype="1" conaffinity="1"/>
+      <geom name="rebar_3" type="cylinder" size="0.005 0.02" pos="-0.035 -0.035 0.02" rgba="0.8 0.0 0.0 1.0" contype="1" conaffinity="1"/>
     </body>
 
     <!-- prefab: payload with free joint -->
     <body name="prefab" pos="0.3 0.15 0.5">
       <joint type="free"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_0" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_1" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_2" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_3" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_4" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_5" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_6" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_7" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_8" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_9" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_10" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_11" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_12" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_13" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_14" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_15" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_16" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_17" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_18" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_19" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_20" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_21" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_22" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_23" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_24" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_25" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_26" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_27" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_28" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_29" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_30" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_31" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_32" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_33" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_34" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_35" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_36" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_37" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_38" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_39" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_40" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_41" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_42" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_43" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_44" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_45" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_46" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_47" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_48" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_49" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_50" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_51" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_52" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_53" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_54" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_55" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_56" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_57" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_58" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_59" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_60" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_61" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_62" material="concrete" mass="0.015625"/>
-      <geom type="mesh" mesh="hollow_cylinder_convex_63" material="concrete" mass="0.015625"/>
+      <geom name="socket_top" type="box" size="0.05 0.05 0.070000" pos="0 0 0.030000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b1" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b2" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b3" type="box" size="0.004000 0.028000 0.030000" pos="-0.046000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b4" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b5" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b6" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b7" type="box" size="0.007000 0.028000 0.030000" pos="-0.035000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b8" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b9" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b10" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b11" type="box" size="0.028000 0.028000 0.030000" pos="0.000000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b12" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b13" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b14" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b15" type="box" size="0.007000 0.028000 0.030000" pos="0.035000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b16" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b17" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b18" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b19" type="box" size="0.004000 0.028000 0.030000" pos="0.046000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b20" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_b21" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
 
       <!-- four lift sites at top corners -->
       <site name="lift_fl" pos=" 0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>
