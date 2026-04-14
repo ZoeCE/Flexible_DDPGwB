@@ -131,6 +131,7 @@
 # ==============================================================================
  
 import os
+import re
 import copy
 import heapq
 import tempfile
@@ -327,7 +328,7 @@ class CableRobotEnvWithObstacles:
         grid_res = scene_plan_config["planning_grid_res"]
         xs = [start_xy[0], target_xy[0]]; ys = [start_xy[1], target_xy[1]]
         for (ox,oy,r) in planning_obs:
-            re=r+min_clr; xs.extend([ox-re,ox+re]); ys.extend([oy-re,oy+re])
+            re_=r+min_clr; xs.extend([ox-re_,ox+re_]); ys.extend([oy-re_,oy+re_])
         x_min=min(xs)-scene_plan_config["bounds_margin"]; x_max=max(xs)+scene_plan_config["bounds_margin"]
         y_min=min(ys)-scene_plan_config["bounds_margin"]; y_max=max(ys)+scene_plan_config["bounds_margin"]
         nx=max(2,int(np.ceil((x_max-x_min)/grid_res))); ny=max(2,int(np.ceil((y_max-y_min)/grid_res)))
@@ -408,6 +409,13 @@ class CableRobotEnvWithObstacles:
              f'    <body name="path_goal" pos="{target_xy[0]} {target_xy[1]} {epz}">\n      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>\n    </body>\n')
         repl='<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n'+obs_b+pb+epb+'    '
         xml=xml.replace('<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',repl,1)
+
+        # 动态更新 target body 位置，使 rebar 与路径终点一致
+        xml = re.sub(
+            r'(<body\s+name="target"\s+pos=")[^"]*(")',
+            rf'\g<1>{target_xy[0]} {target_xy[1]} 0\2',
+            xml, count=1)
+
         return obstacles, path_3d, xml
  
     # ── reset ─────────────────────────────────────────────────────────────────
