@@ -130,7 +130,7 @@ DEFAULT_CONFIG = {
     "sim": {
         "physics_dt":       0.002,
         "control_freq_hz":  10,
-        "max_steps":        200,
+        "max_steps":        300,
         "render":           False,
         "substep_skip":     1,
     },
@@ -143,6 +143,9 @@ DEFAULT_CONFIG = {
         "action_space_high": [2.967, 2.094, 2.967, 2.094, 2.967, 2.094, 3.054],
         "action_space_low":  [-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -3.054],
         "ee_action_high":    [0.5, 0.5, 2.0, 2.0],
+        # [DELTA] 每控制步最大关节角变化量（rad/step）
+        # 10Hz 控制频率下，0.1 rad/step = 1 rad/s，约为 57°/s，足够灵活但不过激
+        "dq_max": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
     },
 
     # ==========================================================================
@@ -161,9 +164,9 @@ DEFAULT_CONFIG = {
     # 4. 场景生成
     # ==========================================================================
     "scene": {
-        "n_obstacles":        3,
-        "radius_range":       (0.02, 0.04),
-        "path_width":         0.2,
+        "n_obstacles":        8,            # 旧: 3 → 新: 8（真正的路径规划挑战）
+        "radius_range":       (0.006, 0.015),# 旧: (0.02, 0.04) → 缩小障碍物以容纳更多
+        "path_width":         1.0,          # 旧: 0.2 → 新: 0.5（拓宽放置通道）
         "obstacle_z_center":  0.15,
         "obstacle_halfheight": 0.15,
         "endpoint_z_offset":  0.025,
@@ -174,10 +177,10 @@ DEFAULT_CONFIG = {
     # 5. A* 寻路与 3D 轨迹规划
     # ==========================================================================
     "planning": {
-        "payload_radius":    0.04,
-        "planning_margin":   0.05,
-        "planning_grid_res": 0.02,
-        "bounds_margin":     0.05,
+        "payload_radius":    0.05,
+        "planning_margin":   0.02,       # 旧: 0.05 → 新: 0.03（缩小安全余量以容纳更多障碍物）
+        "planning_grid_res": 0.025,
+        "bounds_margin":     0.48,
         "max_expansions":    100000,
         "payload_z_cruise":  0.2,
         "target_z_descent":  0.09,
@@ -271,9 +274,9 @@ DEFAULT_CONFIG = {
         ],
         "init_qpos_prefab": [0.3, 0.15, 0.0, 1.0, 0.0, 0.0, 0.0],
         "warmup_steps":      50,
-        "mocap_init_z":      0.65,
+        "mocap_init_z":      0.6,
         "ik_enabled":        True,
-        "ik_height_above_prefab": 0.65,
+        "ik_height_above_prefab": 0.6,
         "ik_target_quat":    [0.0, 1.0, 0.0, 0.0],
         "ik_max_iter":       5000,
         "ik_tol_pos":        1e-4,
@@ -322,10 +325,10 @@ DEFAULT_CONFIG = {
     # 13. NMPC 控制器（BC 标签生成器）
     # ==========================================================================
     "controller": {
-        "N":                    15,
+        "N":                    25,       # [OPT-6] 20→25 更长预测时域
         "dt":                   0.1,
         "L":                    0.5,
-        "u_max_xy":             0.5,
+        "u_max_xy":             0.8,      # [OPT-6] 0.5→0.8 允许更大防摆修正
         "u_max_z":              2.0,
         "u_max_yaw":            2.0,
         "arrival_threshold_xy": 0.05,
@@ -338,43 +341,37 @@ DEFAULT_CONFIG = {
     "ppo_agent": {
         # ── 网络结构 ──────────────────────────────────────────────────────────
         "hidden_dim":            256,
-        "n_layers":              2,         # [BC-4修复] 2个隐层（对应agent.py的含义）
-
-        # ── 训练核心 ──────────────────────────────────────────────────────────
+        "n_layers":              2,
+    
         "lr_actor":              3e-4,
-        "lr_critic":             3e-4,
+        "lr_critic":             3e-4,   # 新增独立 Critic lr（[BUG-P6]）
         "gamma":                 0.99,
         "gae_lambda":            0.95,
         "clip_eps":              0.2,
         "value_loss_coef":       0.5,
-        "entropy_coef":          0.01,      # [BC-3] 旧: 0.005 → 新: 0.01
+        "entropy_coef":          0.01,
         "max_grad_norm":         0.5,
-
-        # ── 训练批次 ──────────────────────────────────────────────────────────
-        "n_steps":               1024,      # [BC-4] 旧: 2048 → 新: 1024（更频繁更新）
+    
+        "n_steps":               1024,
         "n_epochs":              10,
         "batch_size":            256,
         "normalize_advantages":  True,
-
-        # ── 行为克隆（BC）────────────────────────────────────────────────────
+    
         "behavior_clone":        True,
-        "bc_coef_init":          5.0,       # [BC-1] 旧: 1.0 → 新: 5.0（强引导）
-        "bc_coef_final":         0.1,       # 最终保留 10% BC 约束（防止策略完全偏离专家）
-        "bc_anneal_steps":       2000000,   # [BC-2] 旧: 500000 → 新: 2000000
+        "bc_coef_init":          5.0,
+        "bc_coef_final":         0.1,
+        "bc_anneal_steps":       2000000,
         "bc_loss_type":          "mse",
-
-        # ── 状态归一化 ────────────────────────────────────────────────────────
+    
         "use_obs_norm":          True,
         "obs_norm_clip":         10.0,
-
-        # ── 动作分布 ──────────────────────────────────────────────────────────
-        # log_std_init=-0.7 对应 σ≈0.5rad，对关节空间是合理的初始探索幅度
-        "log_std_init":         -0.7,
+    
+        # [DELTA] delta-q 的 log_std 初始值应更小（初始 Δq 方差小更安全）
+        "log_std_init":         -1.0,    # 旧: -0.7, 对应 σ≈0.37，约 ±0.04 rad 初始探索
         "log_std_min":          -4.0,
-        "log_std_max":           1.0,
-
-        # ── 早停 ──────────────────────────────────────────────────────────────
-        "target_kl":             0.05,      # [BC-5] 旧: 0.02 → 新: 0.05（放宽）
+        "log_std_max":           0.5,    # 旧: 1.0，限制最大探索幅度
+    
+        "target_kl":             0.05,
     },
 
     # ==========================================================================
@@ -386,21 +383,22 @@ DEFAULT_CONFIG = {
         "batch_size":           256,
         "gamma":                0.99,
         "tau":                  0.005,
-        "lr_actor":             3e-4,
-        "lr_critic":            3e-4,
-        "policy_noise":         0.1,
-        "noise_clip":           0.25,
+        # [DELTA] policy_noise 是相对 dq_max 的比例（直接加在 Δq 上）
+        "policy_noise":         0.2,     # 20% of dq_max = 0.02 rad（较小的平滑噪声）
+        "noise_clip":           0.5,     # 50% of dq_max = 0.05 rad
         "policy_freq":          2,
         "critic_grad_clip":     1.0,
         "actor_grad_clip":      1.0,
         "critic_loss_type":     "huber",
-        "target_q_clip":        30.0,       # 配合新的 success_bonus=10 适当上调
+        "target_q_clip":        30.0,
         "behavior_clone":       True,
         "bc_alpha":             2.5,
         "epsilon_init":         1.0,
         "epsilon_min":          0.2,
         "epsilon_delta":        3e-7,
         "use_reward_norm":      False,
+        "lr_actor":             3e-4,
+        "lr_critic":            3e-4,
     },
 
     # ==========================================================================
@@ -427,7 +425,7 @@ DEFAULT_CONFIG = {
     "test": {
         "n_episodes":         20,
         "render":             False,
-        "n_obstacles":        3,
+        "n_obstacles":        8,
         "obstacle_seed":      42,
         "save_paths":         False,
         "save_paths_dir":     "test_paths",

@@ -32,6 +32,40 @@
 #   wandb + TensorBoard + CSV 三路写入
 # ==============================================================================
 
+# ==============================================================================
+# PPOlearn.py — PPO + BC 训练主程序
+#
+# 训练框架说明：
+#
+# [LOOP-1] 核心数据流
+#   每个 n_steps 步的 rollout：
+#     for each env step:
+#       1. obs → PPOAgent.act() → 7D 关节角动作（含 log_prob, value）
+#       2. JointSpaceExpert.compute_joint_target(obs, current_q) → BC 目标关节角
+#       3. env.step(action) → next_obs, reward, done
+#       4. buffer.add(norm_obs, action, bc_target, reward, done, value, log_prob)
+#
+#   rollout 结束后：
+#     buffer.compute_returns_and_advantages(last_value)
+#     agent.update() → PPO + BC 联合梯度更新
+#
+# [LOOP-2] PPO vs TD3 框架切换
+#   config["train"]["algo"] = "ppo" | "td3"
+#   运行时通过 --algo 命令行参数覆盖
+#
+# [LOOP-3] BC 系数退火逻辑
+#   - PPO Agent 内部维护 bc_coef（随 total_steps 线性退火）
+#   - 训练早期（total_steps < bc_anneal_steps / 2）：BC 主导，快速逼近专家轨迹
+#   - 训练后期：RL 主导，在专家基础上自主优化
+#
+# [LOOP-4] 评估机制
+#   每 eval_interval 回合：在固定 seed 场景下运行 eval_episodes 回合，
+#   统计成功率和平均回报，保存最优 checkpoint
+#
+# [LOOP-5] 日志
+#   wandb + TensorBoard + CSV 三路写入
+# ==============================================================================
+
 import os
 import csv
 import copy
@@ -165,7 +199,7 @@ def evaluate(agent, env, expert, n_episodes: int = 10,
                 action, _, _ = agent.act(norm_obs, deterministic=deterministic)
             else:
                 norm_obs = agent.normalize_obs(obs, update=False)
-                action, _ = agent.act(obs)
+                action, _ = agent.act(norm_obs)
 
             obs, reward, terminated, truncated, info = env.step(action)
             ep_reward += reward; step += 1
@@ -252,31 +286,32 @@ def train_ppo(log_dir: str, config: dict):
         # ── Rollout 收集 ──────────────────────────────────────────────────
         while not rollout_done:
  
-            # Step 1: 选择动作
+            # Step 1: 选择动作（返回 delta_q）
             norm_obs = agent.normalize_obs(obs, update=True)
-            action, log_prob, value = agent.act(norm_obs, deterministic=False)
- 
-            # Step 2: BC 目标
+            delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
+            
+            # Step 2: BC 目标（delta_q_expert = q_expert_next - q_current）
             current_q = env.data.qpos[:7].copy().astype(np.float32)
-            bc_target = expert.compute_joint_target(obs, current_q)
- 
+            bc_delta_q = expert.compute_delta_q_target(obs, current_q)  # [DELTA-C1]
+            
             # BC 标签有效性检查
-            if np.any(np.isnan(bc_target)) or np.allclose(bc_target, 0, atol=0.01):
-                bc_target = current_q.copy()
- 
-            # Step 3: 执行
-            next_obs, reward, terminated, truncated, info = env.step(action)
+            if np.any(np.isnan(bc_delta_q)):
+                bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+            
+            # Step 3: 执行 delta_q
+            next_obs, reward, terminated, truncated, info = env.step(delta_q)
             done = terminated or truncated
- 
-            if info.get("is_success"): ep_success = True
-            ep_reward += reward; ep_steps += 1; total_steps += 1
-            agent.total_steps = total_steps
- 
-            # Step 4: 存入 buffer
-            agent.buffer.add(
-                norm_obs, action, bc_target,
-                reward, float(done), value, log_prob
-            )
+            
+            # [FIX-L1] 更新回合统计（原版遗漏，导致日志全为 0）
+            ep_reward += reward
+            ep_steps  += 1
+            total_steps += 1
+            agent.total_steps = total_steps  # [FIX-L2] 同步 agent 步数，使 BC 退火生效
+            if info.get("is_success"):
+                ep_success = True
+            
+            # Step 4: 存入 buffer（delta_q 和 bc_delta_q 量级统一，BC Loss 有意义）
+            agent.buffer.add(norm_obs, delta_q, bc_delta_q, reward, float(done), value, log_prob)
  
             obs = next_obs
  
@@ -451,26 +486,37 @@ def train_td3(log_dir: str, config: dict):
             current_q  = env.data.qpos[:7].copy().astype(np.float32)
             bc_target  = expert.compute_joint_target(obs, current_q)
 
-            # Epsilon-greedy：专家 or Actor
+            # epsilon-greedy：专家也输出 delta_q
             if random.random() < agent.epsilon:
-                action = bc_target.copy()   # 直接用专家关节角执行
+                current_q = env.data.qpos[:7].copy().astype(np.float32)
+                # 专家输出绝对关节角，转换为 delta
+                action_expert = expert.compute_joint_target(obs, current_q)
+                delta_q = np.clip(action_expert - current_q, -agent.dq_max, agent.dq_max)
             else:
-                actor_action, _ = agent.act(obs)
-                noise  = np.random.normal(0.0, EXPLORE_NOISE * (ACT_HIGH - ACT_LOW) / 2)
-                action = np.clip(actor_action + noise, ACT_LOW, ACT_HIGH)
-
-            if np.isnan(action).any():
-                action = bc_target.copy()
-
-            next_obs, reward, terminated, truncated, info = env.step(action)
-            done = terminated or truncated
-
-            if info.get("is_success"): ep_success = True
-            ep_reward += reward; ep_steps += 1; frames += 1
-
-            # 归一化 next_obs
+                delta_q, _ = agent.act(norm_obs)
+                # 探索噪声
+                noise = np.random.normal(0., EXPLORE_NOISE * agent.dq_max)
+                delta_q = np.clip(delta_q + noise, -agent.dq_max, agent.dq_max)
+            
+            # BC 目标：delta_q_expert
+            current_q = env.data.qpos[:7].copy().astype(np.float32)
+            bc_delta_q = expert.compute_delta_q_target(obs, current_q)
+            
+            # 执行
+            next_obs, reward, terminated, truncated, info = env.step(delta_q)
+            done = terminated or truncated  # [FIX-L3] done 变量之前未定义
+            
+            # [FIX-L4] 更新回合统计
+            ep_reward += reward
+            ep_steps  += 1
+            frames    += 1
+            if info.get("is_success"):
+                ep_success = True
+            
+            # 存入 buffer
+            norm_obs      = agent.normalize_obs(obs, update=True)
             norm_next_obs = agent.normalize_obs(next_obs, update=False)
-            agent.remember(norm_obs, action, bc_target, norm_next_obs, reward, done)
+            agent.remember(norm_obs, delta_q, bc_delta_q, norm_next_obs, reward, float(done))
 
             if agent.buffer.size > MIN_BUFFER:
                 last_result = agent.train(GRAD_UPDATES)

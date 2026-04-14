@@ -89,8 +89,10 @@ def run_test(mode: str, config: dict, n_episodes: int,
     env = CableRobotEnvWithObstacles(config=config)
     STATE_DIM  = env.state_dim
     ACTION_DIM = config["space"]["action_dim"]
-    ACT_LOW    = np.array(config["space"]["action_space_low"])
-    ACT_HIGH   = np.array(config["space"]["action_space_high"])
+    # env.step() 期望 delta_q，范围应为 ±dq_max
+    dq_max     = np.array(config["space"].get("dq_max", [0.1]*ACTION_DIM))
+    ACT_LOW    = -dq_max
+    ACT_HIGH   =  dq_max
  
     # ── Agent / 专家初始化 ────────────────────────────────────────────────────
     agent  = None
@@ -163,10 +165,10 @@ def run_test(mode: str, config: dict, n_episodes: int,
         while True:
             # ── 选择动作 ────────────────────────────────────────────────────
             if mode == "nmpc":
-                # 纯专家：NMPC → IK → 关节角
+                # 纯专家：NMPC → IK → 绝对关节角 → 转 delta_q
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
-                action = expert.compute_joint_target(obs, current_q)
-                action = np.clip(action, ACT_LOW, ACT_HIGH)
+                q_target = expert.compute_joint_target(obs, current_q)
+                action = np.clip(q_target - current_q, ACT_LOW, ACT_HIGH)
  
             elif mode == "ppo":
                 norm_obs = agent.normalize_obs(obs, update=False)
@@ -174,12 +176,16 @@ def run_test(mode: str, config: dict, n_episodes: int,
  
             elif mode == "td3":
                 norm_obs = agent.normalize_obs(obs, update=False)
-                action, _ = agent.act(obs)
+                action, _ = agent.act(norm_obs)
  
             # NaN 保护
             if np.isnan(action).any():
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
-                action    = expert.compute_joint_target(obs, current_q) if expert else ACT_LOW
+                if expert:
+                    q_target = expert.compute_joint_target(obs, current_q)
+                    action = np.clip(q_target - current_q, ACT_LOW, ACT_HIGH)
+                else:
+                    action = np.zeros(ACTION_DIM, dtype=np.float32)
  
             # ── 环境推进 ────────────────────────────────────────────────────
             next_obs, reward, terminated, truncated, info = env.step(action)
@@ -294,11 +300,11 @@ def run_manual(config: dict):
             expert._ee_pos[2] = 0.25; expert._ee_vel[2] = 0.0
  
         current_q = env.data.qpos[:7].copy().astype(np.float32)
-        action = env.ik_solver.solve_4d(
+        q_target = env.ik_solver.solve_4d(
             current_q, expert._ee_pos[0], expert._ee_pos[1],
             expert._ee_pos[2], expert._ee_yaw
         )
-        action = np.clip(action, env.action_space_low, env.action_space_high)
+        action = np.clip(q_target - current_q, env.action_space_low, env.action_space_high)
  
         obs, reward, done, _, info = env.step(action)
         if done:
@@ -337,7 +343,7 @@ if __name__ == "__main__":
     parser.add_argument("--gpu",      type=int, default=0)
  
     # 场景参数
-    parser.add_argument("--obstacles",  type=int, default=3)
+    parser.add_argument("--obstacles",  type=int, default=8)
     parser.add_argument("--seed",       type=int, default=42)
     parser.add_argument("--start-xy",   type=str, default=None, dest="start_xy",
                         help="起始 XY，例如 '0.3,0.15'")
@@ -372,4 +378,3 @@ if __name__ == "__main__":
             gpu_id=args.gpu,
             save_paths_dir=args.save_paths_dir,
         )
- 

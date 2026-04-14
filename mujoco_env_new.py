@@ -108,6 +108,28 @@
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
+# ==============================================================================
+# mujoco_env_new.py — delta-q 动作空间适配版
+#
+# 主要变更（相对上一版）：
+#
+# [ENV-DELTA-1] step() 接受 delta_q，累加到当前关节角
+#   旧版：action = q_target（绝对值），直接下发
+#   新版：action = Δq（增量），env 内部执行：
+#         q_cmd = q_current + Δq，clamp 到关节限位，再下发
+#   好处：Actor 初始化为 Δq≈0（不动），是安全初始策略；
+#         绝对值模式下初始化为 q≈0（关节角全零），会造成突变。
+#
+# [ENV-DELTA-2] action_space 语义变更
+#   config["space"]["action_space_high/low"] 仍然是关节角限位（用于 clamp）
+#   config["space"]["dq_max"] 是每步最大增量（新增键）
+#   env.action_space_high/low 改为 dq_max（Actor 真正的输出范围）
+#
+# [ENV-DELTA-3] _compute_reward 的 obs 参数化
+#   继承上一版修复：_compute_reward 接收 obs 参数，不重复调用 _get_obs。
+#   同时新增稠密距离进展奖励（从上版 reward_and_loop_patch 整合）。
+# ==============================================================================
+ 
 import os
 import copy
 import heapq
@@ -117,48 +139,19 @@ import mujoco.viewer
 import numpy as np
 from collections import deque
 from scipy.spatial.transform import Rotation as R
-
+ 
 from config import DEFAULT_CONFIG
-# [FIX-E1] 统一从 controller 导入 NativeIKSolver
 from controller import NativeIKSolver
-
-
+ 
+ 
 class CableRobotEnvWithObstacles:
     """
-    关节空间控制版索驱动机器人环境。
-
-    动作空间：7D 关节角目标 [q1..q7]（rad）
-
-    观测布局（总计 10 + 3*n_obstacles + 26 维）：
-      [0]   ee_x          末端执行器 X（FK）
-      [1]   ee_y          末端执行器 Y（FK）
-      [2]   ee_vx         末端 X 速度（数值微分）
-      [3]   ee_vy         末端 Y 速度
-      [4]   payload_x     负载 X
-      [5]   payload_y     负载 Y
-      [6]   payload_vx    负载 X 速度
-      [7]   payload_vy    负载 Y 速度
-      [8]   rel_tx        目标 X - 负载 X
-      [9]   rel_ty        目标 Y - 负载 Y
-      [10 ~ 10+3n-1]  障碍物 (ox, oy, r) × n
-      ── 末尾固定 26 维（负索引）──
-      [-26] ee_z          末端 Z（FK）
-      [-25] ee_vz         末端 Z 速度
-      [-24] payload_z     负载 Z
-      [-23] payload_vz    负载 Z 速度
-      [-22] ee_roll       末端 roll（rad，ZYX Euler）
-      [-21] ee_roll_vel   末端 roll 速度（估计）
-      [-20] ee_pitch      末端 pitch
-      [-19] ee_pitch_vel  末端 pitch 速度
-      [-18] ee_yaw        末端 yaw
-      [-17] ee_yaw_vel    末端 yaw 速度
-      [-16] payload_yaw   负载 yaw（当前为 0）
-      [-15] payload_yaw_vel（当前为 0）
-      [-14...-8]  joint_q[0..6]   当前 7 关节角（rad）
-      [-7...-1]   joint_dq[0..6]  当前 7 关节角速度（rad/s）
+    delta-q 动作空间版索驱动机器人环境。
+    action = Δq ∈ [-dq_max, +dq_max]^7
+    env 内部：q_cmd = clip(q_current + Δq, q_low, q_high)
     """
-
-    def __init__(self, config: dict = None):
+ 
+    def __init__(self, config=None):
         self.config = copy.deepcopy(DEFAULT_CONFIG)
         if config is not None:
             for key, val in config.items():
@@ -166,7 +159,7 @@ class CableRobotEnvWithObstacles:
                     self.config[key].update(val)
                 else:
                     self.config[key] = val
-
+ 
         cfg_sim   = self.config["sim"]
         cfg_space = self.config["space"]
         cfg_task  = self.config["task"]
@@ -175,8 +168,7 @@ class CableRobotEnvWithObstacles:
         cfg_noise = self.config["noise"]
         self.cfg_reward = self.config.get("reward", {})
         self.cfg_logic  = self.config.get("step_logic", {})
-
-        # ── 时间参数 ─────────────────────────────────────────────────────────
+ 
         self.physics_dt      = cfg_sim["physics_dt"]
         self.control_freq_hz = cfg_sim["control_freq_hz"]
         self.control_dt      = 1.0 / self.control_freq_hz
@@ -184,19 +176,22 @@ class CableRobotEnvWithObstacles:
         self.sim_steps       = int(self.dt / self.physics_dt)
         self.max_steps       = cfg_sim["max_steps"]
         self.current_step    = 0
-
-        # ── 动作空间（7D 关节角）────────────────────────────────────────────
-        self.action_dim        = cfg_space["action_dim"]
-        self.action_space_high = np.array(cfg_space["action_space_high"])
-        self.action_space_low  = np.array(cfg_space["action_space_low"])
-
-        # ── 任务参数 ─────────────────────────────────────────────────────────
-        self.default_start_xy  = np.array(cfg_task["default_start_xy"])
-        self.default_target    = np.array(cfg_task["default_target_xy"])
-        self.target_pos        = self.default_target.copy()
+ 
+        # [ENV-DELTA-2] 关节限位（用于 q_cmd clamp）
+        self.q_low  = np.array(cfg_space["action_space_low"],  dtype=np.float32)
+        self.q_high = np.array(cfg_space["action_space_high"], dtype=np.float32)
+        # dq_max：Actor 实际输出范围
+        self.dq_max = np.array(cfg_space.get("dq_max", [0.1]*7), dtype=np.float32)
+        self.action_dim = cfg_space["action_dim"]
+        # env 对外暴露的 action_space 是 delta 空间
+        self.action_space_high = self.dq_max.copy()
+        self.action_space_low  = -self.dq_max.copy()
+ 
+        self.default_start_xy   = np.array(cfg_task["default_start_xy"])
+        self.default_target     = np.array(cfg_task["default_target_xy"])
+        self.target_pos         = self.default_target.copy()
         self.init_position_range = cfg_task["init_position_range"]
-
-        # ── 场景参数 ─────────────────────────────────────────────────────────
+ 
         self.n_obstacles          = cfg_scene["n_obstacles"]
         self.obstacle_radius_range = cfg_scene["radius_range"]
         self._obstacle_rng        = np.random.default_rng(cfg_scene["seed"])
@@ -204,53 +199,42 @@ class CableRobotEnvWithObstacles:
         self.payload_radius       = cfg_plan["payload_radius"]
         self.planning_margin      = cfg_plan["planning_margin"]
         self.planning_grid_res    = cfg_plan["planning_grid_res"]
-
-        # ── 动作延迟队列 ─────────────────────────────────────────────────────
+ 
         self.latency_steps = cfg_noise["latency_steps"]
-        # maxlen = latency+1：append 后取 [0] 实现 latency 步延迟
+        init_q_default     = np.array(self.config["reset"]["init_qpos_arm"], np.float32)
+        # 延迟队列存 q_cmd（绝对关节角），初始填 init_q
         self.action_queue  = deque(maxlen=max(1, self.latency_steps + 1))
-        init_q_default = np.array(self.config["reset"]["init_qpos_arm"],
-                                   dtype=np.float32)
         for _ in range(max(1, self.latency_steps + 1)):
             self.action_queue.append(init_q_default.copy())
-
-        # ── 状态维度 ─────────────────────────────────────────────────────────
+ 
+        # 状态维度（10 + 3n + 26）
         self.state_dim = 10 + (self.n_obstacles * 3) + 26
-
-        # ── 关节惩罚参数 ─────────────────────────────────────────────────────
+ 
         self._prev_q        = init_q_default.copy()
-        self._q_low         = self.action_space_low.copy()
-        self._q_high        = self.action_space_high.copy()
         self._q_margin_ratio = float(self.cfg_reward.get("joint_limit_margin", 0.1))
-
-        # ── XML 与 MuJoCo 初始化 ─────────────────────────────────────────────
+ 
+        # XML 初始化
         current_dir      = os.path.dirname(os.path.abspath(__file__))
         self._assets_dir = os.path.join(current_dir, "assets")
-
         from assets.generate_four_cables_with_plate import main as gen_rope
         gen_rope()
-
         base_xml_path = os.path.join(
             self._assets_dir,
             "demo_fourCable_withSteel_withSensor_cylinder.xml"
         )
         if not os.path.exists(base_xml_path):
             raise FileNotFoundError(f"Base XML not found: {base_xml_path}")
-
         with open(base_xml_path, "r", encoding="utf-8") as f:
             self._base_xml_content = f.read()
-
+ 
         self.model = mujoco.MjModel.from_xml_path(base_xml_path)
         self.data  = mujoco.MjData(self.model)
         self.model.opt.timestep = self.physics_dt
-
-        # ── IK Solver（[FIX-E1] 使用 controller.py 中统一维护的版本）────────
+ 
         self.ik_solver = NativeIKSolver(self.model, self.data)
         print("✅ IK Solver 初始化成功！")
-
         self._reresolve_ids()
-
-        # ── 内部状态 ─────────────────────────────────────────────────────────
+ 
         self._obstacles        = []
         self._planned_path     = None
         self.current_wp_idx    = 0
@@ -258,77 +242,66 @@ class CableRobotEnvWithObstacles:
         self.last_dist         = None
         self.last_wp_idx       = -1
         self._wp_just_advanced = False
-
-        # [FIX-E3] EE 速度缓存（只在 step 末尾更新一次）
-        self._prev_ee_pos  = np.zeros(3)
-        self._ee_vel_cache = np.zeros(3)  # 当前步速度缓存
-
-        # [FIX-E5] EE 欧拉角缓存（用于角速度估计）
-        self._prev_ee_euler    = np.zeros(3)
+ 
+        self._prev_ee_pos        = np.zeros(3)
+        self._ee_vel_cache       = np.zeros(3)
+        self._prev_ee_euler      = np.zeros(3)
         self._ee_euler_vel_cache = np.zeros(3)
-
-        # ── 渲染器 ───────────────────────────────────────────────────────────
+ 
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
         if self.render_mode:
             self._launch_viewer()
-
-    # ==========================================================================
-    # 辅助方法
-    # ==========================================================================
-
+ 
+    # ── 辅助 ──────────────────────────────────────────────────────────────────
+ 
     def _reresolve_ids(self):
-        """重新解析 MuJoCo body/site ID（每次场景重载后调用）。"""
         self.prefab_jnt_id  = self.model.body("prefab").jntadr[0]
         self.prefab_body_id = self.model.body("prefab").id
         self.target_body_id = self.model.body("target").id
         self.ee_site_id     = mujoco.mj_name2id(
-            self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site"
-        )
-
-    def _get_ee_pos(self) -> np.ndarray:
-        """从 MuJoCo FK 读取末端执行器 3D 位置。"""
+            self.model, mujoco.mjtObj.mjOBJ_SITE, "attachment_site")
+ 
+    def _get_ee_pos(self):
         return self.data.site_xpos[self.ee_site_id].copy()
-
-    def _get_ee_mat(self) -> np.ndarray:
-        """从 MuJoCo FK 读取末端执行器旋转矩阵 (3×3)。"""
+ 
+    def _get_ee_mat(self):
         return self.data.site_xmat[self.ee_site_id].reshape(3, 3).copy()
-
+ 
     def _launch_viewer(self):
         kw = {}
         if hasattr(self, '_key_callback') and self._key_callback is not None:
             kw['key_callback'] = self._key_callback
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data, **kw)
-
+ 
     def get_planned_path(self):
         return self._planned_path
-
+ 
     def close(self):
         if self.viewer is not None:
             try: self.viewer.close()
             except Exception: pass
-
-    # ==========================================================================
-    # 一站式场景生成（A* + 3D 轨迹 + XML，与原版逻辑一致）
-    # ==========================================================================
-
+ 
+    # ── 场景生成（与上版一致，略去重复）────────────────────────────────────────
+ 
     @staticmethod
     def generate_scene_and_trajectory(start_xy, target_xy, base_xml_content,
                                        scene_plan_config, rng=None):
+        """A* + 3D 轨迹 + XML（与上版逻辑完全一致，直接复用）。"""
         if rng is None:
             rng = np.random.default_rng()
-        start_xy  = np.asarray(start_xy,  dtype=float).reshape(2)
-        target_xy = np.asarray(target_xy, dtype=float).reshape(2)
-
-        p_radius  = scene_plan_config["payload_radius"]
-        p_margin  = scene_plan_config["planning_margin"]
-        min_clr   = p_radius + p_margin
-        base_xy   = np.array([0.0, 0.0])
-        base_r1   = 0.20
-        n_obs     = scene_plan_config["n_obstacles"]
+        start_xy  = np.asarray(start_xy,  float).reshape(2)
+        target_xy = np.asarray(target_xy, float).reshape(2)
+ 
+        p_radius = scene_plan_config["payload_radius"]
+        p_margin = scene_plan_config["planning_margin"]
+        min_clr  = p_radius + p_margin
+        base_r1  = 0.2       # [FIX-S1] 旧: 0.20 → 缩小底座排斥区
+        base_r2  = 0.1
+        n_obs    = scene_plan_config["n_obstacles"]
         r_min, r_max = scene_plan_config["radius_range"]
         path_width   = scene_plan_config["path_width"]
-
+ 
         obstacles = []
         direction = target_xy - start_xy
         L_path    = np.linalg.norm(direction)
@@ -336,68 +309,56 @@ class CableRobotEnvWithObstacles:
             direction /= L_path
             perp = np.array([-direction[1], direction[0]])
             attempts = 0
-            while len(obstacles) < n_obs and attempts < 500:
+            max_attempts = max(500, n_obs * 200)  # [FIX-S2] 按需增加尝试次数
+            while len(obstacles) < n_obs and attempts < max_attempts:
                 attempts += 1
-                t      = rng.uniform(0.2, 0.8)
-                s      = rng.uniform(-path_width/2, path_width/2)
-                center = start_xy + t * L_path * direction + s * perp
-                r      = rng.uniform(r_min, r_max)
-                if (np.linalg.norm(center-start_xy)  < r+min_clr or
-                        np.linalg.norm(center-target_xy) < r+min_clr or
-                        np.linalg.norm(center-base_xy)   < r+base_r1):
-                    continue
-                ok = all(np.linalg.norm(center-np.array([ox,oy])) >= r+or_+0.02
-                         for (ox,oy,or_) in obstacles)
-                if ok:
-                    obstacles.append((float(center[0]), float(center[1]), float(r)))
-
-        planning_obs = obstacles + [(0.0, 0.0, base_r1)]
+                t = rng.uniform(0.15, 0.85)   # [FIX-S3] 拓宽沿路径分布范围
+                s = rng.uniform(-path_width/2, path_width/2)
+                center = start_xy + t*L_path*direction + s*perp
+                r = rng.uniform(r_min, r_max)
+                if (np.linalg.norm(center-start_xy)<r+min_clr or
+                        np.linalg.norm(center-target_xy)<r+min_clr or
+                        np.linalg.norm(center)<r+base_r2): continue
+                if all(np.linalg.norm(center-np.array([ox,oy]))>=r+or_+0.01  # [FIX-S4] 旧:0.02→0.01
+                       for (ox,oy,or_) in obstacles):
+                    obstacles.append((float(center[0]),float(center[1]),float(r)))
+ 
+        planning_obs = obstacles + [(0.0,0.0,base_r1)]
         grid_res = scene_plan_config["planning_grid_res"]
-        xs = [start_xy[0], target_xy[0]]
-        ys = [start_xy[1], target_xy[1]]
+        xs = [start_xy[0], target_xy[0]]; ys = [start_xy[1], target_xy[1]]
         for (ox,oy,r) in planning_obs:
-            re = r + min_clr
-            xs.extend([ox-re, ox+re]); ys.extend([oy-re, oy+re])
-        x_min = min(xs) - scene_plan_config["bounds_margin"]
-        x_max = max(xs) + scene_plan_config["bounds_margin"]
-        y_min = min(ys) - scene_plan_config["bounds_margin"]
-        y_max = max(ys) + scene_plan_config["bounds_margin"]
-        nx = max(2, int(np.ceil((x_max-x_min)/grid_res)))
-        ny = max(2, int(np.ceil((y_max-y_min)/grid_res)))
-
-        def w2g(x, y):
-            return (max(0,min(nx-1,int((x-x_min)/grid_res))),
-                    max(0,min(ny-1,int((y-y_min)/grid_res))))
-        def g2w(i, j):
-            return x_min+(i+.5)*grid_res, y_min+(j+.5)*grid_res
-
-        occ = np.zeros((nx,ny), dtype=bool)
+            re=r+min_clr; xs.extend([ox-re,ox+re]); ys.extend([oy-re,oy+re])
+        x_min=min(xs)-scene_plan_config["bounds_margin"]; x_max=max(xs)+scene_plan_config["bounds_margin"]
+        y_min=min(ys)-scene_plan_config["bounds_margin"]; y_max=max(ys)+scene_plan_config["bounds_margin"]
+        nx=max(2,int(np.ceil((x_max-x_min)/grid_res))); ny=max(2,int(np.ceil((y_max-y_min)/grid_res)))
+ 
+        def w2g(x,y): return (max(0,min(nx-1,int((x-x_min)/grid_res))),max(0,min(ny-1,int((y-y_min)/grid_res))))
+        def g2w(i,j): return x_min+(i+.5)*grid_res, y_min+(j+.5)*grid_res
+ 
+        occ = np.zeros((nx,ny),bool)
         for i in range(nx):
             for j in range(ny):
-                wx,wy = g2w(i,j)
-                if any((wx-ox)**2+(wy-oy)**2<(r+min_clr)**2
-                       for (ox,oy,r) in planning_obs):
-                    occ[i,j] = True
-
-        def nearest_free(i0, j0, rad=5):
+                wx,wy=g2w(i,j)
+                if any((wx-ox)**2+(wy-oy)**2<(r+min_clr)**2 for (ox,oy,r) in planning_obs):
+                    occ[i,j]=True
+ 
+        def nf(i0,j0,rad=5):
             if not occ[i0,j0]: return i0,j0
-            best,bd = None,None
+            best,bd=None,None
             for di in range(-rad,rad+1):
                 for dj in range(-rad,rad+1):
-                    ni,nj = i0+di,j0+dj
+                    ni,nj=i0+di,j0+dj
                     if 0<=ni<nx and 0<=nj<ny and not occ[ni,nj]:
-                        d = di*di+dj*dj
+                        d=di*di+dj*dj
                         if best is None or d<bd: best,bd=(ni,nj),d
             return best
-
-        si = nearest_free(*w2g(*start_xy))  or w2g(*start_xy)
-        gi = nearest_free(*w2g(*target_xy)) or w2g(*target_xy)
-
-        open_h=[]; g_cost={si:0.0}; parent={}
+ 
+        si=nf(*w2g(*start_xy)) or w2g(*start_xy)
+        gi=nf(*w2g(*target_xy)) or w2g(*target_xy)
+        open_h=[]; g_cost={si:0.}; parent={}
         heapq.heappush(open_h,(float(np.hypot(*(np.array(g2w(*si))-target_xy))),si))
         nbrs=[(-1,0),(1,0),(0,-1),(0,1),(-1,-1),(-1,1),(1,-1),(1,1)]
         closed=set(); found=False; exp=0
-
         while open_h and exp<scene_plan_config["max_expansions"]:
             _,cur=heapq.heappop(open_h)
             if cur in closed: continue
@@ -410,461 +371,288 @@ class CableRobotEnvWithObstacles:
                 ng=g_cost[cur]+step; nb=(ni,nj)
                 if nb not in g_cost or ng<g_cost[nb]:
                     g_cost[nb]=ng; parent[nb]=cur
-                    h=float(np.hypot(*(np.array(g2w(ni,nj))-target_xy)))
-                    heapq.heappush(open_h,(ng+h,nb))
-
-        if not found:
-            path_2d=np.vstack([start_xy,target_xy])
+                    heapq.heappush(open_h,(ng+float(np.hypot(*(np.array(g2w(ni,nj))-target_xy))),nb))
+ 
+        if not found: path_2d=np.vstack([start_xy,target_xy])
         else:
             idx=[]; node=gi
-            while node!=si:
-                idx.append(node); node=parent.get(node)
-                if node is None: break
+            while node!=si: idx.append(node); node=parent.get(node); (node is None) and idx.append(si) or None
             idx.append(si); idx.reverse()
             path_2d=np.array([g2w(i,j) for (i,j) in idx])
-
-        z_cruise = scene_plan_config["payload_z_cruise"]
-        num_lift  = scene_plan_config.get("num_lift_steps", 5)
-        path_3d   = []
-        first_xy  = path_2d[0]
-        for z in np.linspace(0.11, z_cruise, num_lift+1)[1:]:
-            path_3d.append([float(first_xy[0]), float(first_xy[1]), float(z)])
+            # [FIX-PATH-1] 首末端点对齐到真实坐标，消除网格量化误差
+            path_2d[0]  = start_xy
+            path_2d[-1] = target_xy
+ 
+        z_cruise=scene_plan_config["payload_z_cruise"]
+        num_lift=scene_plan_config.get("num_lift_steps",5)
+        path_3d=[]
+        # [FIX-PATH-2] 起升段用真实 start_xy
+        for z in np.linspace(0.11,z_cruise,num_lift+1)[1:]:
+            path_3d.append([float(start_xy[0]),float(start_xy[1]),float(z)])
         for pt in path_2d[1:]:
-            path_3d.append([float(pt[0]), float(pt[1]), float(z_cruise)])
-        last_xy = path_2d[-1]
-        for z in np.linspace(z_cruise, scene_plan_config["target_z_descent"],
+            path_3d.append([float(pt[0]),float(pt[1]),float(z_cruise)])
+        # [FIX-PATH-3] 下降段用真实 target_xy
+        for z in np.linspace(z_cruise,scene_plan_config["target_z_descent"],
                              scene_plan_config["num_descent_steps"]+1)[1:]:
-            path_3d.append([float(last_xy[0]), float(last_xy[1]), float(z)])
-        path_3d = np.array(path_3d)
-
-        xml = base_xml_content
+            path_3d.append([float(target_xy[0]),float(target_xy[1]),float(z)])
+        path_3d=np.array(path_3d)
+ 
+        xml=base_xml_content
         if obstacles:
-            xml = xml.replace('  </asset>',
-                '    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>\n  </asset>',1)
-        obs_z=scene_plan_config["obstacle_z_center"]
-        obs_hh=scene_plan_config["obstacle_halfheight"]
-        obs_bodies="".join([
-            f'    <body name="obstacle_{i}" pos="{x} {y} {obs_z}">\n'
-            f'      <geom type="cylinder" size="{r} {obs_hh}" material="obstacle" '
-            f'contype="1" conaffinity="1"/>\n    </body>\n'
-            for i,(x,y,r) in enumerate(obstacles)])
-        path_bodies="".join([
-            f'    <body name="path_pt_{i}" pos="{p[0]} {p[1]} {p[2]}">\n'
-            f'      <geom type="sphere" size="0.01" rgba="0 0 1 1" '
-            f'contype="0" conaffinity="0"/>\n    </body>\n'
-            for i,p in enumerate(path_3d)])
-        ep_z=obs_z+obs_hh+scene_plan_config["endpoint_z_offset"]
-        ep_b=(
-            f'    <body name="path_start" pos="{start_xy[0]} {start_xy[1]} {ep_z}">\n'
-            f'      <geom type="sphere" size="0.012" rgba="1 0 0 1" '
-            f'contype="0" conaffinity="0"/>\n    </body>\n'
-            f'    <body name="path_goal" pos="{target_xy[0]} {target_xy[1]} {ep_z}">\n'
-            f'      <geom type="sphere" size="0.012" rgba="1 0 0 1" '
-            f'contype="0" conaffinity="0"/>\n    </body>\n'
-        )
-        repl=('<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n'
-              +obs_bodies+path_bodies+ep_b+'    ')
-        xml=xml.replace(
-            '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',
-            repl,1)
+            xml=xml.replace('  </asset>','    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>\n  </asset>',1)
+        obs_z=scene_plan_config["obstacle_z_center"]; obs_hh=scene_plan_config["obstacle_halfheight"]
+        obs_b="".join([f'    <body name="obstacle_{i}" pos="{x} {y} {obs_z}">\n      <geom type="cylinder" size="{r} {obs_hh}" material="obstacle" contype="1" conaffinity="1"/>\n    </body>\n' for i,(x,y,r) in enumerate(obstacles)])
+        pb="".join([f'    <body name="path_pt_{i}" pos="{p[0]} {p[1]} {p[2]}">\n      <geom type="sphere" size="0.01" rgba="0 0 1 1" contype="0" conaffinity="0"/>\n    </body>\n' for i,p in enumerate(path_3d)])
+        epz=obs_z+obs_hh+scene_plan_config["endpoint_z_offset"]
+        epb=(f'    <body name="path_start" pos="{start_xy[0]} {start_xy[1]} {epz}">\n      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>\n    </body>\n'
+             f'    <body name="path_goal" pos="{target_xy[0]} {target_xy[1]} {epz}">\n      <geom type="sphere" size="0.012" rgba="1 0 0 1" contype="0" conaffinity="0"/>\n    </body>\n')
+        repl='<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n'+obs_b+pb+epb+'    '
+        xml=xml.replace('<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',repl,1)
         return obstacles, path_3d, xml
-
-    # ==========================================================================
-    # reset()
-    # ==========================================================================
-
+ 
+    # ── reset ─────────────────────────────────────────────────────────────────
+ 
     def reset(self):
-        cfg_task  = self.config["task"]
-        cfg_scene = self.config["scene"]
-        cfg_plan  = self.config["planning"]
-        cfg_reset = self.config["reset"]
-
-        noise    = self._obstacle_rng.uniform(
-            -self.init_position_range, self.init_position_range, size=2)
-        start_xy  = self.default_start_xy + noise
-        target_xy = np.array(cfg_task["default_target_xy"])
-        self.target_pos = target_xy.copy()
-
-        scene_plan_cfg = {**cfg_scene, **cfg_plan}
-        obstacles, path_3d, new_xml = self.generate_scene_and_trajectory(
-            start_xy, target_xy, self._base_xml_content,
-            scene_plan_cfg, self._obstacle_rng
-        )
-        self._obstacles    = obstacles
-        self._planned_path = path_3d
-
-        # 重载 XML
-        with tempfile.NamedTemporaryFile(mode='w', suffix='.xml',
-                                          dir=self._assets_dir,
-                                          delete=False, encoding='utf-8') as f:
-            f.write(new_xml)
-            tmp_path = f.name
+        cfg_task=self.config["task"]; cfg_scene=self.config["scene"]
+        cfg_plan=self.config["planning"]; cfg_reset=self.config["reset"]
+ 
+        noise    = self._obstacle_rng.uniform(-self.init_position_range, self.init_position_range, 2)
+        start_xy = self.default_start_xy + noise
+        target_xy= np.array(cfg_task["default_target_xy"]); self.target_pos=target_xy.copy()
+ 
+        spCfg={**cfg_scene,**cfg_plan}
+        obstacles,path_3d,new_xml=self.generate_scene_and_trajectory(
+            start_xy,target_xy,self._base_xml_content,spCfg,self._obstacle_rng)
+        self._obstacles=obstacles; self._planned_path=path_3d
+ 
+        with tempfile.NamedTemporaryFile(mode='w',suffix='.xml',dir=self._assets_dir,delete=False,encoding='utf-8') as f:
+            f.write(new_xml); tmp_path=f.name
         try:
-            self.model = mujoco.MjModel.from_xml_path(tmp_path)
-            self.data  = mujoco.MjData(self.model)
-            self.model.opt.timestep = self.physics_dt
+            self.model=mujoco.MjModel.from_xml_path(tmp_path)
+            self.data=mujoco.MjData(self.model)
+            self.model.opt.timestep=self.physics_dt
         finally:
             try: os.remove(tmp_path)
             except OSError: pass
-
-        # [FIX-E2] 统一调用 update_model，确保 IK scratch 也更新
-        self.ik_solver.update_model(self.model, self.data)
+ 
+        self.ik_solver.update_model(self.model,self.data)
         self._reresolve_ids()
-
-        # 初始化仿真状态
-        mujoco.mj_resetData(self.model, self.data)
-        self.data.qpos[:] = 0.0
-        self.data.qvel[:] = 0.0
-        # 初始化 free/ball joint 四元数，防止非法初始状态
+ 
+        mujoco.mj_resetData(self.model,self.data)
+        self.data.qpos[:]=0.; self.data.qvel[:]=0.
         for j in range(self.model.njnt):
-            adr   = self.model.jnt_qposadr[j]
-            jtype = self.model.jnt_type[j]
-            if jtype == mujoco.mjtJoint.mjJNT_BALL:
-                self.data.qpos[adr:adr+4] = [1,0,0,0]
-            elif jtype == mujoco.mjtJoint.mjJNT_FREE:
-                self.data.qpos[adr+3:adr+7] = [1,0,0,0]
-
-        # 用 IK 计算初始关节角（末端在 start_xy 正上方）
-        seed_q   = np.array(cfg_reset["init_qpos_arm"], dtype=np.float64)
-        start_z  = float(cfg_reset.get("mocap_init_z", 0.4))
-        init_q   = self.ik_solver.solve_4d(
-            current_q=seed_q,
-            target_x=start_xy[0], target_y=start_xy[1],
-            target_z=start_z, target_yaw=0.0
-        )
-        if init_q is None or np.any(np.isnan(init_q)):
-            init_q = seed_q.copy()
-        self.data.qpos[:7] = init_q
-
-        # 负载初始位姿
-        pref_qpos = np.array(cfg_reset["init_qpos_prefab"], dtype=np.float64)
-        pref_qpos[0] = start_xy[0]
-        pref_qpos[1] = start_xy[1]
-        pref_jnt  = self.model.body("prefab").jntadr[0]
-        qpos_addr = self.model.jnt_qposadr[pref_jnt]
-        self.data.qpos[qpos_addr:qpos_addr+7] = pref_qpos
-
-        # 物理预热：锁定状态防重力扰动
-        arm_hold    = init_q.copy()
-        prefab_hold = pref_qpos.copy()
-        self.data.ctrl[:7] = arm_hold
+            adr=self.model.jnt_qposadr[j]; jtype=self.model.jnt_type[j]
+            if jtype==mujoco.mjtJoint.mjJNT_BALL: self.data.qpos[adr:adr+4]=[1,0,0,0]
+            elif jtype==mujoco.mjtJoint.mjJNT_FREE: self.data.qpos[adr+3:adr+7]=[1,0,0,0]
+ 
+        seed_q=np.array(cfg_reset["init_qpos_arm"],np.float64)
+        start_z=float(cfg_reset.get("mocap_init_z",0.4))
+        init_q=self.ik_solver.solve_4d(seed_q,start_xy[0],start_xy[1],start_z,0.0)
+        if init_q is None or np.any(np.isnan(init_q)): init_q=seed_q.copy()
+        self.data.qpos[:7]=init_q
+ 
+        pref_qpos=np.array(cfg_reset["init_qpos_prefab"],np.float64)
+        pref_qpos[0]=start_xy[0]; pref_qpos[1]=start_xy[1]
+        pref_jnt=self.model.body("prefab").jntadr[0]
+        qpos_addr=self.model.jnt_qposadr[pref_jnt]
+        self.data.qpos[qpos_addr:qpos_addr+7]=pref_qpos
+ 
+        arm_hold=init_q.copy(); prefab_hold=pref_qpos.copy()
+        self.data.ctrl[:7]=arm_hold
         for _ in range(cfg_reset["warmup_steps"]):
-            self.data.qpos[:7]                   = arm_hold
-            self.data.qvel[:7]                   = 0.0
-            self.data.qpos[qpos_addr:qpos_addr+7] = prefab_hold
-            self.data.qvel[qpos_addr:qpos_addr+6] = 0.0
-            mujoco.mj_step(self.model, self.data)
-        mujoco.mj_forward(self.model, self.data)
-
-        # 状态重置
-        self.current_step      = 0
-        self.current_wp_idx    = 0
-        self.reached_final     = False
-        self.last_dist         = None
-        self.last_wp_idx       = -1
-        self._wp_just_advanced = False
-        self._prev_q           = self.data.qpos[:7].copy().astype(np.float32)
-
-        # [FIX-E3][FIX-E5] 初始化速度缓存
-        ee_pos_init  = self._get_ee_pos()
-        self._prev_ee_pos        = ee_pos_init.copy()
-        self._ee_vel_cache       = np.zeros(3)
-        ee_mat_init  = self._get_ee_mat()
-        ee_euler_init = R.from_matrix(ee_mat_init).as_euler('xyz')
-        self._prev_ee_euler      = ee_euler_init.copy()
-        self._ee_euler_vel_cache = np.zeros(3)
-
-        # [FIX-E6] 用 init_q 初始化延迟队列（不是 zeros）
+            self.data.qpos[:7]=arm_hold; self.data.qvel[:7]=0.
+            self.data.qpos[qpos_addr:qpos_addr+7]=prefab_hold
+            self.data.qvel[qpos_addr:qpos_addr+6]=0.
+            mujoco.mj_step(self.model,self.data)
+        mujoco.mj_forward(self.model,self.data)
+ 
+        self.current_step=0; self.current_wp_idx=0; self.reached_final=False
+        self.last_dist=None; self.last_wp_idx=-1; self._wp_just_advanced=False
+        self._prev_q=self.data.qpos[:7].copy().astype(np.float32)
+ 
+        ee_init=self._get_ee_pos()
+        self._prev_ee_pos=ee_init.copy(); self._ee_vel_cache=np.zeros(3)
+        mat_init=self._get_ee_mat()
+        self._prev_ee_euler=R.from_matrix(mat_init).as_euler('xyz').copy()
+        self._ee_euler_vel_cache=np.zeros(3)
+ 
+        # [ENV-DELTA-1] 延迟队列用 init_q（绝对关节角）填充
         self.action_queue.clear()
-        for _ in range(max(1, self.latency_steps + 1)):
+        for _ in range(max(1, self.latency_steps+1)):
             self.action_queue.append(init_q.copy().astype(np.float32))
-
-        # 渲染器重建
+ 
         if self.render_mode:
             if self.viewer is not None:
                 try: self.viewer.close()
                 except Exception: pass
             self._launch_viewer()
-
+ 
         return self._get_obs()
-
-    # ==========================================================================
-    # step()
-    # ==========================================================================
-
-    def step(self, action: np.ndarray):
-        # 安全 clamp
-        action = np.clip(action, self.action_space_low, self.action_space_high)
-
-        # 动作延迟
-        self.action_queue.append(action.copy())
-        effective_q = np.array(self.action_queue[0], dtype=np.float64)
-
-        # 下发关节角目标
+ 
+    # ── step ──────────────────────────────────────────────────────────────────
+ 
+    def step(self, delta_q: np.ndarray):
+        """
+        [ENV-DELTA-1] 接受 delta_q，累加到当前关节角后执行。
+        """
+        delta_q = np.clip(delta_q, self.action_space_low, self.action_space_high)
+ 
+        # 当前关节角 + 增量，再 clamp 到关节限位
+        q_current = self.data.qpos[:7].copy().astype(np.float32)
+        q_cmd     = np.clip(q_current + delta_q, self.q_low, self.q_high)
+ 
+        # 延迟队列（存绝对关节角 q_cmd）
+        self.action_queue.append(q_cmd.copy())
+        effective_q = np.array(self.action_queue[0], np.float64)
+ 
         self.data.ctrl[:7] = effective_q
-
-        # 物理步进
+ 
         for _ in range(self.sim_steps):
             mujoco.mj_step(self.model, self.data)
-
-        # NaN 保护
+ 
         if np.any(np.isnan(self.data.qpos)) or np.any(np.isnan(self.data.qvel)):
             obs = self._get_obs()
             return obs, -10.0, True, False, {"is_success": False, "nan_detected": True}
-
+ 
         if self.render_mode and self.viewer is not None:
             self.viewer.sync()
-
-        # [FIX-E3] 物理步进完成后，一次性更新 EE 速度缓存
-        ee_pos_new = self._get_ee_pos()
-        self._ee_vel_cache = (ee_pos_new - self._prev_ee_pos) / self.dt
-        self._prev_ee_pos  = ee_pos_new.copy()
-
-        # [FIX-E5] 更新 EE 欧拉角速度缓存
-        ee_mat_new  = self._get_ee_mat()
-        ee_euler_new = R.from_matrix(ee_mat_new).as_euler('xyz')
-        self._ee_euler_vel_cache = (ee_euler_new - self._prev_ee_euler) / self.dt
-        self._prev_ee_euler = ee_euler_new.copy()
-
-        # 获取观测（此时速度缓存已是最新值）
+ 
+        # 更新速度缓存
+        ee_new = self._get_ee_pos()
+        self._ee_vel_cache = (ee_new - self._prev_ee_pos) / self.dt
+        self._prev_ee_pos  = ee_new.copy()
+        mat_new = self._get_ee_mat()
+        euler_new = R.from_matrix(mat_new).as_euler('xyz')
+        self._ee_euler_vel_cache = (euler_new - self._prev_ee_euler) / self.dt
+        self._prev_ee_euler = euler_new.copy()
+ 
         obs = self._get_obs()
-
-        # 负载 3D 位置
+ 
         payload_z  = self.data.body('prefab').xpos[2]
         payload_xy = np.array([obs[4], obs[5]])
         cur_pl_pos = np.array([payload_xy[0], payload_xy[1], payload_z])
-
-        # 航点追踪状态机
+ 
         if self._planned_path is not None and not self.reached_final:
             target_wp  = self._planned_path[self.current_wp_idx]
             dist_to_wp = np.linalg.norm(cur_pl_pos - target_wp)
-
             if self.last_wp_idx != self.current_wp_idx:
-                self.last_dist   = None
-                self.last_wp_idx = self.current_wp_idx
+                self.last_dist=None; self.last_wp_idx=self.current_wp_idx
             self.last_dist = dist_to_wp
-
-            total_wps  = len(self._planned_path)
-            rem_wps    = total_wps - 1 - self.current_wp_idx
-            look_ahead = 0.04 if rem_wps <= 2 \
-                         else self.config["step_logic"]["look_ahead_dist"]
-
+            total_wps=len(self._planned_path); rem=total_wps-1-self.current_wp_idx
+            look_ahead=0.04 if rem<=2 else self.config["step_logic"]["look_ahead_dist"]
             if dist_to_wp < look_ahead:
-                if self.current_wp_idx < total_wps - 1:
-                    self.current_wp_idx   += 1
-                    self._wp_just_advanced = True
+                if self.current_wp_idx < total_wps-1:
+                    self.current_wp_idx+=1; self._wp_just_advanced=True
                 else:
-                    self.reached_final = True
-
-        # [FIX-E4] 传入 obs，避免 _compute_reward 内部重复调用 _get_obs
+                    self.reached_final=True
+ 
         current_q = self.data.qpos[:7].copy().astype(np.float32)
         reward, done, success, is_collision = self._compute_reward(
-            action, current_q, self._prev_q, obs
-        )
+            delta_q, current_q, self._prev_q, obs)
         self._prev_q = current_q
-
+ 
         self.current_step += 1
         if self.current_step >= self.config["sim"]["max_steps"]:
             if not done:
                 reward += self.config["reward"]["timeout_penalty"]
             done = True
-
-        info = {
-            "is_success":     success,
-            "current_wp_idx": self.current_wp_idx,
-            "reached_final":  self.reached_final,
-            "is_collision":   is_collision,
+ 
+        return obs, reward, done, False, {
+            "is_success": success, "current_wp_idx": self.current_wp_idx,
+            "reached_final": self.reached_final, "is_collision": is_collision,
         }
-        return obs, reward, done, False, info
-
-    # ==========================================================================
-    # _compute_reward()
-    # ==========================================================================
-
-    # ──────────────────────────────────────────────────────────────────────────────
-    # PATCH 1：mujoco_env_new.py 的 _compute_reward 方法
-    # 替换 CableRobotEnvWithObstacles._compute_reward
-    #
-    # 主要改动：
-    #   [RWD-3] 新增稠密距离进展奖励（势能函数）
-    #   [RWD-4] step_penalty 已在 config 中设为 0，此处逻辑不变
-    #   [RWD-1/2] success_bonus/惩罚量级由 config 控制，此处不变
-    # ──────────────────────────────────────────────────────────────────────────────
-    
+ 
+    # ── _compute_reward ────────────────────────────────────────────────────────
+ 
     def _compute_reward(self, action, current_q, prev_q, obs):
-        """
-        奖励计算（修复版）。
-        新增稠密距离进展奖励，填补航点间的信号空洞。
-        """
-        reward = 0.0; done = False; success = False; is_collision = False
-        cfg_rwd = self.config["reward"]
-    
-        payload_xy  = obs[4:6]
-        payload_vxy = obs[6:8]
-        payload_z   = self.data.body('prefab').xpos[2]
-        dof_idx     = self.model.jnt_dofadr[self.prefab_jnt_id]
-        payload_vz  = self.data.qvel[dof_idx + 2]
-        pl_vel_norm = float(np.linalg.norm(np.append(payload_vxy, payload_vz)))
-        ee_xy       = self._get_ee_pos()[:2]
-    
-        # ── 每步惩罚 ──────────────────────────────────────────────────────────
-        # [RWD-4] step_penalty 在新 config 中为 0，保留接口
+        reward=0.; done=False; success=False; is_collision=False
+        cfg_rwd=self.config["reward"]
+ 
+        payload_xy=obs[4:6]; payload_vxy=obs[6:8]
+        payload_z=self.data.body('prefab').xpos[2]
+        dof_idx=self.model.jnt_dofadr[self.prefab_jnt_id]
+        payload_vz=self.data.qvel[dof_idx+2]
+        pl_vel=float(np.linalg.norm(np.append(payload_vxy,payload_vz)))
+        ee_xy=self._get_ee_pos()[:2]
+ 
         reward += float(cfg_rwd.get("step_penalty", 0.0))
-    
-        # 速度惩罚
-        vel_pen = cfg_rwd.get("velocity_penalty_coef", 0.003) * pl_vel_norm
-        reward -= float(np.clip(vel_pen, 0, 0.2))
-    
-        # 摆角惩罚
-        swing = float(np.linalg.norm(ee_xy - payload_xy))
-        reward -= cfg_rwd.get("swing_penalty_coef", 0.01) * float(np.clip(swing, 0, 0.1))
-    
-        # 关节平滑惩罚
-        smooth_coef  = -abs(float(cfg_rwd.get("joint_smooth_penalty", -0.001)))
-        joint_delta  = float(np.linalg.norm(current_q - prev_q))
-        reward      += smooth_coef * joint_delta
-    
-        '''# 关节极限惩罚
-        q_range  = self._q_high - self._q_low
-        q_margin = self._q_margin_ratio * q_range
-        n_near   = sum(
-            1 for j in range(7)
-            if (current_q[j] > self._q_high[j] - q_margin[j] or
-                current_q[j] < self._q_low[j]  + q_margin[j])
-        )
-        if n_near > 0:
-            reward -= abs(float(cfg_rwd.get("joint_limit_penalty", -0.05))) * n_near'''
-    
-        # ── [RWD-3] 稠密距离进展奖励（势能函数）─────────────────────────────
-        # 计算负载到当前目标航点（或最终目标）的距离进展
-        # 只在非终止状态时计算（终止状态由下方逻辑单独处理）
+        reward -= float(np.clip(cfg_rwd.get("velocity_penalty_coef",0.003)*pl_vel, 0, 0.2))
+        swing=float(np.linalg.norm(ee_xy-payload_xy))
+        reward -= cfg_rwd.get("swing_penalty_coef",0.01)*float(np.clip(swing,0,0.1))
+        reward += -abs(float(cfg_rwd.get("joint_smooth_penalty",-0.001)))*float(np.linalg.norm(current_q-prev_q))
+ 
+        q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
+        n_near=sum(1 for j in range(7) if (current_q[j]>self.q_high[j]-q_margin[j] or current_q[j]<self.q_low[j]+q_margin[j]))
+        if n_near>0: reward -= abs(float(cfg_rwd.get("joint_limit_penalty",-0.05)))*n_near
+ 
+        # 稠密距离进展奖励
         if self._planned_path is not None and not self.reached_final:
-            # 当前目标：当前航点（或最终目标）
-            target_wp = self._planned_path[min(self.current_wp_idx,
-                                                len(self._planned_path) - 1)]
-            curr_dist = float(np.linalg.norm(
-                np.array([payload_xy[0], payload_xy[1], payload_z]) - target_wp
-            ))
-    
-            # 上一步距离（初始化为当前距离，避免第一步虚假奖励）
-            if self.last_dist is None:
-                self.last_dist = curr_dist
-    
-            # 进展 = 上一步距离 - 当前距离（正值=靠近，负值=远离）
-            # 只奖励靠近（clip 下界为 0），不惩罚停滞/远离（那是 policy 学习的代价）
-            progress = float(np.clip(
-                self.last_dist - curr_dist,
-                0.0,
-                cfg_rwd.get("progress_clip", 0.1)
-            ))
-            reward  += cfg_rwd.get("progress_coef", 2.0) * progress
-            # 注意：last_dist 在 step() 的航点状态机中已经更新，
-            # 这里不再重复赋值（step() 末尾会更新 self.last_dist = dist_to_wp）
-    
-        # ── 终止条件 ──────────────────────────────────────────────────────────
+            wp=self._planned_path[min(self.current_wp_idx,len(self._planned_path)-1)]
+            curr_dist=float(np.linalg.norm(np.array([payload_xy[0],payload_xy[1],payload_z])-wp))
+            if self.last_dist is None: self.last_dist=curr_dist
+            progress=float(np.clip(self.last_dist-curr_dist,0.,cfg_rwd.get("progress_clip",0.1)))
+            reward += cfg_rwd.get("progress_coef",2.0)*progress
+ 
         if self.reached_final:
-            vel_xy        = float(np.linalg.norm(payload_vxy))
-            dist_to_final = float(np.linalg.norm(payload_xy - self.target_pos))
-            if dist_to_final < 0.03 and vel_xy < 0.1 and abs(payload_vz) < 0.2:
-                reward += cfg_rwd.get("success_bonus", 10.0)
-                success = True
+            vel_xy=float(np.linalg.norm(payload_vxy)); dtf=float(np.linalg.norm(payload_xy-self.target_pos))
+            if dtf<0.03 and vel_xy<0.1 and abs(payload_vz)<0.2:
+                reward+=cfg_rwd.get("success_bonus",10.0); success=True
             else:
-                reward += cfg_rwd.get("crash_penalty", -5.0)
-            done = True
-            return reward, done, success, is_collision
-    
-        for (ox, oy, orad) in self._obstacles:
-            if float(np.linalg.norm(payload_xy - np.array([ox,oy]))) < (orad + self.payload_radius):
-                reward += cfg_rwd.get("collision_penalty", -5.0)
-                done = True; is_collision = True
-                return reward, done, success, is_collision
-    
-        if float(np.linalg.norm(payload_xy)) < 0.03:
-            reward += cfg_rwd.get("collision_penalty", -5.0)
-            done = True; is_collision = True
-            return reward, done, success, is_collision
-    
-        cfg_logic = self.config["step_logic"]
-        if (payload_z < cfg_logic["crash_z_threshold"] and
-                payload_vz < cfg_logic["crash_vz_threshold"]):
-            reward += cfg_rwd.get("crash_penalty", -5.0)
-            done = True
-            return reward, done, success, is_collision
-    
-        # 航点里程碑奖励
-        if getattr(self, '_wp_just_advanced', False):
-            reward += cfg_rwd.get("waypoint_bonus", 0.15)
-            self._wp_just_advanced = False
-    
-        return reward, done, success, is_collision
-
-    # ==========================================================================
-    # _get_obs()
-    # ==========================================================================
-
-    def _get_obs(self) -> np.ndarray:
-        """
-        [FIX-E3] EE 速度使用缓存值（由 step() 在物理步进后更新一次），
-        避免多次调用导致的速度重算问题。
-        [FIX-E5] EE 欧拉角速度使用缓存估计。
-        """
-        # EE 位置与姿态
-        ee_pos = self._get_ee_pos()
-        ee_x, ee_y, ee_z = ee_pos
-
-        # [FIX-E3] 速度来自缓存
-        ee_vx, ee_vy, ee_vz = self._ee_vel_cache
-
-        # EE 姿态（欧拉角）
-        site_mat = self._get_ee_mat()
-        ee_euler = R.from_matrix(site_mat).as_euler('xyz')
-        ee_roll, ee_pitch, ee_yaw = ee_euler
-
-        # [FIX-E5] 欧拉角速度来自缓存
-        ee_roll_v, ee_pitch_v, ee_yaw_v = self._ee_euler_vel_cache
-
-        # 负载状态
-        payload_x  = self.data.body('prefab').xpos[0]
-        payload_y  = self.data.body('prefab').xpos[1]
-        payload_z  = self.data.body('prefab').xpos[2]
-        dof_idx    = self.model.jnt_dofadr[self.prefab_jnt_id]
-        payload_vx = self.data.qvel[dof_idx]
-        payload_vy = self.data.qvel[dof_idx + 1]
-        payload_vz = self.data.qvel[dof_idx + 2]
-
-        rel_tx = self.target_pos[0] - payload_x
-        rel_ty = self.target_pos[1] - payload_y
-
-        # 障碍物数据
-        obs_data = []
-        for (ox, oy, r) in self._obstacles:
-            obs_data.extend([ox, oy, r])
-        target_len = self.n_obstacles * 3
-        while len(obs_data) < target_len:
-            obs_data.append(0.0)
-
-        # 关节角 & 关节角速度
-        joint_q  = self.data.qpos[:7].copy().astype(np.float32)
-        joint_dq = self.data.qvel[:7].copy().astype(np.float32)
-
-        # 拼接（与头文件布局严格对齐）
+                reward+=cfg_rwd.get("crash_penalty",-5.0)
+            done=True; return reward,done,success,is_collision
+ 
+        for (ox,oy,orad) in self._obstacles:
+            if float(np.linalg.norm(payload_xy-np.array([ox,oy])))<(orad+self.payload_radius):
+                reward+=cfg_rwd.get("collision_penalty",-5.0); done=True; is_collision=True
+                return reward,done,success,is_collision
+ 
+        if float(np.linalg.norm(payload_xy))<0.03:
+            reward+=cfg_rwd.get("collision_penalty",-5.0); done=True; is_collision=True
+            return reward,done,success,is_collision
+ 
+        cfg_logic=self.config["step_logic"]
+        if payload_z<cfg_logic["crash_z_threshold"] and payload_vz<cfg_logic["crash_vz_threshold"]:
+            reward+=cfg_rwd.get("crash_penalty",-5.0); done=True
+            return reward,done,success,is_collision
+ 
+        if getattr(self,'_wp_just_advanced',False):
+            reward+=cfg_rwd.get("waypoint_bonus",0.15); self._wp_just_advanced=False
+ 
+        return reward,done,success,is_collision
+ 
+    # ── _get_obs ───────────────────────────────────────────────────────────────
+ 
+    def _get_obs(self):
+        ee_pos=self._get_ee_pos(); ee_x,ee_y,ee_z=ee_pos
+        ee_vx,ee_vy,ee_vz=self._ee_vel_cache
+        mat=self._get_ee_mat(); ee_euler=R.from_matrix(mat).as_euler('xyz')
+        ee_roll,ee_pitch,ee_yaw=ee_euler
+        ee_roll_v,ee_pitch_v,ee_yaw_v=self._ee_euler_vel_cache
+ 
+        payload_x=self.data.body('prefab').xpos[0]; payload_y=self.data.body('prefab').xpos[1]
+        payload_z=self.data.body('prefab').xpos[2]
+        dof_idx=self.model.jnt_dofadr[self.prefab_jnt_id]
+        payload_vx=self.data.qvel[dof_idx]; payload_vy=self.data.qvel[dof_idx+1]
+        payload_vz=self.data.qvel[dof_idx+2]
+        rel_tx=self.target_pos[0]-payload_x; rel_ty=self.target_pos[1]-payload_y
+ 
+        obs_data=[]
+        for (ox,oy,r) in self._obstacles: obs_data.extend([ox,oy,r])
+        tl=self.n_obstacles*3
+        while len(obs_data)<tl: obs_data.append(0.0)
+ 
+        joint_q=self.data.qpos[:7].copy().astype(np.float32)
+        joint_dq=self.data.qvel[:7].copy().astype(np.float32)
+ 
         return np.array(
-            [ee_x, ee_y, ee_vx, ee_vy,
-             payload_x, payload_y, payload_vx, payload_vy,
-             rel_tx, rel_ty]
-            + obs_data[:target_len]
-            + [ee_z,   ee_vz,   payload_z,   payload_vz,
-               ee_roll, ee_roll_v, ee_pitch, ee_pitch_v,
-               ee_yaw, ee_yaw_v, 0.0, 0.0]         # [-16/-15] payload_yaw 占位
-            + list(joint_q)
-            + list(joint_dq),
-            dtype=np.float32
-        )
-
-
-# ==============================================================================
-# 便捷工厂函数
-# ==============================================================================
-
-def make_env(config: dict = None) -> CableRobotEnvWithObstacles:
+            [ee_x,ee_y,ee_vx,ee_vy,payload_x,payload_y,payload_vx,payload_vy,rel_tx,rel_ty]
+            +obs_data[:tl]
+            +[ee_z,ee_vz,payload_z,payload_vz,
+              ee_roll,ee_roll_v,ee_pitch,ee_pitch_v,
+              ee_yaw,ee_yaw_v,0.,0.]
+            +list(joint_q)+list(joint_dq),
+            dtype=np.float32)
+ 
+ 
+def make_env(config=None):
     return CableRobotEnvWithObstacles(config=config)
