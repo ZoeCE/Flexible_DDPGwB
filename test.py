@@ -46,7 +46,8 @@ def build_config(args) -> dict:
     """从命令行参数构建测试配置。"""
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["sim"]["render"] = args.render
-    config["scene"]["n_obstacles"] = args.obstacles
+    if args.obstacles is not None:
+        config["scene"]["n_obstacles"] = args.obstacles
     config["scene"]["seed"] = args.seed
     config["train"]["gpu_id"] = args.gpu
  
@@ -343,7 +344,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpu",      type=int, default=0)
  
     # 场景参数
-    parser.add_argument("--obstacles",  type=int, default=8)
+    parser.add_argument("--obstacles",  type=int, default=None,
+                        help="障碍物数量（默认使用 config 中的值）")
     parser.add_argument("--seed",       type=int, default=42)
     parser.add_argument("--start-xy",   type=str, default=None, dest="start_xy",
                         help="起始 XY，例如 '0.3,0.15'")

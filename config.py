@@ -144,8 +144,8 @@ DEFAULT_CONFIG = {
         "action_space_low":  [-2.967, -2.094, -2.967, -2.094, -2.967, -2.094, -3.054],
         "ee_action_high":    [0.5, 0.5, 2.0, 2.0],
         # [DELTA] 每控制步最大关节角变化量（rad/step）
-        # 10Hz 控制频率下，0.1 rad/step = 1 rad/s，约为 57°/s，足够灵活但不过激
-        "dq_max": [0.1, 0.1, 0.1, 0.1, 0.1, 0.1, 0.1],
+        # 10Hz 控制频率下，0.15 rad/step = 1.5 rad/s，约为 86°/s
+        "dq_max": [0.15, 0.15, 0.15, 0.15, 0.15, 0.15, 0.15],
     },
 
     # ==========================================================================
@@ -164,9 +164,9 @@ DEFAULT_CONFIG = {
     # 4. 场景生成
     # ==========================================================================
     "scene": {
-        "n_obstacles":        8,            # 旧: 3 → 新: 8（真正的路径规划挑战）
-        "radius_range":       (0.006, 0.015),# 旧: (0.02, 0.04) → 缩小障碍物以容纳更多
-        "path_width":         1.0,          # 旧: 0.2 → 新: 0.5（拓宽放置通道）
+        "n_obstacles":        0,            # [FIX] 先用 0 障碍物验证流程
+        "radius_range":       (0.006, 0.015),
+        "path_width":         1.0,
         "obstacle_z_center":  0.15,
         "obstacle_halfheight": 0.15,
         "endpoint_z_offset":  0.025,
@@ -178,12 +178,12 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     "planning": {
         "payload_radius":    0.05,
-        "planning_margin":   0.02,       # 旧: 0.05 → 新: 0.03（缩小安全余量以容纳更多障碍物）
+        "planning_margin":   0.02,
         "planning_grid_res": 0.025,
         "bounds_margin":     0.48,
         "max_expansions":    100000,
         "payload_z_cruise":  0.2,
-        "target_z_descent":  0.09,
+        "target_z_descent":  0.10,       # 0.09→0.10 稍微抬高终点
         "num_descent_steps": 6,
         "num_lift_steps":    3,
     },
@@ -194,8 +194,8 @@ DEFAULT_CONFIG = {
     "step_logic": {
         "look_ahead_dist":    0.25,
         "out_of_bounds_dist": 2.0,
-        "crash_z_threshold":  0.15,
-        "crash_vz_threshold": -0.05,
+        "crash_z_threshold":  0.05,      # 0.15→0.05 必须低于 target_z_descent
+        "crash_vz_threshold": -0.3,      # -0.05→-0.3 放宽下降速度限制
     },
 
     # ==========================================================================
@@ -243,17 +243,20 @@ DEFAULT_CONFIG = {
         "step_penalty":           0.0,    # 旧: -0.005 → 新: 0.0
 
         # 速度惩罚保留（防止绳子甩动）
-        "velocity_penalty_coef":  0.003,  # 轻微降低
+        "velocity_penalty_coef":  0.01,   # 0.003→0.01 加大速度惩罚
 
         # ── 关节空间惩罚 ──────────────────────────────────────────────────────
-        # 关节平滑惩罚保持（防止抖动，但降低系数避免压制有效运动）
-        "joint_smooth_penalty":  -0.001,  # 旧: -0.002 → 轻微降低
-        # 关节极限惩罚（触发较少，保持）
+        # 关节平滑惩罚：惩罚相邻步 delta_q 的变化量（二阶导数，防抖动）
+        "joint_smooth_penalty":  -0.01,   # -0.001→-0.01 提高 10 倍
+        # 关节极限惩罚
         "joint_limit_penalty":   -0.05,
         "joint_limit_margin":     0.1,
 
         # ── 摆角惩罚 ──────────────────────────────────────────────────────────
-        "swing_penalty_coef":     0.01,   # 轻微降低，初期不过度惩罚
+        # XY 摆角：ee_xy 与 payload_xy 的距离
+        "swing_penalty_coef":     0.5,    # 0.01→0.5 提高 50 倍
+        # 垂直度惩罚：ee_z 与 payload_z 差值偏离绳长的程度（新增）
+        "verticality_penalty_coef": 0.3,  # 惩罚绳子不垂直
     },
 
     # ==========================================================================
@@ -272,7 +275,7 @@ DEFAULT_CONFIG = {
             -0.71972016,  0.29057466, -1.10685585,
              1.53851657,  2.87907443,  1.73055121, -1.85194252
         ],
-        "init_qpos_prefab": [0.3, 0.15, 0.0, 1.0, 0.0, 0.0, 0.0],
+        "init_qpos_prefab": [0.3, 0.15, 0.1, 1.0, 0.0, 0.0, 0.0],
         "warmup_steps":      50,
         "mocap_init_z":      0.6,
         "ik_enabled":        True,
@@ -325,14 +328,14 @@ DEFAULT_CONFIG = {
     # 13. NMPC 控制器（BC 标签生成器）
     # ==========================================================================
     "controller": {
-        "N":                    25,       # [OPT-6] 20→25 更长预测时域
+        "N":                    20,       # 缩短预测时域：加快求解速度
         "dt":                   0.1,
         "L":                    0.5,
-        "u_max_xy":             0.8,      # [OPT-6] 0.5→0.8 允许更大防摆修正
-        "u_max_z":              2.0,
+        "u_max_xy":             1.2,      # 0.8→1.2 允许更大 XY 加速度
+        "u_max_z":              2.5,      # 2.0→2.5
         "u_max_yaw":            2.0,
-        "arrival_threshold_xy": 0.05,
-        "arrival_threshold_z":  0.05,
+        "arrival_threshold_xy": 0.08,     # 0.05→0.08 放宽航点到达判定
+        "arrival_threshold_z":  0.08,     # 0.05→0.08
     },
 
     # ==========================================================================
@@ -343,17 +346,17 @@ DEFAULT_CONFIG = {
         "hidden_dim":            256,
         "n_layers":              2,
     
-        "lr_actor":              3e-4,
-        "lr_critic":             3e-4,   # 新增独立 Critic lr（[BUG-P6]）
+        "lr_actor":              5e-5,     # 1e-4→5e-5 更保守，保护预训练策略
+        "lr_critic":             3e-4,
         "gamma":                 0.99,
         "gae_lambda":            0.95,
-        "clip_eps":              0.2,
+        "clip_eps":              0.1,      # 0.2→0.1 更窄的信赖域防止策略跳变
         "value_loss_coef":       0.5,
-        "entropy_coef":          0.01,
+        "entropy_coef":          0.001,    # 0.005→0.001 几乎关闭 entropy 正则
         "max_grad_norm":         0.5,
     
-        "n_steps":               1024,
-        "n_epochs":              10,
+        "n_steps":               2048,
+        "n_epochs":              4,
         "batch_size":            256,
         "normalize_advantages":  True,
     
@@ -366,12 +369,11 @@ DEFAULT_CONFIG = {
         "use_obs_norm":          True,
         "obs_norm_clip":         10.0,
     
-        # [DELTA] delta-q 的 log_std 初始值应更小（初始 Δq 方差小更安全）
-        "log_std_init":         -1.0,    # 旧: -0.7, 对应 σ≈0.37，约 ±0.04 rad 初始探索
-        "log_std_min":          -4.0,
-        "log_std_max":           0.5,    # 旧: 1.0，限制最大探索幅度
+        "log_std_init":         -2.0,     # -1.5→-2.0 σ≈0.135，探索 ±0.02 rad/step
+        "log_std_min":          -5.0,     # -4.0→-5.0 允许 std 衰减到更小
+        "log_std_max":          -0.5,     # 0.0→-0.5 禁止 std 增大
     
-        "target_kl":             0.05,
+        "target_kl":             0.02,    # 0.03→0.02
     },
 
     # ==========================================================================
@@ -384,7 +386,7 @@ DEFAULT_CONFIG = {
         "gamma":                0.99,
         "tau":                  0.005,
         # [DELTA] policy_noise 是相对 dq_max 的比例（直接加在 Δq 上）
-        "policy_noise":         0.2,     # 20% of dq_max = 0.02 rad（较小的平滑噪声）
+        "policy_noise":         0.2,     # 20% of dq_max = 0.02 rad
         "noise_clip":           0.5,     # 50% of dq_max = 0.05 rad
         "policy_freq":          2,
         "critic_grad_clip":     1.0,
@@ -393,9 +395,17 @@ DEFAULT_CONFIG = {
         "target_q_clip":        30.0,
         "behavior_clone":       True,
         "bc_alpha":             2.5,
+        # ── [FIX-EPS] epsilon 调度重设计 ──────────────────────────────────
+        # 旧版：epsilon_delta=3e-7，8000回合仅从1.0降到0.77，actor几乎无执行机会
+        # 新版：分阶段衰减
+        #   阶段1（0~200回合）：纯专家 warmup，epsilon=1.0（由 warmup_episodes 控制）
+        #   阶段2（200~2000回合）：epsilon 从1.0快速降到0.3，让 actor 逐渐接管
+        #   阶段3（2000+回合）：epsilon 0.3→0.05，actor 主导但保留少量专家纠偏
+        # 实现：epsilon_delta=5e-6（每步），~200步/回合 × 1800回合 ≈ 360k步
+        #       1.0 - 360k × 5e-6 = 0.2
         "epsilon_init":         1.0,
-        "epsilon_min":          0.2,
-        "epsilon_delta":        3e-7,
+        "epsilon_min":          0.05,
+        "epsilon_delta":        5e-6,
         "use_reward_norm":      False,
         "lr_actor":             3e-4,
         "lr_critic":            3e-4,
@@ -407,8 +417,12 @@ DEFAULT_CONFIG = {
     "train": {
         "n_episodes":            8000,
         "total_timesteps":       5_000_000,
-        "warmup_episodes":       100,
-        "explore_noise":         0.05,
+        # [FIX-WU] 缩短 warmup：100回合纯专家足以填充 buffer，但不需要更多
+        # warmup 期间 epsilon 强制=1.0，actor 完全不执行
+        "warmup_episodes":       50,
+        # [FIX-EN] 探索噪声适度增大：0.05→0.1
+        # 原来太小，actor 自主执行时几乎无探索，容易陷入局部最优
+        "explore_noise":         0.1,
         "min_buffer_to_train":   2048,
         "grad_updates_per_step": 1,
         "save_interval":         50,
@@ -425,11 +439,21 @@ DEFAULT_CONFIG = {
     "test": {
         "n_episodes":         20,
         "render":             False,
-        "n_obstacles":        8,
+        "n_obstacles":        0,      # 与 scene.n_obstacles 保持一致
         "obstacle_seed":      42,
         "save_paths":         False,
         "save_paths_dir":     "test_paths",
         "ckpt_path":          None,
         "policy_type":        "ppo",
+    },
+
+    # ==========================================================================
+    # 18. BC 预训练参数（Phase 1）
+    # ==========================================================================
+    "bc_pretrain": {
+        "n_episodes":   300,     # 用专家跑 300 回合收集数据（~5万样本）
+        "n_epochs":     100,     # 监督训练 100 个 epoch（delta_q 空间需要更多迭代）
+        "lr":           3e-4,    # BC 学习率（适中，避免过拟合）
+        "batch_size":   256,
     },
 }

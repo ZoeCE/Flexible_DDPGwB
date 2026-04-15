@@ -573,13 +573,27 @@ class CableRobotEnvWithObstacles:
         dof_idx=self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz=self.data.qvel[dof_idx+2]
         pl_vel=float(np.linalg.norm(np.append(payload_vxy,payload_vz)))
-        ee_xy=self._get_ee_pos()[:2]
- 
+        ee_pos=self._get_ee_pos()
+        ee_xy=ee_pos[:2]; ee_z=float(ee_pos[2])
+
+        # 每步固定惩罚
         reward += float(cfg_rwd.get("step_penalty", 0.0))
-        reward -= float(np.clip(cfg_rwd.get("velocity_penalty_coef",0.003)*pl_vel, 0, 0.2))
-        swing=float(np.linalg.norm(ee_xy-payload_xy))
-        reward -= cfg_rwd.get("swing_penalty_coef",0.01)*float(np.clip(swing,0,0.1))
-        reward += -abs(float(cfg_rwd.get("joint_smooth_penalty",-0.001)))*float(np.linalg.norm(current_q-prev_q))
+
+        # 速度惩罚
+        reward -= float(np.clip(cfg_rwd.get("velocity_penalty_coef",0.01)*pl_vel, 0, 0.5))
+
+        # XY 摆角惩罚
+        swing_xy=float(np.linalg.norm(ee_xy-payload_xy))
+        reward -= cfg_rwd.get("swing_penalty_coef",0.5) * swing_xy
+
+        # 垂直度惩罚（摆角近似）
+        rope_len = max(ee_z - payload_z, 0.05)
+        swing_angle = swing_xy / rope_len
+        reward -= cfg_rwd.get("verticality_penalty_coef", 0.3) * swing_angle
+
+        # 关节平滑惩罚
+        dq_change = float(np.linalg.norm(current_q - prev_q))
+        reward -= abs(float(cfg_rwd.get("joint_smooth_penalty",-0.01))) * dq_change
  
         '''q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
         n_near=sum(1 for j in range(7) if (current_q[j]>self.q_high[j]-q_margin[j] or current_q[j]<self.q_low[j]+q_margin[j]))
@@ -595,7 +609,7 @@ class CableRobotEnvWithObstacles:
  
         if self.reached_final:
             vel_xy=float(np.linalg.norm(payload_vxy)); dtf=float(np.linalg.norm(payload_xy-self.target_pos))
-            if dtf<0.03 and vel_xy<0.1 and abs(payload_vz)<0.2:
+            if dtf<0.05 and vel_xy<0.15 and abs(payload_vz)<0.3:
                 reward+=cfg_rwd.get("success_bonus",10.0); success=True
             else:
                 reward+=cfg_rwd.get("crash_penalty",-5.0)

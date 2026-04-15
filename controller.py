@@ -101,9 +101,9 @@ class NMPCController4D:
         Q_pos       = np.array([25.0, 25.0, 40.0, 5.0])
         Q_swing     = np.array([500.0, 500.0])
         Q_swing_vel = 80.0
-        Q_vel       = 4.0
-        R_acc       = np.array([0.05, 0.05, 0.15, 0.3])
-        R_jerk      = 0.02
+        Q_vel       = 1.5           # 4.0→1.5 降低速度惩罚，允许更快运动
+        R_acc       = np.array([0.03, 0.03, 0.10, 0.3])  # 降低加速度代价
+        R_jerk      = 0.01          # 0.02→0.01 降低 jerk 惩罚
 
         constraints.append(X[:, 0] - X_init)
         mocap_target_z = P_ref[2] + self.L
@@ -258,11 +258,11 @@ class NMPCTrajectoryTracker:
         ref_z  = wp3[2]
         if (not self._is_descending
                 and self.current_idx < len(self.path) - 1
-                and dist_xy < 0.10):
+                and dist_xy < 0.15):                          # 0.10→0.15 更远前瞻
             next_wp = self.path[self.current_idx + 1]
             next_wp3 = np.array([next_wp[0], next_wp[1],
                                  next_wp[2] if len(next_wp) >= 3 else 0.3])
-            blend = max(0.0, 1.0 - dist_xy / 0.10) * 0.4
+            blend = max(0.0, 1.0 - dist_xy / 0.15) * 0.5     # 0.4→0.5 更强混合
             ref_xy = (1 - blend) * ref_xy + blend * next_wp3[:2]
             ref_z  = (1 - blend) * ref_z  + blend * next_wp3[2]
 
@@ -444,14 +444,18 @@ class JointSpaceExpert:
         self._last_q     = None
 
         # [OPT-2][OPT-3] 速度限幅
-        self._v_max_xy_normal  = 0.4
-        self._v_max_z_normal   = 0.25
-        self._v_max_xy_descent = 0.1
-        self._v_max_z_descent  = 0.10
+        self._v_max_xy_normal  = 0.6       # 0.4→0.6 更快巡航
+        self._v_max_z_normal   = 0.35      # 0.25→0.35
+        self._v_max_xy_descent = 0.15      # 0.1→0.15 下降阶段也适当加速
+        self._v_max_z_descent  = 0.15      # 0.10→0.15
 
         # [OPT-4] 软锚定系数
-        self._anchor_alpha_normal  = 0.30
-        self._anchor_alpha_descent = 0.1
+        # 折中设计：alpha=0.5 兼顾速度和标签一致性
+        # - 与 IK 用 current_q 的修复配合，标签准确性主要由 IK 保证
+        # - alpha=0.5 让积分器 50% 跟踪现实，不会像 0.8 那样拖慢速度
+        # - 也不会像 0.3 那样在 actor 偏离时积分器严重失同步
+        self._anchor_alpha_normal  = 0.5
+        self._anchor_alpha_descent = 0.2
 
     def reset(self, env_obs, init_q, env=None):
         if env is not None:
@@ -517,9 +521,11 @@ class JointSpaceExpert:
         vel_alpha = alpha * 0.5
         self._ee_vel = (1 - vel_alpha) * self._ee_vel + vel_alpha * real_vel
 
-        q_start  = self._last_q if self._last_q is not None else current_q
+        # [FIX-IK] 始终用 current_q 作为 IK 初始猜测
+        # 旧版用 self._last_q（专家上一步的 IK 解），当 actor 执行不同动作时
+        # current_q 与 _last_q 不一致，IK 从错误的初始点求解 → 产生不合理的目标
         q_target = self.ik_solver.solve_4d(
-            current_q=q_start.astype(np.float64),
+            current_q=current_q.astype(np.float64),
             target_x=float(self._ee_pos[0]),
             target_y=float(self._ee_pos[1]),
             target_z=float(self._ee_pos[2]),

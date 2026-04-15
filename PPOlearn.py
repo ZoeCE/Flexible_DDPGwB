@@ -1,70 +1,25 @@
 # ==============================================================================
-# PPOlearn.py — PPO + BC 训练主程序
+# PPOlearn.py — 两阶段训练框架（BC 预训练 + 纯 RL）
 #
-# 训练框架说明：
+# ══════════════════════════════════════════════════════════════════════════════
+# 架构重设计说明
+# ══════════════════════════════════════════════════════════════════════════════
 #
-# [LOOP-1] 核心数据流
-#   每个 n_steps 步的 rollout：
-#     for each env step:
-#       1. obs → PPOAgent.act() → 7D 关节角动作（含 log_prob, value）
-#       2. JointSpaceExpert.compute_joint_target(obs, current_q) → BC 目标关节角
-#       3. env.step(action) → next_obs, reward, done
-#       4. buffer.add(norm_obs, action, bc_target, reward, done, value, log_prob)
+# 旧版问题：PPO+BC 同时训练时，BC 梯度与 policy gradient 方向矛盾，
+#   导致 clip_fraction 飙升、bc_loss 上升、reward 停滞。
 #
-#   rollout 结束后：
-#     buffer.compute_returns_and_advantages(last_value)
-#     agent.update() → PPO + BC 联合梯度更新
+# 新版方案：两阶段训练
+#   Phase 1 — BC 预训练（pretrain_bc）
+#     用专家执行 rollout → 收集 (obs, delta_q_expert) 对 → 纯监督学习训练 Actor
+#     目标：让 Actor 学会模仿专家，达到 ~50%+ 成功率的初始策略
+#     仅训练 Actor（mean_head + backbone），不训练 Critic
+#     观测归一化在此阶段同步更新（warm up RunningMeanStd）
 #
-# [LOOP-2] PPO vs TD3 框架切换
-#   config["train"]["algo"] = "ppo" | "td3"
-#   运行时通过 --algo 命令行参数覆盖
+#   Phase 2 — 纯 PPO / TD3 fine-tune
+#     关闭 BC，用预训练好的 Actor 做纯 RL 训练
+#     Actor 已能完成任务 → advantage 信号清晰 → PPO 可有效优化
 #
-# [LOOP-3] BC 系数退火逻辑
-#   - PPO Agent 内部维护 bc_coef（随 total_steps 线性退火）
-#   - 训练早期（total_steps < bc_anneal_steps / 2）：BC 主导，快速逼近专家轨迹
-#   - 训练后期：RL 主导，在专家基础上自主优化
-#
-# [LOOP-4] 评估机制
-#   每 eval_interval 回合：在固定 seed 场景下运行 eval_episodes 回合，
-#   统计成功率和平均回报，保存最优 checkpoint
-#
-# [LOOP-5] 日志
-#   wandb + TensorBoard + CSV 三路写入
-# ==============================================================================
-
-# ==============================================================================
-# PPOlearn.py — PPO + BC 训练主程序
-#
-# 训练框架说明：
-#
-# [LOOP-1] 核心数据流
-#   每个 n_steps 步的 rollout：
-#     for each env step:
-#       1. obs → PPOAgent.act() → 7D 关节角动作（含 log_prob, value）
-#       2. JointSpaceExpert.compute_joint_target(obs, current_q) → BC 目标关节角
-#       3. env.step(action) → next_obs, reward, done
-#       4. buffer.add(norm_obs, action, bc_target, reward, done, value, log_prob)
-#
-#   rollout 结束后：
-#     buffer.compute_returns_and_advantages(last_value)
-#     agent.update() → PPO + BC 联合梯度更新
-#
-# [LOOP-2] PPO vs TD3 框架切换
-#   config["train"]["algo"] = "ppo" | "td3"
-#   运行时通过 --algo 命令行参数覆盖
-#
-# [LOOP-3] BC 系数退火逻辑
-#   - PPO Agent 内部维护 bc_coef（随 total_steps 线性退火）
-#   - 训练早期（total_steps < bc_anneal_steps / 2）：BC 主导，快速逼近专家轨迹
-#   - 训练后期：RL 主导，在专家基础上自主优化
-#
-# [LOOP-4] 评估机制
-#   每 eval_interval 回合：在固定 seed 场景下运行 eval_episodes 回合，
-#   统计成功率和平均回报，保存最优 checkpoint
-#
-# [LOOP-5] 日志
-#   wandb + TensorBoard + CSV 三路写入
-# ==============================================================================
+# ══════════════════════════════════════════════════════════════════════════════
 
 import os
 import csv
@@ -73,6 +28,7 @@ import time
 import random
 import numpy as np
 import torch
+import torch.nn.functional as F
 
 from config import DEFAULT_CONFIG
 from agent import PPOAgent, TD3Agent
@@ -175,10 +131,6 @@ def save_checkpoint(agent, log_dir: str, episode: int, tag: str = ""):
 
 def evaluate(agent, env, expert, n_episodes: int = 10,
              deterministic: bool = True, algo: str = "ppo") -> dict:
-    """
-    在固定场景下评估策略性能。
-    Returns: {"success_rate", "avg_reward", "avg_steps"}
-    """
     rewards, steps, successes = [], [], []
     is_ppo = (algo == "ppo")
 
@@ -216,106 +168,277 @@ def evaluate(agent, env, expert, n_episodes: int = 10,
 
 
 # ==============================================================================
-# PPO 训练主循环
+# Phase 1: BC 预训练 — DAgger with β-mixing
+# ==============================================================================
+
+def pretrain_bc(agent, config: dict, n_episodes: int = 300,
+                n_epochs: int = 100, batch_size: int = 256,
+                lr: float = 3e-4, algo: str = "ppo"):
+    """
+    Phase 1: DAgger 预训练（β-混合执行策略）。
+
+    每步以概率 β 执行专家动作、(1-β) 执行 actor 动作，但始终用专家标注。
+    β 在每轮 DAgger 中逐渐降低：1.0 → 0.7 → 0.4 → 0.2 → 0.0
+    这样轨迹不会过早崩溃，数据覆盖了 actor 偏移后的状态。
+    """
+    print(f"\n{'='*60}")
+    print(f"  Phase 1: DAgger 预训练 ({algo.upper()})")
+    print(f"{'='*60}")
+
+    env = CableRobotEnvWithObstacles(config=config)
+    expert = JointSpaceExpert(config, env.ik_solver)
+    dq_max = np.array(config["space"].get("dq_max", [0.1]*7), dtype=np.float32)
+    is_ppo = (algo == "ppo")
+
+    all_obs = []
+    all_dq  = []
+
+    bc_optimizer = torch.optim.Adam(agent.actor.parameters(), lr=lr)
+
+    # DAgger 参数
+    # β 调度：每轮的专家执行概率，逐步降低让 actor 接管
+    BETA_SCHEDULE  = [1.0, 0.7, 0.5, 0.3, 0.1, 0.0]
+    EPS_PER_ROUND  = [n_episodes, 100, 100, 100, 100, 80]
+    EPOCHS_SCHEDULE = [60, 40, 30, 30, 20, 20]
+    TARGET_SR      = 0.5
+
+    for rnd, beta in enumerate(BETA_SCHEDULE):
+        n_eps = EPS_PER_ROUND[rnd] if rnd < len(EPS_PER_ROUND) else 80
+        train_epochs = EPOCHS_SCHEDULE[rnd] if rnd < len(EPOCHS_SCHEDULE) else 20
+
+        print(f"\n[DAgger Round {rnd}] β={beta:.1f} | "
+              f"{n_eps} 回合 | {train_epochs} epochs")
+
+        n_new = 0
+        n_success = 0
+
+        for ep in range(n_eps):
+            obs = env.reset()
+            current_q = env.data.qpos[:7].copy()
+            expert.reset(obs, current_q, env=env)
+            planned_path = env.get_planned_path()
+            if planned_path is None:
+                continue
+            expert.set_path(planned_path)
+
+            ep_success = False
+            while True:
+                norm_obs = agent.normalize_obs(obs, update=True)
+
+                # 专家标注当前状态
+                current_q = env.data.qpos[:7].copy().astype(np.float32)
+                bc_dq = expert.compute_delta_q_target(obs, current_q)
+
+                if not np.any(np.isnan(bc_dq)):
+                    all_obs.append(norm_obs.copy())
+                    all_dq.append(bc_dq.copy())
+                    n_new += 1
+
+                # β-混合：以概率 β 用专家动作，否则用 actor 动作
+                if random.random() < beta:
+                    action = bc_dq
+                else:
+                    with torch.no_grad():
+                        s_t = torch.tensor(norm_obs.reshape(1, -1),
+                                           dtype=torch.float32,
+                                           device=agent.device)
+                        if is_ppo:
+                            action_t, _, _ = agent.actor.get_action(
+                                s_t, deterministic=True)
+                        else:
+                            action_t = agent.actor(s_t)
+                        action = action_t.cpu().numpy().flatten()
+                        action = np.clip(action, -dq_max, dq_max)
+
+                next_obs, reward, terminated, truncated, info = env.step(action)
+                if info.get("is_success"):
+                    ep_success = True
+                obs = next_obs
+                if terminated or truncated:
+                    break
+
+            if ep_success:
+                n_success += 1
+
+        sr = n_success / max(n_eps, 1)
+        print(f"  收集完成: +{n_new} 样本（总计 {len(all_obs)}）| "
+              f"执行成功率: {sr*100:.1f}%")
+
+        # ── 训练 ─────────────────────────────────────────────────────────
+        obs_arr = np.array(all_obs, dtype=np.float32)
+        dq_arr  = np.array(all_dq,  dtype=np.float32)
+        obs_t = torch.tensor(obs_arr, device=agent.device)
+        dq_t  = torch.tensor(dq_arr,  device=agent.device)
+        n_samples = len(obs_arr)
+
+        print(f"  训练 {train_epochs} epochs on {n_samples} 样本...")
+
+        for epoch in range(train_epochs):
+            indices = np.random.permutation(n_samples)
+            total_loss = 0.0
+            n_batches = 0
+
+            for start in range(0, n_samples, batch_size):
+                idx = indices[start: start + batch_size]
+                obs_b = obs_t[idx]
+                dq_b  = dq_t[idx]
+
+                if is_ppo:
+                    pred_dq, _, _ = agent.actor.get_action(
+                        obs_b, deterministic=True)
+                else:
+                    pred_dq = agent.actor(obs_b)
+
+                loss = F.mse_loss(pred_dq, dq_b)
+
+                bc_optimizer.zero_grad()
+                loss.backward()
+                torch.nn.utils.clip_grad_norm_(agent.actor.parameters(), 1.0)
+                bc_optimizer.step()
+
+                total_loss += loss.item()
+                n_batches += 1
+
+            avg_loss = total_loss / max(n_batches, 1)
+
+            if (epoch + 1) % 10 == 0 or epoch == 0:
+                with torch.no_grad():
+                    if is_ppo:
+                        eval_dq, _, _ = agent.actor.get_action(
+                            obs_t[:1000], deterministic=True)
+                    else:
+                        eval_dq = agent.actor(obs_t[:1000])
+                    dq_mae = (eval_dq - dq_t[:1000]).abs().mean().item()
+                print(f"    Epoch {epoch+1:3d} | MSE: {avg_loss:.6f} | "
+                      f"MAE: {dq_mae:.4f} rad")
+
+        # ── 评估 actor 独立成功率 ─────────────────────────────────────────
+        eval_cfg = copy.deepcopy(config)
+        eval_cfg["scene"]["seed"] = 42
+        eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
+        eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
+        result = evaluate(agent, eval_env, eval_expert,
+                          n_episodes=20, deterministic=True, algo=algo)
+        eval_env.close()
+
+        print(f"  [Eval] Actor 独立 SR={result['success_rate']*100:.1f}% | "
+              f"AvgR={result['avg_reward']:.2f} | "
+              f"AvgSteps={result['avg_steps']:.1f}")
+
+        if result["success_rate"] >= TARGET_SR:
+            print(f"  ✅ 达到目标 SR {TARGET_SR*100:.0f}%，DAgger 提前退出")
+            break
+
+    env.close()
+    print(f"{'='*60}\n")
+    return result
+
+
+# ==============================================================================
+# Phase 2: 纯 PPO 训练（无 BC）
 # ==============================================================================
 
 def train_ppo(log_dir: str, config: dict):
-    """PPO + BC 训练循环（修复版）。"""
+    """纯 PPO 训练（两阶段版本：先 BC 预训练，再纯 PPO fine-tune）。"""
     cfg_train  = config["train"]
     cfg_ppo    = config["ppo_agent"]
-    cfg_sim    = config["sim"]
- 
+
     TOTAL_STEPS   = int(cfg_train.get("total_timesteps", 5_000_000))
     N_STEPS       = int(cfg_ppo["n_steps"])
     SAVE_INTERVAL = int(cfg_train["save_interval"])
     EVAL_INTERVAL = int(cfg_train.get("eval_interval", 100))
     EVAL_EPS      = int(cfg_train.get("eval_episodes", 10))
     SMOOTH_WIN    = int(cfg_train["log_smooth_win"])
- 
+    ACTION_DIM    = int(config["space"]["action_dim"])
+
     print("[Train-PPO] 初始化环境...")
     env = CableRobotEnvWithObstacles(config=config)
     STATE_DIM  = env.state_dim
-    ACTION_DIM = config["space"]["action_dim"]
     print(f"  state_dim={STATE_DIM}, action_dim={ACTION_DIM}")
- 
+
     print("[Train-PPO] 初始化 Agent...")
     agent = PPOAgent(log_dir, STATE_DIM, ACTION_DIM, config=config)
- 
-    print("[Train-PPO] 初始化专家控制器...")
+
+    # ── Phase 1: BC 预训练 ────────────────────────────────────────────────
+    bc_cfg = config.get("bc_pretrain", {})
+    bc_episodes = int(bc_cfg.get("n_episodes", 200))
+    bc_epochs   = int(bc_cfg.get("n_epochs", 50))
+    bc_lr       = float(bc_cfg.get("lr", 1e-3))
+    bc_batch    = int(bc_cfg.get("batch_size", 256))
+
+    pretrain_bc(agent, config,
+                n_episodes=bc_episodes, n_epochs=bc_epochs,
+                batch_size=bc_batch, lr=bc_lr, algo="ppo")
+
+    # BC 预训练后保存
+    save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+
+    # ── 关闭 BC，切换到纯 PPO ─────────────────────────────────────────────
+    agent.behavior_clone = False
+    agent.bc_coef = 0.0
+    print("[Train-PPO] BC 已关闭，进入纯 PPO fine-tune 阶段")
+
+    # ── Phase 2: 纯 PPO 训练 ─────────────────────────────────────────────
     expert = JointSpaceExpert(config, env.ik_solver)
- 
+
     logger = Logger(log_dir, "cable_robot_ppo", os.path.basename(log_dir))
     logger.update_config(config)
- 
+
     log_file = os.path.join(log_dir, "ppo_log.csv")
     with open(log_file, "w", newline="") as f:
         csv.writer(f).writerow([
             "episode", "total_steps", "episode_reward", "avg_reward",
             "success", "success_rate", "steps",
-            "policy_loss", "value_loss", "entropy_loss", "bc_loss",
-            "approx_kl", "clip_fraction", "bc_coef",
+            "policy_loss", "value_loss", "entropy_loss",
+            "approx_kl", "clip_fraction",
         ])
- 
+
     stats    = EpisodeStats(window=SMOOTH_WIN)
     episode  = 0
     total_steps = 0
     best_sr  = 0.0
     t_start  = time.time()
     last_result = agent._last_result
- 
-    print(f"[Train-PPO] 开始训练，目标总步数 {TOTAL_STEPS}...")
- 
+
+    print(f"[Train-PPO] 开始纯 PPO 训练，目标总步数 {TOTAL_STEPS}...")
+
     while total_steps < TOTAL_STEPS:
- 
-        # ── 每回合开始 ──────────────────────────────────────────────────────
+
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
- 
-        # [LOOP-1] 传入 env，让 expert 直接读取精确 EE 位置
+
+        # expert 仅用于评估，不参与 rollout
         expert.reset(obs, current_q, env=env)
- 
         planned_path = env.get_planned_path()
         if planned_path is None:
-            print(f"[Warn] Ep {episode}: 路径规划失败，跳过。")
             episode += 1; continue
         expert.set_path(planned_path)
- 
+
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         rollout_done = False
- 
-        # ── Rollout 收集 ──────────────────────────────────────────────────
+
         while not rollout_done:
- 
-            # Step 1: 选择动作（返回 delta_q）
+
             norm_obs = agent.normalize_obs(obs, update=True)
             delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
-            
-            # Step 2: BC 目标（delta_q_expert = q_expert_next - q_current）
-            current_q = env.data.qpos[:7].copy().astype(np.float32)
-            bc_delta_q = expert.compute_delta_q_target(obs, current_q)  # [DELTA-C1]
-            
-            # BC 标签有效性检查
-            if np.any(np.isnan(bc_delta_q)):
-                bc_delta_q = np.zeros(ACTION_DIM, np.float32)
-            
-            # Step 3: 执行 delta_q
+
+            # BC target 填零（纯 PPO 不用，但 buffer.add 需要占位）
+            bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+
             next_obs, reward, terminated, truncated, info = env.step(delta_q)
             done = terminated or truncated
-            
-            # [FIX-L1] 更新回合统计（原版遗漏，导致日志全为 0）
+
             ep_reward += reward
             ep_steps  += 1
             total_steps += 1
-            agent.total_steps = total_steps  # [FIX-L2] 同步 agent 步数，使 BC 退火生效
+            agent.total_steps = total_steps
             if info.get("is_success"):
                 ep_success = True
-            
-            # Step 4: 存入 buffer（delta_q 和 bc_delta_q 量级统一，BC Loss 有意义）
-            agent.buffer.add(norm_obs, delta_q, bc_delta_q, reward, float(done), value, log_prob)
- 
+
+            agent.buffer.add(norm_obs, delta_q, bc_delta_q,
+                             reward, float(done), value, log_prob)
             obs = next_obs
- 
-            # buffer 满时触发更新
+
             if agent.buffer.full:
                 if done:
                     last_val = 0.0
@@ -325,20 +448,20 @@ def train_ppo(log_dir: str, config: dict):
                         s_t = torch.tensor(ns_norm, dtype=torch.float32,
                                            device=agent.device).unsqueeze(0)
                         last_val = agent.critic(s_t).item()
- 
+
                 agent.buffer.compute_returns_and_advantages(
                     last_val, agent.gamma, agent.gae_lambda
                 )
                 last_result = agent.update()
                 rollout_done = True
- 
+
             if done:
                 rollout_done = True
- 
-        # ── 回合统计 ──────────────────────────────────────────────────────
+
+        # ── 回合统计 ──────────────────────────────────────────────────
         stats.update(reward=ep_reward, steps=ep_steps, success=float(ep_success))
         avg_r = stats.mean("reward"); sr = stats.success_rate()
- 
+
         logger.log(episode, {
             "reward/episode":          ep_reward,
             f"reward/avg{SMOOTH_WIN}": avg_r,
@@ -348,37 +471,33 @@ def train_ppo(log_dir: str, config: dict):
             "loss/policy":             last_result.policy_loss,
             "loss/value":              last_result.value_loss,
             "loss/entropy":            last_result.entropy_loss,
-            "loss/bc":                 last_result.bc_loss,
             "ppo/approx_kl":           last_result.approx_kl,
             "ppo/clip_fraction":       last_result.clip_fraction,
-            "ppo/bc_coef":             agent.bc_coef,
             "train/total_steps":       total_steps,
         })
- 
+
         mark = "✅" if ep_success else "❌"
         print(
             f"Ep {episode:4d} {mark} | "
             f"R:{ep_reward:7.2f}(avg:{avg_r:6.2f}) | "
             f"SR:{sr*100:5.1f}% | Steps:{ep_steps:3d} | "
-            f"bc:{agent.bc_coef:.3f} | "
             f"Lp:{last_result.policy_loss:.4f} Lv:{last_result.value_loss:.4f} | "
             f"total:{total_steps}"
         )
- 
+
         with open(log_file, "a", newline="") as f:
             csv.writer(f).writerow([
                 episode, total_steps, ep_reward, avg_r,
                 int(ep_success), sr, ep_steps,
                 last_result.policy_loss, last_result.value_loss,
-                last_result.entropy_loss, last_result.bc_loss,
+                last_result.entropy_loss,
                 last_result.approx_kl, last_result.clip_fraction,
-                agent.bc_coef,
             ])
- 
+
         if episode > 0 and episode % SAVE_INTERVAL == 0:
             p = save_checkpoint(agent, log_dir, episode)
             print(f"[Train] Checkpoint → {p}")
- 
+
         if episode > 0 and episode % EVAL_INTERVAL == 0:
             eval_cfg = copy.deepcopy(config)
             eval_cfg["scene"]["seed"] = 42
@@ -387,37 +506,37 @@ def train_ppo(log_dir: str, config: dict):
             result = evaluate(agent, eval_env, eval_expert,
                               n_episodes=EVAL_EPS, deterministic=True, algo="ppo")
             eval_env.close()
- 
+
             print(f"  [Eval] SR={result['success_rate']*100:.1f}% | "
                   f"AvgR={result['avg_reward']:.2f} | "
                   f"AvgSteps={result['avg_steps']:.1f}")
- 
+
             logger.log(episode, {
                 "eval/success_rate": result["success_rate"],
                 "eval/avg_reward":   result["avg_reward"],
                 "eval/avg_steps":    result["avg_steps"],
             })
- 
+
             if result["success_rate"] > best_sr:
                 best_sr = result["success_rate"]
                 save_checkpoint(agent, log_dir, episode, tag="best")
                 print(f"  [Eval] 新最佳 SR: {best_sr*100:.1f}%")
- 
+
         episode += 1
- 
+
     save_checkpoint(agent, log_dir, episode, tag="final")
     elapsed = (time.time() - t_start) / 60
-    print(f"\\n[Train-PPO] 完成！总步数 {total_steps}，耗时 {elapsed:.1f} 分钟")
+    print(f"\n[Train-PPO] 完成！总步数 {total_steps}，耗时 {elapsed:.1f} 分钟")
     logger.close()
     return agent
 
 
 # ==============================================================================
-# TD3 训练主循环
+# Phase 2: TD3 训练（BC 预训练 + TD3 fine-tune）
 # ==============================================================================
 
 def train_td3(log_dir: str, config: dict):
-    """TD3 + BC 训练循环（关节空间版本）。"""
+    """TD3 训练（两阶段版本：先 BC 预训练，再 TD3+BC fine-tune）。"""
     cfg_train  = config["train"]
     cfg_agent  = config["td3_agent"]
 
@@ -429,8 +548,6 @@ def train_td3(log_dir: str, config: dict):
     SMOOTH_WIN      = int(cfg_train["log_smooth_win"])
     EXPLORE_NOISE   = float(cfg_train["explore_noise"])
     ACTION_DIM      = int(config["space"]["action_dim"])
-    ACT_LOW  = np.array(config["space"]["action_space_low"])
-    ACT_HIGH = np.array(config["space"]["action_space_high"])
 
     print("[Train-TD3] 初始化环境...")
     env = CableRobotEnvWithObstacles(config=config)
@@ -439,6 +556,20 @@ def train_td3(log_dir: str, config: dict):
     print("[Train-TD3] 初始化 Agent...")
     agent = TD3Agent(log_dir, STATE_DIM, ACTION_DIM, config=config)
 
+    # ── Phase 1: BC 预训练 ────────────────────────────────────────────────
+    bc_cfg = config.get("bc_pretrain", {})
+    bc_episodes = int(bc_cfg.get("n_episodes", 200))
+    bc_epochs   = int(bc_cfg.get("n_epochs", 50))
+    bc_lr       = float(bc_cfg.get("lr", 1e-3))
+    bc_batch    = int(bc_cfg.get("batch_size", 256))
+
+    pretrain_bc(agent, config,
+                n_episodes=bc_episodes, n_epochs=bc_epochs,
+                batch_size=bc_batch, lr=bc_lr, algo="td3")
+
+    save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+
+    # ── Phase 2: TD3 训练（保留 BC loss 但 actor 已有好的初始化）────────
     print("[Train-TD3] 初始化专家控制器...")
     expert = JointSpaceExpert(config, env.ik_solver)
 
@@ -469,7 +600,7 @@ def train_td3(log_dir: str, config: dict):
 
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
-        expert.reset(obs, current_q)
+        expert.reset(obs, current_q, env=env)
         planned_path = env.get_planned_path()
         if planned_path is None:
             print(f"[Warn] Ep {episode}: 路径规划失败，跳过。")
@@ -479,44 +610,32 @@ def train_td3(log_dir: str, config: dict):
         ep_reward = 0.0; ep_steps = 0; ep_success = False
 
         while True:
-            # 归一化观测
             norm_obs = agent.normalize_obs(obs, update=True)
 
-            # 专家生成 BC 目标关节角
-            current_q  = env.data.qpos[:7].copy().astype(np.float32)
-            bc_target  = expert.compute_joint_target(obs, current_q)
-
-            # epsilon-greedy：专家也输出 delta_q
-            if random.random() < agent.epsilon:
-                current_q = env.data.qpos[:7].copy().astype(np.float32)
-                # 专家输出绝对关节角，转换为 delta
-                action_expert = expert.compute_joint_target(obs, current_q)
-                delta_q = np.clip(action_expert - current_q, -agent.dq_max, agent.dq_max)
-            else:
-                delta_q, _ = agent.act(norm_obs)
-                # 探索噪声
-                noise = np.random.normal(0., EXPLORE_NOISE * agent.dq_max)
-                delta_q = np.clip(delta_q + noise, -agent.dq_max, agent.dq_max)
-            
-            # BC 目标：delta_q_expert
+            # 专家只调用一次
             current_q = env.data.qpos[:7].copy().astype(np.float32)
             bc_delta_q = expert.compute_delta_q_target(obs, current_q)
-            
-            # 执行
+
+            # epsilon-greedy
+            if random.random() < agent.epsilon:
+                delta_q = bc_delta_q.copy()
+            else:
+                delta_q, _ = agent.act(norm_obs)
+                noise = np.random.normal(0., EXPLORE_NOISE * agent.dq_max)
+                delta_q = np.clip(delta_q + noise, -agent.dq_max, agent.dq_max)
+
             next_obs, reward, terminated, truncated, info = env.step(delta_q)
-            done = terminated or truncated  # [FIX-L3] done 变量之前未定义
-            
-            # [FIX-L4] 更新回合统计
+            done = terminated or truncated
+
             ep_reward += reward
             ep_steps  += 1
             frames    += 1
             if info.get("is_success"):
                 ep_success = True
-            
-            # 存入 buffer
-            norm_obs      = agent.normalize_obs(obs, update=True)
+
             norm_next_obs = agent.normalize_obs(next_obs, update=False)
-            agent.remember(norm_obs, delta_q, bc_delta_q, norm_next_obs, reward, float(done))
+            agent.remember(norm_obs, delta_q, bc_delta_q,
+                           norm_next_obs, reward, float(done))
 
             if agent.buffer.size > MIN_BUFFER:
                 last_result = agent.train(GRAD_UPDATES)
@@ -560,6 +679,32 @@ def train_td3(log_dir: str, config: dict):
             p = save_checkpoint(agent, log_dir, episode)
             print(f"[Train] Checkpoint → {p}")
 
+        EVAL_INTERVAL = int(cfg_train.get("eval_interval", 100))
+        EVAL_EPS      = int(cfg_train.get("eval_episodes", 10))
+        if episode > 0 and episode % EVAL_INTERVAL == 0:
+            eval_cfg = copy.deepcopy(config)
+            eval_cfg["scene"]["seed"] = 42
+            eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
+            eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
+            result = evaluate(agent, eval_env, eval_expert,
+                              n_episodes=EVAL_EPS, deterministic=True, algo="td3")
+            eval_env.close()
+
+            print(f"  [Eval] SR={result['success_rate']*100:.1f}% | "
+                  f"AvgR={result['avg_reward']:.2f} | "
+                  f"AvgSteps={result['avg_steps']:.1f}")
+
+            logger.log(episode, {
+                "eval/success_rate": result["success_rate"],
+                "eval/avg_reward":   result["avg_reward"],
+                "eval/avg_steps":    result["avg_steps"],
+            })
+
+            if result["success_rate"] > best_sr:
+                best_sr = result["success_rate"]
+                save_checkpoint(agent, log_dir, episode, tag="best")
+                print(f"  [Eval] 新最佳 SR: {best_sr*100:.1f}%")
+
     save_checkpoint(agent, log_dir, N_EPISODES, tag="final")
     print(f"\n[Train-TD3] 完成！耗时 {(time.time()-t_start)/60:.1f} 分钟")
     logger.close()
@@ -571,14 +716,6 @@ def train_td3(log_dir: str, config: dict):
 # ==============================================================================
 
 def train(log_dir: str, algo: str = "ppo", custom_config: dict = None):
-    """
-    统一训练入口。
-
-    Args:
-        log_dir:       模型和日志保存目录
-        algo:          "ppo" 或 "td3"
-        custom_config: 局部配置覆盖
-    """
     config = copy.deepcopy(DEFAULT_CONFIG)
     if custom_config:
         for key, val in custom_config.items():
