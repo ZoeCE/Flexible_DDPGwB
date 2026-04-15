@@ -594,6 +594,23 @@ class CableRobotEnvWithObstacles:
         # 关节平滑惩罚
         dq_change = float(np.linalg.norm(current_q - prev_q))
         reward -= abs(float(cfg_rwd.get("joint_smooth_penalty",-0.01))) * dq_change
+
+        # ── 吊装物姿态惩罚（新增）──────────────────────────────────────────
+        # 从 MuJoCo 读取 payload 的旋转矩阵 → 欧拉角
+        pl_mat = self.data.body('prefab').xmat.reshape(3,3)
+        pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+        pl_roll  = float(pl_euler[0])   # 绕 X 倾斜
+        pl_pitch = float(pl_euler[1])   # 绕 Y 倾斜
+        pl_yaw   = float(pl_euler[2])   # 绕 Z 旋转
+
+        # yaw 偏差惩罚：吊装物不应绕 z 轴旋转，目标 yaw=0
+        reward -= cfg_rwd.get("payload_yaw_penalty_coef", 0.2) * abs(pl_yaw)
+
+        # tilt 偏差惩罚：吊装物应垂直于地面，roll 和 pitch 应接近 0
+        # 注意 prefab 初始姿态可能不是 roll=pitch=0，需看具体模型
+        # 这里用 roll² + pitch² 的平方根作为倾斜角度
+        tilt = float(np.sqrt(pl_roll**2 + pl_pitch**2))
+        reward -= cfg_rwd.get("payload_tilt_penalty_coef", 0.2) * tilt
  
         '''q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
         n_near=sum(1 for j in range(7) if (current_q[j]>self.q_high[j]-q_margin[j] or current_q[j]<self.q_low[j]+q_margin[j]))
@@ -609,7 +626,12 @@ class CableRobotEnvWithObstacles:
  
         if self.reached_final:
             vel_xy=float(np.linalg.norm(payload_vxy)); dtf=float(np.linalg.norm(payload_xy-self.target_pos))
-            if dtf<0.05 and vel_xy<0.15 and abs(payload_vz)<0.3:
+            # 成功条件：xy 距离 < 4cm，速度低，姿态接近垂直
+            pl_mat_f = self.data.body('prefab').xmat.reshape(3,3)
+            pl_euler_f = R.from_matrix(pl_mat_f).as_euler('xyz')
+            tilt_f = float(np.sqrt(pl_euler_f[0]**2 + pl_euler_f[1]**2))
+            yaw_f  = abs(float(pl_euler_f[2]))
+            if dtf<0.04 and vel_xy<0.15 and abs(payload_vz)<0.3 and tilt_f<0.3 and yaw_f<0.3:
                 reward+=cfg_rwd.get("success_bonus",10.0); success=True
             else:
                 reward+=cfg_rwd.get("crash_penalty",-5.0)

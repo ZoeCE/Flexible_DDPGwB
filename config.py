@@ -177,8 +177,8 @@ DEFAULT_CONFIG = {
     # 5. A* 寻路与 3D 轨迹规划
     # ==========================================================================
     "planning": {
-        "payload_radius":    0.05,
-        "planning_margin":   0.02,
+        "payload_radius":    0.045,
+        "planning_margin":   0.04,
         "planning_grid_res": 0.025,
         "bounds_margin":     0.48,
         "max_expansions":    100000,
@@ -234,7 +234,7 @@ DEFAULT_CONFIG = {
 
         # ── 里程碑奖励 ────────────────────────────────────────────────────────
         # [RWD-5] waypoint_bonus 上调，50点 × 0.15 = 7.5（占成功奖励的43%）
-        "waypoint_bonus":         0.15,   # 旧: 0.1 → 新: 0.15
+        "waypoint_bonus":         0.2,   # 旧: 0.1 → 新: 0.15
 
         # ── 连续性惩罚（每步）────────────────────────────────────────────────
         # [RWD-4] 去除 step_penalty（设为 0）
@@ -243,11 +243,11 @@ DEFAULT_CONFIG = {
         "step_penalty":           0.0,    # 旧: -0.005 → 新: 0.0
 
         # 速度惩罚保留（防止绳子甩动）
-        "velocity_penalty_coef":  0.01,   # 0.003→0.01 加大速度惩罚
+        "velocity_penalty_coef":  0.005,   # 0.003→0.01 加大速度惩罚
 
         # ── 关节空间惩罚 ──────────────────────────────────────────────────────
         # 关节平滑惩罚：惩罚相邻步 delta_q 的变化量（二阶导数，防抖动）
-        "joint_smooth_penalty":  -0.01,   # -0.001→-0.01 提高 10 倍
+        "joint_smooth_penalty":  -0.005,   # -0.001→-0.01 提高 10 倍
         # 关节极限惩罚
         "joint_limit_penalty":   -0.05,
         "joint_limit_margin":     0.1,
@@ -257,6 +257,12 @@ DEFAULT_CONFIG = {
         "swing_penalty_coef":     0.5,    # 0.01→0.5 提高 50 倍
         # 垂直度惩罚：ee_z 与 payload_z 差值偏离绳长的程度（新增）
         "verticality_penalty_coef": 0.3,  # 惩罚绳子不垂直
+
+        # ── 吊装物姿态惩罚（新增）──────────────────────────────────────────
+        # yaw 偏差：吊装物不应绕 Z 轴旋转，目标 yaw=0
+        "payload_yaw_penalty_coef":  0.2,
+        # tilt 偏差：吊装物应垂直于地面，roll+pitch 应接近 0
+        "payload_tilt_penalty_coef": 0.2,
     },
 
     # ==========================================================================
