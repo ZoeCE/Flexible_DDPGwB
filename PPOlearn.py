@@ -177,30 +177,64 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
     """
     Phase 1: DAgger 预训练（β-混合执行策略）。
 
-    每步以概率 β 执行专家动作、(1-β) 执行 actor 动作，但始终用专家标注。
-    β 在每轮 DAgger 中逐渐降低：1.0 → 0.7 → 0.4 → 0.2 → 0.0
-    这样轨迹不会过早崩溃，数据覆盖了 actor 偏移后的状态。
+    [BC-FIX-2] 核心修复：
+      a) obs_norm 在采集完成后冻结，避免训练/测试分布偏移
+      b) 使用 bc_forward 在 u 空间做 BC，避免 tanh 饱和
+      c) Round 4 崩溃修复：β>0.5 阶段收集的数据更干净，保留权重
+      d) 每轮训练时同时冻结 log_std，防止策略方差失控
     """
     print(f"\n{'='*60}")
     print(f"  Phase 1: DAgger 预训练 ({algo.upper()})")
     print(f"{'='*60}")
 
-    env = CableRobotEnvWithObstacles(config=config)
-    expert = JointSpaceExpert(config, env.ik_solver)
+    # [v3-CURRICULUM] BC 预训练使用 curriculum.bc_n_obstacles（默认 0）
+    # 核心思想：先在稳定的 0 障碍物场景学好基础策略
+    bc_config = copy.deepcopy(config)
+    cur_cfg = config.get("curriculum", {})
+    if cur_cfg.get("enabled", False):
+        bc_n_obs = int(cur_cfg.get("bc_n_obstacles", 0))
+        bc_config["scene"]["n_obstacles"] = bc_n_obs
+        # 重要：state_dim 仍然基于 config 的 n_obstacles（上限）计算
+        # 所以 bc_config 的 scene.n_obstacles 需要保持 config 原值作为上限
+        # 但运行时用 set_curriculum_n_obstacles 调整实际数量
+        bc_config["scene"]["n_obstacles"] = int(config["scene"]["n_obstacles"])
+        print(f"  [Curriculum] BC 阶段目标障碍物数 = {bc_n_obs} "
+              f"(state_dim 上限 = {config['scene']['n_obstacles']})")
+    else:
+        bc_n_obs = int(config["scene"]["n_obstacles"])
+
+    env = CableRobotEnvWithObstacles(config=bc_config)
+    # 运行时切换到 BC 阶段的障碍物数
+    env.set_curriculum_n_obstacles(bc_n_obs)
+    expert = JointSpaceExpert(bc_config, env.ik_solver)
     dq_max = np.array(config["space"].get("dq_max", [0.1]*7), dtype=np.float32)
     is_ppo = (algo == "ppo")
 
     all_obs = []
     all_dq  = []
 
-    bc_optimizer = torch.optim.Adam(agent.actor.parameters(), lr=lr)
+    # [BC-FIX-2a] BC 只训练 mean_head + backbone，不训练 log_std
+    # 防止 BC 阶段 log_std 飘到不合理的值
+    bc_params = []
+    if is_ppo:
+        for name, p in agent.actor.named_parameters():
+            if name != 'log_std':
+                bc_params.append(p)
+    else:
+        bc_params = list(agent.actor.parameters())
+    bc_optimizer = torch.optim.Adam(bc_params, lr=lr)
 
     # DAgger 参数
-    # β 调度：每轮的专家执行概率，逐步降低让 actor 接管
-    BETA_SCHEDULE  = [1.0, 0.7, 0.5, 0.3, 0.1, 0.0]
-    EPS_PER_ROUND  = [n_episodes, 100, 100, 100, 100, 80]
-    EPOCHS_SCHEDULE = [60, 40, 30, 30, 20, 20]
-    TARGET_SR      = 0.5
+    # [BC-FIX-3] 更保守的 β 调度：不降到 0，保留少量专家干预
+    # 旧版 [1.0, 0.7, 0.5, 0.3, 0.1, 0.0] 最后一轮 β=0.1 时 Actor 主导但策略还未稳定
+    # 新版 [1.0, 0.8, 0.6, 0.4, 0.3, 0.2] 始终保留至少 20% 专家干预
+    BETA_SCHEDULE  = [1.0, 0.8, 0.6, 0.4, 0.3, 0.2]
+    EPS_PER_ROUND  = [n_episodes, 120, 120, 120, 100, 100]
+    EPOCHS_SCHEDULE = [80, 50, 40, 30, 25, 20]
+    TARGET_SR      = 0.6
+
+    # [BC-FIX-4] 每轮数据最大容量上限（防止旧数据占比过高）
+    MAX_BUFFER_SIZE = 250000
 
     for rnd, beta in enumerate(BETA_SCHEDULE):
         n_eps = EPS_PER_ROUND[rnd] if rnd < len(EPS_PER_ROUND) else 80
@@ -212,6 +246,11 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         n_new = 0
         n_success = 0
 
+        # [BC-FIX-5] obs_norm update 策略：
+        # Round 0 (β=1.0) 全力更新（专家纯执行，状态分布正确）
+        # Round >=1 只 update 前半部分样本，防止 Actor 偏移带来的异常状态污染 obs_norm
+        update_norm_fraction = 1.0 if rnd == 0 else 0.3
+
         for ep in range(n_eps):
             obs = env.reset()
             current_q = env.data.qpos[:7].copy()
@@ -222,8 +261,11 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
             expert.set_path(planned_path)
 
             ep_success = False
+            step_in_ep = 0
             while True:
-                norm_obs = agent.normalize_obs(obs, update=True)
+                # [BC-FIX-5] 控制 obs_norm 更新比例
+                do_update = (random.random() < update_norm_fraction)
+                norm_obs = agent.normalize_obs(obs, update=do_update)
 
                 # 专家标注当前状态
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
@@ -254,6 +296,7 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 if info.get("is_success"):
                     ep_success = True
                 obs = next_obs
+                step_in_ep += 1
                 if terminated or truncated:
                     break
 
@@ -264,7 +307,18 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         print(f"  收集完成: +{n_new} 样本（总计 {len(all_obs)}）| "
               f"执行成功率: {sr*100:.1f}%")
 
+        # [BC-FIX-4] 缓冲区裁剪：保留最新的 MAX_BUFFER_SIZE 个样本
+        if len(all_obs) > MAX_BUFFER_SIZE:
+            excess = len(all_obs) - MAX_BUFFER_SIZE
+            all_obs = all_obs[excess:]
+            all_dq  = all_dq[excess:]
+            print(f"  缓冲区裁剪至 {MAX_BUFFER_SIZE} 样本")
+
         # ── 训练 ─────────────────────────────────────────────────────────
+        # [BC-FIX-6] 重要：数据收集使用的 obs_norm 可能与当前 obs_norm 不同
+        # 为避免这个问题，我们在训练前用当前最新 obs_norm 重新归一化所有数据
+        # 但由于原始 obs 没保存，这里只能用已归一化的版本
+        # 替代方案：冻结 obs_norm 直到训练稳定
         obs_arr = np.array(all_obs, dtype=np.float32)
         dq_arr  = np.array(all_dq,  dtype=np.float32)
         obs_t = torch.tensor(obs_arr, device=agent.device)
@@ -275,7 +329,8 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
 
         for epoch in range(train_epochs):
             indices = np.random.permutation(n_samples)
-            total_loss = 0.0
+            total_loss_u = 0.0
+            total_loss_dq = 0.0
             n_batches = 0
 
             for start in range(0, n_samples, batch_size):
@@ -284,22 +339,26 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 dq_b  = dq_t[idx]
 
                 if is_ppo:
-                    pred_dq, _, _ = agent.actor.get_action(
-                        obs_b, deterministic=True)
+                    # [BC-FIX-1] 使用新的 bc_forward，主 loss 在 u 空间
+                    bc_loss_u, bc_loss_dq, _ = agent.actor.bc_forward(obs_b, dq_b)
+                    # 总 loss：u 空间主导（0.7），Δq 空间辅助（0.3）
+                    loss = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
+                    total_loss_u  += bc_loss_u.item()
+                    total_loss_dq += bc_loss_dq.item()
                 else:
                     pred_dq = agent.actor(obs_b)
-
-                loss = F.mse_loss(pred_dq, dq_b)
+                    loss = F.mse_loss(pred_dq, dq_b)
+                    total_loss_dq += loss.item()
 
                 bc_optimizer.zero_grad()
                 loss.backward()
-                torch.nn.utils.clip_grad_norm_(agent.actor.parameters(), 1.0)
+                torch.nn.utils.clip_grad_norm_(bc_params, 1.0)
                 bc_optimizer.step()
 
-                total_loss += loss.item()
                 n_batches += 1
 
-            avg_loss = total_loss / max(n_batches, 1)
+            avg_u  = total_loss_u  / max(n_batches, 1)
+            avg_dq = total_loss_dq / max(n_batches, 1)
 
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 with torch.no_grad():
@@ -309,13 +368,26 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                     else:
                         eval_dq = agent.actor(obs_t[:1000])
                     dq_mae = (eval_dq - dq_t[:1000]).abs().mean().item()
-                print(f"    Epoch {epoch+1:3d} | MSE: {avg_loss:.6f} | "
-                      f"MAE: {dq_mae:.4f} rad")
+                if is_ppo:
+                    print(f"    Epoch {epoch+1:3d} | U-MSE: {avg_u:.6f} | "
+                          f"DQ-MSE: {avg_dq:.6f} | MAE: {dq_mae:.4f} rad")
+                else:
+                    print(f"    Epoch {epoch+1:3d} | MSE: {avg_dq:.6f} | "
+                          f"MAE: {dq_mae:.4f} rad")
+
+        # [BC-FIX-7] 每轮训练后，将 log_std 重置到配置初值
+        # 防止 PPO 阶段开始时 log_std 已经被意外改变
+        if is_ppo:
+            with torch.no_grad():
+                init_val = float(agent.config["ppo_agent"].get("log_std_init", -1.0))
+                agent.actor.log_std.data.fill_(init_val)
 
         # ── 评估 actor 独立成功率 ─────────────────────────────────────────
         eval_cfg = copy.deepcopy(config)
         eval_cfg["scene"]["seed"] = 42
         eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
+        # [v3-CURRICULUM] BC 评估也在相同的 bc_n_obstacles 场景下
+        eval_env.set_curriculum_n_obstacles(bc_n_obs)
         eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
         result = evaluate(agent, eval_env, eval_expert,
                           n_episodes=20, deterministic=True, algo=algo)
@@ -373,10 +445,16 @@ def train_ppo(log_dir: str, config: dict):
     # BC 预训练后保存
     save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
 
-    # ── 关闭 BC，切换到纯 PPO ─────────────────────────────────────────────
-    agent.behavior_clone = False
-    agent.bc_coef = 0.0
-    print("[Train-PPO] BC 已关闭，进入纯 PPO fine-tune 阶段")
+    # [BC-FIX-8 v4] BC 软锚衰减策略调整：
+    # 早期（PPO stable 阶段）保持较强 BC 引导，进入课程后快速衰减
+    # 防止 BC 束缚 PPO 继续优化（避免永久平台期）
+    agent.behavior_clone = True
+    agent.bc_coef = float(cfg_ppo.get("bc_coef_final", 0.3))   # 起始软锚 0.3
+    agent.bc_coef_init = agent.bc_coef
+    agent.bc_coef_final = 0.02        # 长期衰减到接近 0
+    agent.bc_anneal_steps = 1_500_000  # 1.5M 步内完成退火
+    print(f"[Train-PPO] BC 软锚点开启 (coef={agent.bc_coef}，"
+          f"退火至 {agent.bc_coef_final} 经过 {agent.bc_anneal_steps} 步) → 进入 PPO 阶段")
 
     # ── Phase 2: 纯 PPO 训练 ─────────────────────────────────────────────
     expert = JointSpaceExpert(config, env.ik_solver)
@@ -391,18 +469,207 @@ def train_ppo(log_dir: str, config: dict):
             "success", "success_rate", "steps",
             "policy_loss", "value_loss", "entropy_loss",
             "approx_kl", "clip_fraction",
+            "curr_n_obs",   # [v3-CURRICULUM] 记录当前课程难度
         ])
 
+    # ── [v5-CURRICULUM] 基于性能的课程调度器 ────────────────────────────────
+    # 核心思想：根据近 N 回合的 reward/SR 动态判定是否推进到下一难度
+    # 优势：
+    #   - 避免固定 timestep 的"过训"（策略已成熟但仍在简单场景）
+    #   - 避免课程过快推进到策略还不能应付的难度
+    #   - 失败回退保护：新难度崩坏时可以降级
+    cur_cfg = config.get("curriculum", {})
+    use_curriculum = cur_cfg.get("enabled", False)
+    max_n_obs      = int(cur_cfg.get("ppo_max_n_obstacles", config["scene"]["n_obstacles"]))
+    ramp_mode      = str(cur_cfg.get("ramp_mode", "performance"))
+    milestones     = cur_cfg.get("milestones", None)
+
+    # 性能触发参数（v5 新增）
+    perf_window    = int(cur_cfg.get("perf_window", 30))        # 近 N 回合滚动窗口
+    perf_sr_thresh = float(cur_cfg.get("perf_sr_threshold", 0.7))   # SR ≥ 70% 可推进
+    perf_reward_thresh = float(cur_cfg.get("perf_reward_threshold", 60.0))  # reward ≥ 60 可推进
+    perf_min_episodes = int(cur_cfg.get("perf_min_episodes_per_level", 100))  # 每个难度至少训练 N 回合
+    perf_regression_tol = float(cur_cfg.get("perf_regression_tol", -30.0))  # 性能跌破则考虑回退
+    perf_hard_cap_steps = int(cur_cfg.get("perf_hard_cap_steps", 600_000))  # 单难度最多停留步数（保险）
+
+    # 课程状态：当前级别、进入该级别的 episode/step、回退计数
+    class CurriculumState:
+        def __init__(self):
+            self.level = 0
+            self.level_entered_episode = 0
+            self.level_entered_step    = 0
+            self.promotions = 0
+            self.demotions  = 0
+    cur_state = CurriculumState()
+
+    # 兼容旧 step/linear 模式参数
+    stable_n_obs   = int(cur_cfg.get("ppo_stable_n_obstacles", 0))
+    stable_until   = int(cur_cfg.get("ppo_stable_timesteps", 500_000))
+    ramp_start     = int(cur_cfg.get("ppo_ramp_start_timesteps", 500_000))
+    ramp_end       = int(cur_cfg.get("ppo_ramp_end_timesteps", 2_000_000))
+    ramp_step_size = int(cur_cfg.get("ramp_step_size", 1))
+
+    def compute_curriculum_n_obs_by_timestep(tstep: int) -> int:
+        """时间触发的课程 (milestone / step / linear 模式)。"""
+        if ramp_mode == "milestone" and milestones is not None:
+            n = 0
+            for thresh, n_val in milestones:
+                if tstep >= thresh:
+                    n = n_val
+            return int(n)
+        if tstep < stable_until:
+            return stable_n_obs
+        if tstep >= ramp_end:
+            return max_n_obs
+        frac = (tstep - ramp_start) / max(ramp_end - ramp_start, 1)
+        frac = max(0.0, min(1.0, frac))
+        if ramp_mode == "linear":
+            n = stable_n_obs + int(round(frac * (max_n_obs - stable_n_obs)))
+        else:  # step
+            n_steps = max(1, (max_n_obs - stable_n_obs) // max(ramp_step_size, 1))
+            step_idx = int(frac * n_steps)
+            n = stable_n_obs + step_idx * ramp_step_size
+            n = min(n, max_n_obs)
+        return int(n)
+
+    def compute_curriculum_by_performance(
+            cur_level: int,
+            recent_sr: float, recent_reward: float,
+            episodes_at_level: int, steps_at_level: int) -> int:
+        """基于性能的课程推进。
+        返回新的 level (≥0, ≤max_n_obs)。
+        规则：
+          1. 若 (SR 达标 AND reward 达标) 且最少 episodes 已达成 → 推进
+          2. 若性能严重衰退（reward < baseline - regression_tol） → 回退（可选）
+          3. 若单级停留步数超过 hard_cap → 强制推进（保险）
+        """
+        # 达到最高难度就不再推进
+        if cur_level >= max_n_obs:
+            return cur_level
+
+        # Hard cap: 单级停留太久强制推进
+        if steps_at_level >= perf_hard_cap_steps:
+            return cur_level + 1
+
+        # 最少 episodes 还没达成
+        if episodes_at_level < perf_min_episodes:
+            return cur_level
+
+        # 性能达标 → 推进
+        if recent_sr >= perf_sr_thresh and recent_reward >= perf_reward_thresh:
+            return cur_level + 1
+
+        # （暂不实现回退，保留 hook）
+        return cur_level
+
+    def compute_curriculum_n_obs(tstep: int, episode: int,
+                                 recent_sr: float = 0.0,
+                                 recent_reward: float = 0.0) -> int:
+        """综合调度：performance 模式优先，其余回退到 timestep 模式。"""
+        if not use_curriculum:
+            return int(config["scene"]["n_obstacles"])
+
+        if ramp_mode == "performance":
+            eps_at_level = episode - cur_state.level_entered_episode
+            steps_at_level = tstep - cur_state.level_entered_step
+            return compute_curriculum_by_performance(
+                cur_state.level, recent_sr, recent_reward,
+                eps_at_level, steps_at_level)
+        else:
+            return compute_curriculum_n_obs_by_timestep(tstep)
+
+    # 初始化当前课程障碍物数
+    current_n_obs = compute_curriculum_n_obs(0, 0, 0.0, 0.0)
+    cur_state.level = current_n_obs
+    env.set_curriculum_n_obstacles(current_n_obs)
+    if use_curriculum:
+        if ramp_mode == "performance":
+            print(f"[Curriculum v5] Phase 2 开始（performance 模式）:")
+            print(f"  触发条件: 近 {perf_window} 回合 SR ≥ {perf_sr_thresh*100:.0f}% "
+                  f"且 avg_reward ≥ {perf_reward_thresh}")
+            print(f"  每级最少 {perf_min_episodes} 回合，hard_cap = {perf_hard_cap_steps} 步")
+            print(f"  最大障碍物数 = {max_n_obs}")
+            print(f"  当前 n_obs = {current_n_obs}")
+        elif ramp_mode == "milestone":
+            print(f"[Curriculum] Phase 2 开始（milestone 模式）:")
+            for thresh, n in (milestones or []):
+                print(f"  t ≥ {thresh:>8d}: n_obs = {n}")
+            print(f"  当前 n_obs = {current_n_obs}")
+        else:
+            print(f"[Curriculum] Phase 2 开始（{ramp_mode} 模式）：n_obs={current_n_obs}")
+        # 验证实际障碍物数
+        _ = env.reset()
+        actual = len(env._obstacles)
+        print(f"[Diag] PPO 主 env 首次 reset 后: config.n_obstacles={env.config['scene']['n_obstacles']}, "
+              f"实际 len(_obstacles)={actual}")
+        if actual != current_n_obs:
+            print(f"[WARN] 实际障碍物数与期望不符！检查 set_curriculum_n_obstacles 是否生效")
+
     stats    = EpisodeStats(window=SMOOTH_WIN)
+    # [v5] 独立的课程学习统计窗口（可能与 SMOOTH_WIN 不同）
+    cur_stats = EpisodeStats(window=perf_window) if use_curriculum else None
     episode  = 0
     total_steps = 0
     best_sr  = 0.0
     t_start  = time.time()
     last_result = agent._last_result
 
+    # [v3-DIAG] 终止原因统计（滚动窗口，每 DIAG_INTERVAL 回合打印一次）
+    from collections import Counter, deque
+    DIAG_WINDOW = 50
+    DIAG_INTERVAL = 20
+    term_history = deque(maxlen=DIAG_WINDOW)
+    last_term_reason = None
+
     print(f"[Train-PPO] 开始纯 PPO 训练，目标总步数 {TOTAL_STEPS}...")
 
     while total_steps < TOTAL_STEPS:
+
+        # [v5-CURRICULUM] 每个 episode 检查是否需要调整难度
+        if use_curriculum and cur_stats is not None:
+            recent_sr = cur_stats.success_rate()
+            recent_reward = cur_stats.mean("reward")
+        else:
+            recent_sr = 0.0
+            recent_reward = 0.0
+
+        new_n_obs = compute_curriculum_n_obs(total_steps, episode, recent_sr, recent_reward)
+
+        if new_n_obs != current_n_obs:
+            env.set_curriculum_n_obstacles(new_n_obs)
+            # 更新课程状态
+            prev_level = cur_state.level
+            cur_state.level = new_n_obs
+            cur_state.level_entered_episode = episode
+            cur_state.level_entered_step    = total_steps
+            if new_n_obs > prev_level:
+                cur_state.promotions += 1
+            else:
+                cur_state.demotions += 1
+            # 清空课程统计窗口（新难度从头开始）
+            if cur_stats is not None:
+                cur_stats = EpisodeStats(window=perf_window)
+
+            # 突出显示课程切换事件
+            print(f"\n{'='*70}")
+            if new_n_obs > prev_level:
+                print(f"  [CURRICULUM PROMOTE] t={total_steps} ep={episode} "
+                      f"SR={recent_sr*100:.0f}% avgR={recent_reward:.1f} "
+                      f"→ n_obstacles: {prev_level} → {new_n_obs}")
+            else:
+                print(f"  [CURRICULUM DEMOTE] t={total_steps} ep={episode} "
+                      f"SR={recent_sr*100:.0f}% avgR={recent_reward:.1f} "
+                      f"→ n_obstacles: {prev_level} → {new_n_obs}")
+            print(f"{'='*70}\n")
+            current_n_obs = new_n_obs
+
+            # 将切换事件也记录到 logger
+            logger.log(episode, {
+                "curriculum/switch_event": float(new_n_obs),
+                "curriculum/switch_total_steps": total_steps,
+                "curriculum/promotions": cur_state.promotions,
+                "curriculum/demotions":  cur_state.demotions,
+            })
 
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
@@ -420,13 +687,24 @@ def train_ppo(log_dir: str, config: dict):
         while not rollout_done:
 
             norm_obs = agent.normalize_obs(obs, update=True)
-            delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
 
-            # BC target 填零（纯 PPO 不用，但 buffer.add 需要占位）
-            bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+            # [BC-FIX-8] 采集专家 BC 目标（作为软锚点的监督信号）
+            current_q = env.data.qpos[:7].copy().astype(np.float32)
+            try:
+                bc_delta_q = expert.compute_delta_q_target(obs, current_q)
+                if np.any(np.isnan(bc_delta_q)):
+                    bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+            except Exception:
+                bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+
+            delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
 
             next_obs, reward, terminated, truncated, info = env.step(delta_q)
             done = terminated or truncated
+
+            # [v3-DIAG] 捕获终止原因
+            if done:
+                last_term_reason = info.get("termination_reason", "unknown")
 
             ep_reward += reward
             ep_steps  += 1
@@ -461,6 +739,13 @@ def train_ppo(log_dir: str, config: dict):
         # ── 回合统计 ──────────────────────────────────────────────────
         stats.update(reward=ep_reward, steps=ep_steps, success=float(ep_success))
         avg_r = stats.mean("reward"); sr = stats.success_rate()
+        # [v5] 更新课程学习统计窗口
+        if cur_stats is not None:
+            cur_stats.update(reward=ep_reward, success=float(ep_success))
+
+        # [v3-DIAG] 记录本回合终止原因（将 "instability:swing=0.15" 截取为 "instability"）
+        reason_key = (last_term_reason or "unknown").split(":")[0]
+        term_history.append(reason_key)
 
         logger.log(episode, {
             "reward/episode":          ep_reward,
@@ -474,16 +759,63 @@ def train_ppo(log_dir: str, config: dict):
             "ppo/approx_kl":           last_result.approx_kl,
             "ppo/clip_fraction":       last_result.clip_fraction,
             "train/total_steps":       total_steps,
+            "curriculum/n_obstacles":  current_n_obs,
+            "train/bc_coef":           agent.bc_coef,
         })
 
+        # [v5] 将课程触发窗口的 SR/reward 也记录（便于监控何时会推进）
+        if cur_stats is not None:
+            cur_sr = cur_stats.success_rate()
+            cur_r  = cur_stats.mean("reward")
+            eps_at_level = episode - cur_state.level_entered_episode
+            steps_at_level = total_steps - cur_state.level_entered_step
+            logger.log(episode, {
+                f"curriculum/window_sr":     cur_sr,
+                f"curriculum/window_reward": cur_r,
+                f"curriculum/eps_at_level":  eps_at_level,
+                f"curriculum/steps_at_level": steps_at_level,
+            })
+
         mark = "✅" if ep_success else "❌"
+        # 单回合日志后附终止原因缩写
+        r_short = reason_key[:12] if reason_key else "?"
+        # [v5] 追加课程触发窗口进度（让用户一眼看到离推进多远）
+        if use_curriculum and cur_stats is not None and current_n_obs < max_n_obs:
+            cur_sr = cur_stats.success_rate()
+            cur_r  = cur_stats.mean("reward")
+            eps_at_level = episode - cur_state.level_entered_episode
+            # 满足度：三个条件中达到了几个
+            cond_sr = cur_sr >= perf_sr_thresh
+            cond_r  = cur_r >= perf_reward_thresh
+            cond_ep = eps_at_level >= perf_min_episodes
+            promote_indicator = f"[{'S' if cond_sr else '-'}{'R' if cond_r else '-'}{'E' if cond_ep else '-'}]"
+        else:
+            promote_indicator = ""
         print(
             f"Ep {episode:4d} {mark} | "
             f"R:{ep_reward:7.2f}(avg:{avg_r:6.2f}) | "
             f"SR:{sr*100:5.1f}% | Steps:{ep_steps:3d} | "
             f"Lp:{last_result.policy_loss:.4f} Lv:{last_result.value_loss:.4f} | "
-            f"total:{total_steps}"
+            f"n_obs:{current_n_obs}{promote_indicator} | term:{r_short} | total:{total_steps}"
         )
+
+        # [v3-DIAG] 每 DIAG_INTERVAL 回合打印终止原因分布 + 实际 env 障碍物数
+        if episode > 0 and episode % DIAG_INTERVAL == 0:
+            cnt = Counter(term_history)
+            total_ep = sum(cnt.values())
+            dist_str = " | ".join(f"{k}={v/total_ep*100:.0f}%"
+                                  for k,v in cnt.most_common())
+            actual_n_obs = len(env._obstacles)
+            # 最近一条完整终止原因（含细节）
+            detail = last_term_reason if last_term_reason else "none"
+            if len(detail) > 60: detail = detail[:60] + "..."
+            print(f"  [Diag] 终止原因分布（最近 {total_ep} 回合）: {dist_str}")
+            print(f"  [Diag] env 实际障碍物数 = {actual_n_obs} (期望 {current_n_obs})"
+                  f" | last detail: {detail}")
+            # 记录到 TB/wandb
+            diag_metrics = {f"diag/term_{k}": v/total_ep for k,v in cnt.items()}
+            diag_metrics["diag/actual_n_obstacles"] = actual_n_obs
+            logger.log(episode, diag_metrics)
 
         with open(log_file, "a", newline="") as f:
             csv.writer(f).writerow([
@@ -492,6 +824,7 @@ def train_ppo(log_dir: str, config: dict):
                 last_result.policy_loss, last_result.value_loss,
                 last_result.entropy_loss,
                 last_result.approx_kl, last_result.clip_fraction,
+                current_n_obs,   # [v3-CURRICULUM]
             ])
 
         if episode > 0 and episode % SAVE_INTERVAL == 0:
@@ -502,6 +835,8 @@ def train_ppo(log_dir: str, config: dict):
             eval_cfg = copy.deepcopy(config)
             eval_cfg["scene"]["seed"] = 42
             eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
+            # [v3-CURRICULUM] eval 使用当前课程阶段的障碍物数
+            eval_env.set_curriculum_n_obstacles(current_n_obs)
             eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
             result = evaluate(agent, eval_env, eval_expert,
                               n_episodes=EVAL_EPS, deterministic=True, algo="ppo")
@@ -509,12 +844,14 @@ def train_ppo(log_dir: str, config: dict):
 
             print(f"  [Eval] SR={result['success_rate']*100:.1f}% | "
                   f"AvgR={result['avg_reward']:.2f} | "
-                  f"AvgSteps={result['avg_steps']:.1f}")
+                  f"AvgSteps={result['avg_steps']:.1f} | "
+                  f"n_obs={current_n_obs}")
 
             logger.log(episode, {
                 "eval/success_rate": result["success_rate"],
                 "eval/avg_reward":   result["avg_reward"],
                 "eval/avg_steps":    result["avg_steps"],
+                "eval/n_obstacles":  current_n_obs,
             })
 
             if result["success_rate"] > best_sr:

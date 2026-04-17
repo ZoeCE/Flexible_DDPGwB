@@ -247,6 +247,7 @@ class CableRobotEnvWithObstacles:
         self._ee_vel_cache       = np.zeros(3)
         self._prev_ee_euler      = np.zeros(3)
         self._ee_euler_vel_cache = np.zeros(3)
+        self._termination_reason = None   # [v3-DIAG] 诊断：记录最近一次 episode 终止原因
  
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
@@ -276,7 +277,19 @@ class CableRobotEnvWithObstacles:
  
     def get_planned_path(self):
         return self._planned_path
- 
+
+    # ── [v3-CURRICULUM] 运行时动态设置障碍物数 ────────────────────────────────
+    def set_curriculum_n_obstacles(self, n: int):
+        """
+        课程学习：运行时修改障碍物数量。
+        注意：state_dim 在 __init__ 时已固定（基于 config 的 n_obstacles，作为上限），
+        实际障碍物数 < state_dim 对应的数时，_get_obs 会用 0 填充。
+        所以 n 必须 ≤ self.n_obstacles（初始化上限）。
+        """
+        n = int(max(0, min(n, self.n_obstacles)))
+        self.config["scene"]["n_obstacles"] = n
+        return n
+
     def close(self):
         if self.viewer is not None:
             try: self.viewer.close()
@@ -469,6 +482,7 @@ class CableRobotEnvWithObstacles:
         self.current_step=0; self.current_wp_idx=0; self.reached_final=False
         self.last_dist=None; self.last_wp_idx=-1; self._wp_just_advanced=False
         self._prev_q=self.data.qpos[:7].copy().astype(np.float32)
+        self._termination_reason = None   # [v3-DIAG] 重置终止原因
  
         ee_init=self._get_ee_pos()
         self._prev_ee_pos=ee_init.copy(); self._ee_vel_cache=np.zeros(3)
@@ -555,106 +569,253 @@ class CableRobotEnvWithObstacles:
         if self.current_step >= self.config["sim"]["max_steps"]:
             if not done:
                 reward += self.config["reward"]["timeout_penalty"]
+                # [v3-DIAG] 没有其他终止原因时标记为 timeout
+                if getattr(self, '_termination_reason', None) is None:
+                    self._termination_reason = "timeout"
             done = True
  
         return obs, reward, done, False, {
             "is_success": success, "current_wp_idx": self.current_wp_idx,
             "reached_final": self.reached_final, "is_collision": is_collision,
+            "termination_reason": getattr(self, '_termination_reason', None),
         }
  
-    # ── _compute_reward ────────────────────────────────────────────────────────
- 
+    # ── _compute_reward (v3 — APF + 强姿态 + 失稳早停 + 奖励裁剪) ─────────────
+
+    @staticmethod
+    def _neg_exp(value, coef, scale):
+        """负指数惩罚：coef * (1 - exp(-value/scale))。
+        value=0 → 0，value→∞ → coef。梯度在 value≈scale 处最陡。"""
+        return coef * (1.0 - np.exp(-value / max(scale, 1e-8)))
+
     def _compute_reward(self, action, current_q, prev_q, obs):
-        reward=0.; done=False; success=False; is_collision=False
-        cfg_rwd=self.config["reward"]
- 
-        payload_xy=obs[4:6]; payload_vxy=obs[6:8]
-        payload_z=self.data.body('prefab').xpos[2]
-        dof_idx=self.model.jnt_dofadr[self.prefab_jnt_id]
-        payload_vz=self.data.qvel[dof_idx+2]
-        pl_vel=float(np.linalg.norm(np.append(payload_vxy,payload_vz)))
-        ee_pos=self._get_ee_pos()
-        ee_xy=ee_pos[:2]; ee_z=float(ee_pos[2])
+        """
+        v3 奖励函数：
+        - 所有连续惩罚用负指数（小偏差近 0，大偏差饱和）
+        - 障碍物使用 APF 排斥势（仅近距离激活，平方增长）
+        - 吊装物姿态惩罚复合形式：线性（小偏差精细）+ 负指数（大偏差饱和）
+        - 失稳早停：摆角/速度/倾角超过阈值时 terminate（避免数据污染）
+        - 单步奖励最终 clip 到 [reward_clip_min, reward_clip_max]
+        """
+        reward = 0.0; done = False; success = False; is_collision = False
+        cfg_rwd   = self.config["reward"]
+        cfg_logic = self.config["step_logic"]
+
+        payload_xy = obs[4:6]; payload_vxy = obs[6:8]
+        payload_z  = self.data.body('prefab').xpos[2]
+        dof_idx    = self.model.jnt_dofadr[self.prefab_jnt_id]
+        payload_vz = self.data.qvel[dof_idx + 2]
+        pl_vel_xyz = np.append(payload_vxy, payload_vz)
+        pl_vel     = float(np.linalg.norm(pl_vel_xyz))
+        ee_pos     = self._get_ee_pos()
+        ee_xy = ee_pos[:2]; ee_z = float(ee_pos[2])
+
+        # 预计算吊装物姿态（多处使用）
+        pl_mat   = self.data.body('prefab').xmat.reshape(3, 3)
+        pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+        pl_roll  = float(pl_euler[0])
+        pl_pitch = float(pl_euler[1])
+        pl_yaw   = float(pl_euler[2])
+        tilt     = float(np.sqrt(pl_roll**2 + pl_pitch**2))
+        abs_yaw  = abs(pl_yaw)
+
+        # 预计算摆角（多处使用）
+        swing_xy = float(np.linalg.norm(ee_xy - payload_xy))
+
+        # 吊装物角速度（从 qvel 读取旋转分量）
+        pl_angvel_xyz = self.data.qvel[dof_idx + 3: dof_idx + 6]
+        pl_angvel_mag = float(np.linalg.norm(pl_angvel_xyz))
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第一部分：失稳早停（优先检查，避免污染数据）
+        # ══════════════════════════════════════════════════════════════════════
+        instab_grace = cfg_logic.get("instability_grace_steps", 30)
+        if cfg_logic.get("instability_check", True) and self.current_step >= instab_grace:
+            unstable = False
+            reason_detail = []
+            if swing_xy  > cfg_logic.get("swing_xy_max", 0.12):
+                unstable = True; reason_detail.append(f"swing={swing_xy:.3f}")
+            if pl_vel    > cfg_logic.get("payload_vel_max", 1.0):
+                unstable = True; reason_detail.append(f"vel={pl_vel:.2f}")
+            if tilt      > cfg_logic.get("payload_tilt_max", 0.6):
+                unstable = True; reason_detail.append(f"tilt={tilt:.2f}")
+            if abs_yaw   > cfg_logic.get("payload_yaw_max", 0.8):
+                unstable = True; reason_detail.append(f"yaw={abs_yaw:.2f}")
+            if unstable:
+                reward = float(cfg_logic.get("instability_penalty", -10.0))
+                self._termination_reason = "instability:" + ",".join(reason_detail)
+                return reward, True, False, False
 
         # 每步固定惩罚
         reward += float(cfg_rwd.get("step_penalty", 0.0))
 
+        # ══════════════════════════════════════════════════════════════════════
+        # 第二部分：连续负指数惩罚
+        # ══════════════════════════════════════════════════════════════════════
+
         # 速度惩罚
-        reward -= float(np.clip(cfg_rwd.get("velocity_penalty_coef",0.01)*pl_vel, 0, 0.5))
+        reward -= self._neg_exp(pl_vel,
+            cfg_rwd.get("velocity_penalty_coef", 0.03),
+            cfg_rwd.get("velocity_penalty_scale", 0.3))
 
         # XY 摆角惩罚
-        swing_xy=float(np.linalg.norm(ee_xy-payload_xy))
-        reward -= cfg_rwd.get("swing_penalty_coef",0.5) * swing_xy
+        reward -= self._neg_exp(swing_xy,
+            cfg_rwd.get("swing_penalty_coef", 0.15),
+            cfg_rwd.get("swing_penalty_scale", 0.03))
 
-        # 垂直度惩罚（摆角近似）
+        # 垂直度惩罚（绳索斜角）
         rope_len = max(ee_z - payload_z, 0.05)
         swing_angle = swing_xy / rope_len
-        reward -= cfg_rwd.get("verticality_penalty_coef", 0.3) * swing_angle
+        reward -= self._neg_exp(swing_angle,
+            cfg_rwd.get("verticality_penalty_coef", 0.1),
+            cfg_rwd.get("verticality_penalty_scale", 0.15))
 
         # 关节平滑惩罚
         dq_change = float(np.linalg.norm(current_q - prev_q))
-        reward -= abs(float(cfg_rwd.get("joint_smooth_penalty",-0.01))) * dq_change
+        reward -= self._neg_exp(dq_change,
+            cfg_rwd.get("joint_smooth_penalty_coef", 0.02),
+            cfg_rwd.get("joint_smooth_penalty_scale", 0.1))
 
-        # ── 吊装物姿态惩罚（新增）──────────────────────────────────────────
-        # 从 MuJoCo 读取 payload 的旋转矩阵 → 欧拉角
-        pl_mat = self.data.body('prefab').xmat.reshape(3,3)
-        pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
-        pl_roll  = float(pl_euler[0])   # 绕 X 倾斜
-        pl_pitch = float(pl_euler[1])   # 绕 Y 倾斜
-        pl_yaw   = float(pl_euler[2])   # 绕 Z 旋转
+        # ══════════════════════════════════════════════════════════════════════
+        # 第三部分：[v3-POSE] 吊装物姿态复合惩罚（加强）
+        # 小偏差：线性惩罚（提供明确梯度，精细控制）
+        # 大偏差：负指数饱和（避免梯度爆炸）
+        # 总惩罚 = linear_coef * value + neg_exp(value, coef, scale)
+        # ══════════════════════════════════════════════════════════════════════
 
-        # yaw 偏差惩罚：吊装物不应绕 z 轴旋转，目标 yaw=0
-        reward -= cfg_rwd.get("payload_yaw_penalty_coef", 0.2) * abs(pl_yaw)
+        # tilt：roll/pitch 偏离垂直
+        reward -= cfg_rwd.get("payload_tilt_linear_coef", 0.5) * tilt
+        reward -= self._neg_exp(tilt,
+            cfg_rwd.get("payload_tilt_penalty_coef", 0.25),
+            cfg_rwd.get("payload_tilt_penalty_scale", 0.08))
 
-        # tilt 偏差惩罚：吊装物应垂直于地面，roll 和 pitch 应接近 0
-        # 注意 prefab 初始姿态可能不是 roll=pitch=0，需看具体模型
-        # 这里用 roll² + pitch² 的平方根作为倾斜角度
-        tilt = float(np.sqrt(pl_roll**2 + pl_pitch**2))
-        reward -= cfg_rwd.get("payload_tilt_penalty_coef", 0.2) * tilt
- 
-        '''q_range=self.q_high-self.q_low; q_margin=self._q_margin_ratio*q_range
-        n_near=sum(1 for j in range(7) if (current_q[j]>self.q_high[j]-q_margin[j] or current_q[j]<self.q_low[j]+q_margin[j]))
-        if n_near>0: reward -= abs(float(cfg_rwd.get("joint_limit_penalty",-0.05)))*n_near'''
- 
-        # 稠密距离进展奖励
+        # yaw：绕 Z 轴旋转
+        reward -= cfg_rwd.get("payload_yaw_linear_coef", 0.4) * abs_yaw
+        reward -= self._neg_exp(abs_yaw,
+            cfg_rwd.get("payload_yaw_penalty_coef", 0.2),
+            cfg_rwd.get("payload_yaw_penalty_scale", 0.12))
+
+        # 角速度：抑制旋转趋势
+        reward -= self._neg_exp(pl_angvel_mag,
+            cfg_rwd.get("payload_angvel_penalty_coef", 0.05),
+            cfg_rwd.get("payload_angvel_penalty_scale", 0.5))
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第四部分：[v3-APF] 障碍物排斥势
+        # U_repel = coef * (1/d - 1/rho_0)^2，仅当 d < rho_0 激活
+        # 远离时严格为 0（不干扰正常路径），靠近时平方急剧增长
+        # ══════════════════════════════════════════════════════════════════════
+        rho_0     = cfg_rwd.get("obstacle_rho_0", 0.08)
+        d_min     = cfg_rwd.get("obstacle_d_min", 0.005)
+        apf_coef  = cfg_rwd.get("obstacle_apf_coef", 0.002)
+        apf_max   = cfg_rwd.get("obstacle_apf_max", 1.5)
+        # 保留弱的负指数背景信号（小系数，起辅助引导作用）
+        bg_coef   = cfg_rwd.get("obstacle_penalty_coef", 0.02)
+        bg_scale  = cfg_rwd.get("obstacle_penalty_scale", 0.05)
+
+        total_apf = 0.0
+        for (ox, oy, orad) in self._obstacles:
+            dist_center = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
+            dist_edge   = dist_center - orad - self.payload_radius
+
+            # APF 排斥势（仅在影响半径内）
+            if dist_edge < rho_0:
+                d_eff   = max(dist_edge, d_min)
+                apf_pen = apf_coef * (1.0 / d_eff - 1.0 / rho_0) ** 2
+                apf_pen = min(apf_pen, apf_max)     # clip 单障碍物惩罚
+                total_apf += apf_pen
+
+            # 背景负指数（很弱，为远距离提供微弱信号）
+            if dist_edge > 0.0:
+                reward -= bg_coef * np.exp(-dist_edge / max(bg_scale, 1e-8))
+
+        reward -= total_apf
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第五部分：稠密进展奖励
+        # ══════════════════════════════════════════════════════════════════════
         if self._planned_path is not None and not self.reached_final:
-            wp=self._planned_path[min(self.current_wp_idx,len(self._planned_path)-1)]
-            curr_dist=float(np.linalg.norm(np.array([payload_xy[0],payload_xy[1],payload_z])-wp))
-            if self.last_dist is None: self.last_dist=curr_dist
-            progress=float(np.clip(self.last_dist-curr_dist,0.,cfg_rwd.get("progress_clip",0.1)))
-            reward += cfg_rwd.get("progress_coef",2.0)*progress
- 
+            wp = self._planned_path[min(self.current_wp_idx, len(self._planned_path) - 1)]
+            curr_dist = float(np.linalg.norm(
+                np.array([payload_xy[0], payload_xy[1], payload_z]) - wp))
+            if self.last_dist is None:
+                self.last_dist = curr_dist
+            progress = float(np.clip(
+                self.last_dist - curr_dist, 0.0,
+                cfg_rwd.get("progress_clip", 0.1)))
+            reward += cfg_rwd.get("progress_coef", 5.0) * progress
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第六部分：终点判定
+        # ══════════════════════════════════════════════════════════════════════
+        # [v4-FIX] 放宽 tilt/yaw 阈值：BC 专家不主动控制吊装物旋转，
+        # 原 0.3rad(~17°) 阈值过严导致成功的 episode 被误判为 near_target
+        # 新阈值：tilt<0.6rad(~34°), yaw<0.6rad(~34°)
+        # 真正的姿态约束通过连续 reward 惩罚 + 失稳早停提供
         if self.reached_final:
-            vel_xy=float(np.linalg.norm(payload_vxy)); dtf=float(np.linalg.norm(payload_xy-self.target_pos))
-            # 成功条件：xy 距离 < 4cm，速度低，姿态接近垂直
-            pl_mat_f = self.data.body('prefab').xmat.reshape(3,3)
-            pl_euler_f = R.from_matrix(pl_mat_f).as_euler('xyz')
-            tilt_f = float(np.sqrt(pl_euler_f[0]**2 + pl_euler_f[1]**2))
-            yaw_f  = abs(float(pl_euler_f[2]))
-            if dtf<0.04 and vel_xy<0.15 and abs(payload_vz)<0.3 and tilt_f<0.3 and yaw_f<0.3:
-                reward+=cfg_rwd.get("success_bonus",10.0); success=True
+            vel_xy = float(np.linalg.norm(payload_vxy))
+            dtf    = float(np.linalg.norm(payload_xy - self.target_pos))
+            if dtf < 0.05 and vel_xy < 0.2 and abs(payload_vz) < 0.4 \
+                    and tilt < 0.6 and abs_yaw < 0.6:
+                reward += cfg_rwd.get("success_bonus", 50.0)
+                success = True
+                self._termination_reason = "success"
             else:
-                reward+=cfg_rwd.get("crash_penalty",-5.0)
-            done=True; return reward,done,success,is_collision
- 
-        for (ox,oy,orad) in self._obstacles:
-            if float(np.linalg.norm(payload_xy-np.array([ox,oy])))<(orad+self.payload_radius):
-                reward+=cfg_rwd.get("collision_penalty",-5.0); done=True; is_collision=True
-                return reward,done,success,is_collision
- 
-        if float(np.linalg.norm(payload_xy))<0.03:
-            reward+=cfg_rwd.get("collision_penalty",-5.0); done=True; is_collision=True
-            return reward,done,success,is_collision
- 
-        cfg_logic=self.config["step_logic"]
-        if payload_z<cfg_logic["crash_z_threshold"] and payload_vz<cfg_logic["crash_vz_threshold"]:
-            reward+=cfg_rwd.get("crash_penalty",-5.0); done=True
-            return reward,done,success,is_collision
- 
-        if getattr(self,'_wp_just_advanced',False):
-            reward+=cfg_rwd.get("waypoint_bonus",0.15); self._wp_just_advanced=False
- 
-        return reward,done,success,is_collision
+                # 到达终点区域但不满足精度要求 → 部分奖励，鼓励继续改进
+                dist_bonus = max(0.0, 1.0 - dtf / 0.1) * 10.0
+                vel_bonus  = max(0.0, 1.0 - vel_xy / 0.3) * 5.0
+                # 姿态加分：鼓励 tilt/yaw 也小（但不作硬要求）
+                pose_bonus = max(0.0, 1.0 - tilt/0.6) * 3.0 + max(0.0, 1.0 - abs_yaw/0.6) * 2.0
+                reward += dist_bonus + vel_bonus + pose_bonus
+                self._termination_reason = (f"near_target:dtf={dtf:.3f},"
+                                            f"vel={vel_xy:.2f},tilt={tilt:.2f},yaw={abs_yaw:.2f}")
+            done = True
+            # 终止奖励不做单步 clip（允许大的 +/- 值）
+            return reward, done, success, is_collision
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第七部分：碰撞检测
+        # ══════════════════════════════════════════════════════════════════════
+        for (ox, oy, orad) in self._obstacles:
+            if float(np.linalg.norm(payload_xy - np.array([ox, oy]))) < \
+                    (orad + self.payload_radius):
+                reward = float(cfg_rwd.get("collision_penalty", -15.0))
+                self._termination_reason = "collision_obstacle"
+                return reward, True, False, True
+
+        # 底座碰撞
+        if float(np.linalg.norm(payload_xy)) < 0.03:
+            reward = float(cfg_rwd.get("collision_penalty", -15.0))
+            self._termination_reason = "collision_base"
+            return reward, True, False, True
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第八部分：Crash 检测（修复版）
+        # ══════════════════════════════════════════════════════════════════════
+        grace_steps = cfg_logic.get("crash_grace_steps", 30)
+        if self.current_step >= grace_steps:
+            if payload_z < cfg_logic["crash_z_threshold"] and \
+                    payload_vz < cfg_logic["crash_vz_threshold"]:
+                reward = float(cfg_rwd.get("crash_penalty", -15.0))
+                self._termination_reason = f"crash:z={payload_z:.3f},vz={payload_vz:.2f}"
+                return reward, True, False, False
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第九部分：航点前进奖励
+        # ══════════════════════════════════════════════════════════════════════
+        if getattr(self, '_wp_just_advanced', False):
+            reward += cfg_rwd.get("waypoint_bonus", 1.0)
+            self._wp_just_advanced = False
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第十部分：[v3] 单步奖励裁剪（防止异常惩罚污染 Critic）
+        # 仅对非终止步 clip；终止步的大额 success/failure 奖励不裁剪
+        # ══════════════════════════════════════════════════════════════════════
+        r_min = cfg_logic.get("reward_clip_min", -2.0)
+        r_max = cfg_logic.get("reward_clip_max",  2.0)
+        reward = float(np.clip(reward, r_min, r_max))
+
+        return reward, done, success, is_collision
  
     # ── _get_obs ───────────────────────────────────────────────────────────────
  

@@ -31,92 +31,38 @@
 # ==============================================================================
 
 # ==============================================================================
-# config.py — 修复版（奖励重设计 + PPO 引导优化）
+# config.py — 修复版 v2（负指数奖励 + 障碍物距离惩罚 + crash 修复）
 #
 # ══════════════════════════════════════════════════════════════════════════════
-# 核心问题分析与修复说明
+# 核心修改说明
 # ══════════════════════════════════════════════════════════════════════════════
 #
-# ── 问题 1：奖励量级失衡（少步数失败优于长步数成功）─────────────────────────
+# [RWD-v2-1] 所有连续惩罚从线性改为负指数形式
+#   旧版：reward -= coef * value（线性增长，对大偏差缺乏敏感度）
+#   新版：reward -= coef * (1 - exp(-value/scale))
+#   优势：
+#     a) 小偏差时惩罚近乎为零，不会给正常运行的策略施加不必要的梯度干扰
+#     b) 大偏差时惩罚饱和，避免极端惩罚导致 Critic 崩溃
+#     c) 过渡区梯度最陡，提供最有效的纠正信号
 #
-#   旧版量化（旧 config）：
-#     碰撞(10步):    −10×0.005 − 3.0 = −3.05
-#     超时(200步):   −200×0.005 − 1.0 = −2.0     ← 超时比碰撞更"优"！
-#     成功(200步):   −200×0.005 + 50×0.1 + 3.0 = +7.0
-#     成功(140步):   −140×0.005 + 35×0.1 + 3.0 = +6.8
+# [RWD-v2-2] 新增障碍物距离负指数惩罚
+#   每步计算 payload 到每个障碍物的距离，离障碍物越近扣分越多
+#   使用 exp(-dist/scale) 形式，远离时快速衰减到 0，不影响正常路径
+#   scale 参数设为障碍物半径+payload半径的 2 倍，保证在接近碰撞距离时惩罚显著
 #
-#   问题根源：
-#     a) step_penalty=−0.005 × 200步 = −1.0，量级相对于终止奖励可忽略不计，
-#        但在 Critic 早期训练时（V(s)初始化接近0）会产生系统性偏差：
-#        短 episode 的 return 估计更稳定，长 episode 的 credit assignment 难度大。
-#        Critic 倾向于给"快速终止"状态估计更高的 V（因为方差更小）。
-#     b) waypoint_bonus=0.1 × 50点 = +5.0，占总成功奖励的56%。
-#        但失败时只差 3.05（碰撞），与成功的 +7.0 差距仅 10。
-#        Critic 的 bootstrapping 误差在这个量级内，policy gradient 信号很弱。
-#     c) 最严重：progress_coef=2.0 在代码中有但实际未被 _compute_reward 调用
-#        （只有 waypoint_bonus 在奖励中，progress 没有稠密信号）。
-#        Agent 在航点之间没有任何正向反馈，只能靠稀疏的 waypoint_bonus 引导。
+# [RWD-v2-3] 航点奖励和终点奖励大幅提升
+#   旧版：waypoint_bonus=0.2, success_bonus=10.0
+#   问题：300步 × 累积惩罚 ≈ -60~-90，成功奖励 10 + 50×0.2 = 20 完全无法抵消
+#   修复：success_bonus=50.0, waypoint_bonus=1.0
+#   成功总奖励：50 + 50×1.0 + progress ≈ 100+，远超累积惩罚
 #
-#   修复策略：
-#     [RWD-1] 拉大成功与失败的绝对差距：success_bonus = 10.0（上调×3.3）
-#     [RWD-2] 统一所有失败惩罚 = −5.0（碰撞/超时/坠毁一视同仁）
-#             避免 Agent 学到"超时比碰撞好，所以拖时间"的错误策略
-#     [RWD-3] 增加稠密距离奖励（势能函数），填补航点间的空洞
-#             progress_reward = clip(dist_prev - dist_curr, 0, 0.05) × 1.0
-#             只奖励正向进展（靠近目标），不惩罚停滞，避免早期抖动时产生大量负奖励
-#     [RWD-4] 去除 step_penalty（设为 0），理由：
-#             step_penalty 本意是鼓励快速完成，但在 BC 引导阶段，
-#             Agent 的策略还很不稳定，step_penalty 只会让 Critic 倾向于估计
-#             "快死比慢死好"，破坏早期学习信号的一致性
-#     [RWD-5] waypoint_bonus 上调到 0.15，总计 50×0.15 = 7.5，
-#             与 success_bonus=10 形成合理的过程引导梯度
-#
-#   修复后量化（新 config）：
-#     碰撞(10步):    0 + 0×进展 − 5.0 = −5.0
-#     超时(200步):   0 + dist_progress − 5.0 ≈ −5.0 + progress
-#     成功(200步):   50×0.15 + 10.0 + dist_progress = +17.5+
-#     成功(140步):   35×0.15 + 10.0 + dist_progress = +15.25+
-#     差距：成功 vs 失败 = 20+，而旧版仅 ~10
-#
-# ── 问题 2：PPO 引导失效（BC 不能有效引导初期策略）────────────────────────
-#
-#   [BC-1] bc_coef_init=1.0 太低
-#     训练初期：PPO total_loss = policy_loss + 0.5*value_loss + 0.005*entropy - 1.0*bc_loss
-#     policy_loss 和 value_loss 在第一步就可以是 ±1~5 的量级，
-#     而 bc_loss（MSE）初始约 0.5~2.0 rad²。
-#     1.0×bc_loss 完全被其他 loss 项淹没，BC 引导失效。
-#     修复：bc_coef_init = 5.0（大幅提高初期 BC 权重，让策略快速逼近专家）
-#
-#   [BC-2] bc_anneal_steps=500000 退火太快
-#     500000 steps / (2048 steps/rollout) = 244 次更新 ≈ 仅约 1500 回合
-#     在这么短时间内 BC 就退化到 5% 权重，而 RL 还没有足够的经验。
-#     修复：bc_anneal_steps = 2000000（更长的 BC 引导期）
-#
-#   [BC-3] entropy_coef=0.005 太低（7D 关节角空间）
-#     7D 高斯策略的熵 = 7×(0.5×log(2πe×σ²))，当 σ=0.5 时约 7×1.42 = 9.9
-#     entropy_coef=0.005 × 9.9 = 0.05，几乎不起作用
-#     在 BC 引导阶段，entropy 正则可以防止策略坍缩到单一输出
-#     修复：entropy_coef = 0.01（轻微增大）
-#
-#   [BC-4] n_steps=2048 每次 rollout 太长
-#     200步/回合 → 2048步 = 10个完整回合才触发一次更新
-#     早期失败的回合（10步碰撞）大量混入 buffer，造成 return 估计偏低
-#     建议：n_steps=1024（5个回合），更频繁地更新策略
-#
-#   [BC-5] target_kl=0.02 早停太严格
-#     7D 高斯策略的理论 KL 上限 >> 0.02，这会导致每次更新只能走非常小的步
-#     导致 BC 引导的第一次更新就因为 KL 过大而停止，策略几乎不动
-#     修复：target_kl = 0.05（适当放宽）
-#
-# ── 问题 3：训练循环中 expert reset 与 env reset 时序 ───────────────────────
-#
-#   [LOOP-1] PPOlearn.py 中：
-#     obs = env.reset()
-#     expert.reset(obs, current_q)   ← current_q 从 env.data.qpos[:7] 读取
-#   但 env.reset() 返回 obs 后，env 内部已经完成物理预热（warmup_steps=50）
-#   这期间 action_queue 用 init_q 填充，first_obs 中的 ee_pos/vel 是准确的。
-#   expert.reset(obs, current_q, env=env) 传入 env 让其直接读取精确 EE 位置。
-#   已在 controller.py FIX-C4 中处理，PPOlearn.py 调用时需传 env 参数。
+# [RWD-v2-4] crash 判定修复
+#   旧版 crash 检测在 payload 初始化位置（z=0.1）就会触发（crash_z=0.05, vz<-0.3）
+#   因为绳索初始稳定化阶段 payload 可能有微小下降速度
+#   修复：
+#     a) 增加 grace period（前 N 步不检测 crash）
+#     b) 同时检查 z 和 vz 必须同时满足条件
+#     c) crash_z_threshold 进一步降低，防止与正常下降阶段冲突
 #
 # ══════════════════════════════════════════════════════════════════════════════
 
@@ -164,7 +110,7 @@ DEFAULT_CONFIG = {
     # 4. 场景生成
     # ==========================================================================
     "scene": {
-        "n_obstacles":        0,            # [FIX] 先用 0 障碍物验证流程
+        "n_obstacles":        5,            # 0→5 升级任务难度
         "radius_range":       (0.006, 0.015),
         "path_width":         1.0,
         "obstacle_z_center":  0.15,
@@ -194,75 +140,128 @@ DEFAULT_CONFIG = {
     "step_logic": {
         "look_ahead_dist":    0.25,
         "out_of_bounds_dist": 2.0,
-        "crash_z_threshold":  0.05,      # 0.15→0.05 必须低于 target_z_descent
-        "crash_vz_threshold": -0.3,      # -0.05→-0.3 放宽下降速度限制
+        "crash_z_threshold":  0.03,      # [RWD-v2-4] 0.05→0.03 进一步降低
+        "crash_vz_threshold": -0.5,      # [RWD-v2-4] -0.3→-0.5 更宽松
+        "crash_grace_steps":  30,        # [RWD-v2-4] 新增：前30步不检测crash
+
+        # ── [v3-STABILITY v2] 失稳早停阈值（进一步放宽）─────────────────────
+        # 从训练日志发现：tilt 频繁达 1.0-1.8 rad (57°-103°) 仍然 return+8
+        # 说明：BC 策略本身不控制 tilt，绳索摆动下 tilt 自然漂移到很大值
+        # 但即使 tilt=1.0 也不代表"真失稳"——物理上还能继续推进
+        # 所以阈值再放宽：tilt 0.8→1.2, yaw 1.2→1.6, swing_xy 0.2→0.25
+        "instability_check":     True,
+        "instability_grace_steps": 50,
+        "swing_xy_max":          0.25,      # 0.20→0.25m (绳长 0.5m 对应 ~30°)
+        "payload_vel_max":       2.0,       # 1.5→2.0 m/s
+        "payload_tilt_max":      1.2,       # 0.8→1.2 rad (~69°)
+        "payload_yaw_max":       1.6,       # 1.2→1.6 rad (~92°)
+        "instability_penalty":   -10.0,
+
+        # 单步奖励裁剪范围（放宽：原 [-2,+2] 过紧，丢失姿态差异信号）
+        "reward_clip_min":       -5.0,      # -2→-5
+        "reward_clip_max":        5.0,      # +2→+5
     },
 
     # ==========================================================================
-    # 7. 奖励函数系数（重设计版）
+    # 7. 奖励函数系数（v3 APF + 强姿态约束）
     #
     # 设计原则：
-    #   成功 reward 上界 ≈ +17.5（success_bonus + waypoints + progress）
-    #   失败 reward 上界 ≈ −5.0（任何终止惩罚统一量级）
-    #   差距 ≈ 22.5 >> Critic 的 bootstrapping 误差，信号清晰
+    #   1. 大部分连续惩罚用负指数（小偏差时惩罚≈0，大偏差时饱和）
+    #   2. 障碍物用 APF 排斥势（近距离时二次增长，远距离严格为 0）
+    #   3. 吊装物姿态（tilt + yaw）惩罚大幅加强（用户核心需求）
+    #   4. 每步奖励整体 clip 到 [-2, +2]，防止异常样本污染 Critic
     #
-    # 量化验证：
-    #   碰撞(10步):   0 + 0 − 5 = −5.0
-    #   超时(200步):  0 + 少量progress − 5 ≈ −4 ~ −5
-    #   成功(200步):  50×0.15 + 10 + progress ≈ +17.5
-    #   成功(140步):  35×0.15 + 10 + progress ≈ +15.3
-    #   → 成功与失败差距 ~22.5，明确可学习
+    # 量化估计（正常运行）：
+    #   每步负向项合计约 -0.1 ~ -0.3
+    #   每步进展奖励 +0.0 ~ +0.5
+    #   净单步 ≈ -0.1 ~ +0.3
+    #   300步累积 ≈ -30 ~ +90
+    #   成功加成：+50（success_bonus）+ 50×1.0（waypoints）= 100
+    #   成功总 return ≈ 100+
+    #   失败总 return ≈ -10 ~ -30（含 -10~-20 的终止惩罚）
     # ==========================================================================
     "reward": {
         # ── 终止奖励 ──────────────────────────────────────────────────────────
-        # [RWD-1] 大幅提高成功奖励，拉开与失败的绝对差距
-        "success_bonus":          10.0,   # 旧: 3.0 → 新: 10.0
+        "success_bonus":          50.0,
+        "timeout_penalty":        -10.0,   # -20→-10 配合 reward_clip 避免极端值
+        "collision_penalty":      -15.0,
+        "out_of_bounds_penalty":  -15.0,
+        "crash_penalty":          -15.0,
 
-        # [RWD-2] 统一失败惩罚量级，消除"超时比碰撞好"的错误激励
-        "timeout_penalty":        -5.0,   # 旧: -1.0 → 新: -5.0
-        "collision_penalty":      -5.0,   # 旧: -3.0 → 新: -5.0
-        "out_of_bounds_penalty":  -5.0,   # 旧: -3.0 → 新: -5.0
-        "crash_penalty":          -5.0,   # 旧: -3.0 → 新: -5.0
-
-        # ── 稠密进展奖励（新增，填补航点间空洞）─────────────────────────────
-        # [RWD-3] 势能函数：每步向目标靠近时给予正向奖励
-        # 只奖励进展（靠近），不惩罚停滞，避免抖动时产生连续负奖励
-        # 距离进展 = max(0, dist_prev - dist_now) × progress_coef
-        # 单步最大 ≈ EE速度×dt = 0.5×0.1 = 0.05m，×2.0 = 0.1
-        "progress_coef":          2.0,    # 保持不变
-        "progress_clip":          0.1,    # 单步进展奖励上限（防异常大步长）
+        # ── 稠密进展奖励 ─────────────────────────────────────────────────────
+        "progress_coef":          5.0,
+        "progress_clip":          0.1,
 
         # ── 里程碑奖励 ────────────────────────────────────────────────────────
-        # [RWD-5] waypoint_bonus 上调，50点 × 0.15 = 7.5（占成功奖励的43%）
-        "waypoint_bonus":         0.2,   # 旧: 0.1 → 新: 0.15
+        "waypoint_bonus":         1.0,
 
-        # ── 连续性惩罚（每步）────────────────────────────────────────────────
-        # [RWD-4] 去除 step_penalty（设为 0）
-        # 理由：BC 引导阶段 Agent 策略不稳定，step_penalty 使 Critic 倾向于
-        # 估计"快死比慢死好"，破坏早期学习信号一致性
-        "step_penalty":           0.0,    # 旧: -0.005 → 新: 0.0
+        # ── 每步惩罚 ─────────────────────────────────────────────────────────
+        "step_penalty":           0.0,
 
-        # 速度惩罚保留（防止绳子甩动）
-        "velocity_penalty_coef":  0.005,   # 0.003→0.01 加大速度惩罚
+        # ── 负指数连续惩罚参数 ───────────────────────────────────────────────
 
-        # ── 关节空间惩罚 ──────────────────────────────────────────────────────
-        # 关节平滑惩罚：惩罚相邻步 delta_q 的变化量（二阶导数，防抖动）
-        "joint_smooth_penalty":  -0.005,   # -0.001→-0.01 提高 10 倍
-        # 关节极限惩罚
+        # 速度惩罚（负指数，保持弱）
+        "velocity_penalty_coef":  0.03,
+        "velocity_penalty_scale": 0.3,
+
+        # XY 摆角惩罚（负指数）
+        "swing_penalty_coef":     0.15,
+        "swing_penalty_scale":    0.03,
+
+        # 垂直度惩罚（负指数）
+        "verticality_penalty_coef": 0.1,
+        "verticality_penalty_scale": 0.15,
+
+        # 关节平滑惩罚（负指数）
+        "joint_smooth_penalty_coef":  0.02,
+        "joint_smooth_penalty_scale": 0.1,
+
+        # ── [v3-POSE v2] 吊装物姿态惩罚（v4 再次调整）────────────────────────
+        # 发现问题：v3 的系数过大（tilt_linear=0.5 + tilt_exp=0.25 → yaw=0.7 时惩罚 0.48/step）
+        # 与 BC 策略行为冲突（BC 不主动控制 yaw/tilt）→ PPO 放弃 BC 策略
+        # v4 修正：
+        # - 完全去除 linear 项（避免无上限累积）
+        # - 指数项系数降低 3-5 倍
+        # - scale 放宽，让小偏差几乎无惩罚
+        # - 真正的姿态约束靠终点判定 + 失稳早停
+        "payload_tilt_penalty_coef":     0.08,    # 0.25→0.08 (3×降)
+        "payload_tilt_penalty_scale":    0.15,    # 0.08→0.15 scale 放宽
+        "payload_tilt_linear_coef":      0.0,     # 0.5→0.0 去除线性项
+
+        "payload_yaw_penalty_coef":      0.06,    # 0.20→0.06 (3×降)
+        "payload_yaw_penalty_scale":     0.3,     # 0.12→0.3 scale 放宽
+        "payload_yaw_linear_coef":       0.0,     # 0.4→0.0 去除线性项
+
+        # 角速度惩罚（抑制旋转趋势）— 降低
+        "payload_angvel_penalty_coef":   0.02,    # 0.05→0.02
+        "payload_angvel_penalty_scale":  0.8,     # 0.5→0.8 scale 放宽
+
+        # ── [v3-APF] 障碍物 APF 排斥势（替代原负指数）────────────────────────
+        # APF 形式：U_repel = k * (1/d - 1/rho_0)^2，d < rho_0 时激活
+        # 远离障碍物时严格为 0（不干扰正常路径）
+        # 靠近时平方增长，梯度越近越强
+        #
+        # 校准曲线（coef=3e-4, rho_0=0.08, apf_max=1.0）：
+        #   d=0.07m → -0.001  (几乎无惩罚，不干扰路径)
+        #   d=0.05m → -0.017  (轻微提示)
+        #   d=0.04m → -0.047
+        #   d=0.03m → -0.130  (明显警告)
+        #   d=0.02m → -0.422  (强避障信号)
+        #   d=0.015m → -0.880
+        #   d≤0.01m → -1.000  (饱和)
+        # 临界区梯度 (0.02m→0.015m): ~0.92/cm，远超一般单步奖励变化
+        "obstacle_rho_0":           0.08,   # 影响半径 (m)，d > rho_0 无惩罚
+        "obstacle_d_min":           0.005,  # 最小距离下限，防止 1/d 爆炸 (m)
+        "obstacle_apf_coef":        3.0e-4, # APF 系数（重新校准，避免惩罚过大）
+        "obstacle_apf_max":         1.0,    # 单障碍物单步最大惩罚（从 1.5 → 1.0）
+        # 旧版负指数参数保留为弱背景信号（系数大幅降低）
+        "obstacle_penalty_coef":    0.02,   # 从 0.15 降到 0.02
+        "obstacle_penalty_scale":   0.05,
+
+        # ── 关节极限惩罚（保留但不启用） ──────────────────────────────────────
         "joint_limit_penalty":   -0.05,
         "joint_limit_margin":     0.1,
-
-        # ── 摆角惩罚 ──────────────────────────────────────────────────────────
-        # XY 摆角：ee_xy 与 payload_xy 的距离
-        "swing_penalty_coef":     0.5,    # 0.01→0.5 提高 50 倍
-        # 垂直度惩罚：ee_z 与 payload_z 差值偏离绳长的程度（新增）
-        "verticality_penalty_coef": 0.3,  # 惩罚绳子不垂直
-
-        # ── 吊装物姿态惩罚（新增）──────────────────────────────────────────
-        # yaw 偏差：吊装物不应绕 Z 轴旋转，目标 yaw=0
-        "payload_yaw_penalty_coef":  0.2,
-        # tilt 偏差：吊装物应垂直于地面，roll+pitch 应接近 0
-        "payload_tilt_penalty_coef": 0.2,
+        "joint_smooth_penalty":  -0.005,
     },
 
     # ==========================================================================
@@ -345,41 +344,77 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 14. PPO Agent 超参数（修复版）
+    # 14. PPO Agent 超参数（v4 突破平台期版）
     # ==========================================================================
     "ppo_agent": {
         # ── 网络结构 ──────────────────────────────────────────────────────────
         "hidden_dim":            256,
         "n_layers":              2,
-    
-        "lr_actor":              5e-5,     # 1e-4→5e-5 更保守，保护预训练策略
+
+        "lr_actor":              1e-4,     # 5e-5→1e-4 稍加速 actor 学习
         "lr_critic":             3e-4,
         "gamma":                 0.99,
         "gae_lambda":            0.95,
-        "clip_eps":              0.1,      # 0.2→0.1 更窄的信赖域防止策略跳变
+        "clip_eps":              0.15,     # 0.1→0.15 略放宽信赖域（clip_fraction 上升信号）
         "value_loss_coef":       0.5,
-        "entropy_coef":          0.001,    # 0.005→0.001 几乎关闭 entropy 正则
+        "entropy_coef":          0.003,    # 0.0005→0.003 轻微鼓励探索突破平台
         "max_grad_norm":         0.5,
-    
+
         "n_steps":               2048,
         "n_epochs":              4,
         "batch_size":            256,
         "normalize_advantages":  True,
-    
+
         "behavior_clone":        True,
-        "bc_coef_init":          5.0,
-        "bc_coef_final":         0.1,
-        "bc_anneal_steps":       2000000,
+        "bc_coef_init":          10.0,
+        "bc_coef_final":         0.3,     # PPO 起始软锚（代码中进一步衰减到 0.02）
+        "bc_anneal_steps":       1_500_000,
         "bc_loss_type":          "mse",
-    
+
         "use_obs_norm":          True,
         "obs_norm_clip":         10.0,
-    
-        "log_std_init":         -2.0,     # -1.5→-2.0 σ≈0.135，探索 ±0.02 rad/step
-        "log_std_min":          -5.0,     # -4.0→-5.0 允许 std 衰减到更小
-        "log_std_max":          -0.5,     # 0.0→-0.5 禁止 std 增大
-    
-        "target_kl":             0.02,    # 0.03→0.02
+
+        # [v4] log_std：初始稍大，允许策略自主探索，但限制下限防过早收敛
+        "log_std_init":         -2.5,     # -3.0→-2.5 (σ: 0.05→0.082)
+        "log_std_min":          -4.0,     # -4.5→-4.0 (防止探索完全消失)
+        "log_std_max":          -1.5,     # -1.0→-1.5 (限制噪声上限)
+
+        "target_kl":             0.03,    # 0.02→0.03 略放宽早停
+    },
+
+    # ==========================================================================
+    # 14b. [v5-PERFORMANCE] 课程学习配置（性能触发）
+    # ==========================================================================
+    # v5 改为基于性能的动态课程：根据近 N 回合的 SR/reward 决定是否推进
+    # 优势：策略成熟后自动进入下一难度，不依赖固定 timestep
+    # 保留 milestone/step/linear 作为后备触发方式
+    # ==========================================================================
+    "curriculum": {
+        "enabled":                    True,
+        "bc_n_obstacles":             0,
+        # ── 性能触发参数（主模式）──
+        "ramp_mode":                  "performance",  # 改为 performance
+        "perf_window":                30,       # 近 30 回合的滚动统计
+        "perf_sr_threshold":          0.7,      # SR ≥ 70% 可推进
+        "perf_reward_threshold":      60.0,     # avg_reward ≥ 60 可推进
+        "perf_min_episodes_per_level": 100,     # 每个难度至少训 100 回合
+        "perf_regression_tol":       -30.0,     # 回退阈值（保留 hook）
+        "perf_hard_cap_steps":       600_000,   # 单级停留超过此步数强制推进
+        # ── 时间触发参数（备用）──
+        "milestones": [
+            (0,          0),
+            (400_000,    1),
+            (700_000,    2),
+            (1_100_000,  3),
+            (1_500_000,  4),
+            (2_000_000,  5),
+        ],
+        "ppo_max_n_obstacles":        5,
+        "ppo_stable_n_obstacles":     0,
+        "ppo_stable_timesteps":       400_000,
+        "ppo_ramp_start_timesteps":   400_000,
+        "ppo_ramp_end_timesteps":     2_000_000,
+        "ramp_step_size":             1,
     },
 
     # ==========================================================================
@@ -401,14 +436,6 @@ DEFAULT_CONFIG = {
         "target_q_clip":        30.0,
         "behavior_clone":       True,
         "bc_alpha":             2.5,
-        # ── [FIX-EPS] epsilon 调度重设计 ──────────────────────────────────
-        # 旧版：epsilon_delta=3e-7，8000回合仅从1.0降到0.77，actor几乎无执行机会
-        # 新版：分阶段衰减
-        #   阶段1（0~200回合）：纯专家 warmup，epsilon=1.0（由 warmup_episodes 控制）
-        #   阶段2（200~2000回合）：epsilon 从1.0快速降到0.3，让 actor 逐渐接管
-        #   阶段3（2000+回合）：epsilon 0.3→0.05，actor 主导但保留少量专家纠偏
-        # 实现：epsilon_delta=5e-6（每步），~200步/回合 × 1800回合 ≈ 360k步
-        #       1.0 - 360k × 5e-6 = 0.2
         "epsilon_init":         1.0,
         "epsilon_min":          0.05,
         "epsilon_delta":        5e-6,
@@ -423,11 +450,7 @@ DEFAULT_CONFIG = {
     "train": {
         "n_episodes":            8000,
         "total_timesteps":       5_000_000,
-        # [FIX-WU] 缩短 warmup：100回合纯专家足以填充 buffer，但不需要更多
-        # warmup 期间 epsilon 强制=1.0，actor 完全不执行
         "warmup_episodes":       50,
-        # [FIX-EN] 探索噪声适度增大：0.05→0.1
-        # 原来太小，actor 自主执行时几乎无探索，容易陷入局部最优
         "explore_noise":         0.1,
         "min_buffer_to_train":   2048,
         "grad_updates_per_step": 1,
@@ -445,8 +468,8 @@ DEFAULT_CONFIG = {
     "test": {
         "n_episodes":         20,
         "render":             False,
-        "n_obstacles":        0,      # 与 scene.n_obstacles 保持一致
-        "obstacle_seed":      42,
+        "n_obstacles":        5,      # 与 scene.n_obstacles 保持一致
+        "obstacle_seed":      4,
         "save_paths":         False,
         "save_paths_dir":     "test_paths",
         "ckpt_path":          None,
@@ -457,9 +480,9 @@ DEFAULT_CONFIG = {
     # 18. BC 预训练参数（Phase 1）
     # ==========================================================================
     "bc_pretrain": {
-        "n_episodes":   300,     # 用专家跑 300 回合收集数据（~5万样本）
-        "n_epochs":     100,     # 监督训练 100 个 epoch（delta_q 空间需要更多迭代）
-        "lr":           3e-4,    # BC 学习率（适中，避免过拟合）
+        "n_episodes":   500,     # 300→500 更多数据覆盖不同障碍物布局
+        "n_epochs":     100,
+        "lr":           3e-4,
         "batch_size":   256,
     },
 }
