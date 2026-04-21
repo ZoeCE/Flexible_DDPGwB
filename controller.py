@@ -98,12 +98,12 @@ class NMPCController4D:
 
         cost = 0; constraints = []
 
-        Q_pos       = np.array([25.0, 25.0, 40.0, 5.0])
+        Q_pos       = np.array([500.0, 500.0, 40.0, 5.0])
         Q_swing     = np.array([500.0, 500.0])
-        Q_swing_vel = 80.0
-        Q_vel       = 4.0
-        R_acc       = np.array([0.05, 0.05, 0.15, 0.3])
-        R_jerk      = 0.02
+        Q_swing_vel = 200.0
+        Q_vel       = 12.0
+        R_acc       = np.array([0.03, 0.03, 0.15, 0.3])
+        R_jerk      = 0.15
 
         constraints.append(X[:, 0] - X_init)
         mocap_target_z = P_ref[2] + self.L
@@ -444,14 +444,14 @@ class JointSpaceExpert:
         self._last_q     = None
 
         # [OPT-2][OPT-3] 速度限幅
-        self._v_max_xy_normal  = 0.4
-        self._v_max_z_normal   = 0.25
-        self._v_max_xy_descent = 0.1
-        self._v_max_z_descent  = 0.10
+        self._v_max_xy_normal  = 0.1
+        self._v_max_z_normal   = 0.05
+        self._v_max_xy_descent = 0.01
+        self._v_max_z_descent  = 0.003
 
         # [OPT-4] 软锚定系数
-        self._anchor_alpha_normal  = 0.30
-        self._anchor_alpha_descent = 0.1
+        self._anchor_alpha_normal  = 0.2
+        self._anchor_alpha_descent = 0.2
 
     def reset(self, env_obs, init_q, env=None):
         if env is not None:

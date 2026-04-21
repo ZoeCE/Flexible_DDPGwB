@@ -344,6 +344,36 @@ class PPOActor(nn.Module):
         entropy  = dist.entropy().sum(-1)
         return log_prob, entropy
 
+    # ==========================================================================
+    # [BC-FIX-1] BC 专用前向：在 u 空间（tanh 前）做 BC，避免 tanh 饱和
+    # ==========================================================================
+    def bc_forward(self, s, delta_q_target):
+        """
+        BC 专用前向，返回 (bc_loss_u, bc_loss_dq, delta_q_pred)。
+
+        核心思想：不在 Δq 空间做 MSE（会导致 tanh 饱和，梯度消失），
+        而是在 u 空间（tanh 前的线性空间）做 MSE。
+        专家的 Δq_target → atanh(Δq_target/dq_max) = u_target
+        Actor 的 mean_raw 也是 u 空间的值
+        MSE(mean_raw, u_target) 梯度对 mean_head 参数畅通无阻。
+
+        额外：保留一个 Δq 空间的辅助 loss，用于监控或微调。
+        """
+        mean_raw, std = self._dist(s)  # mean_raw 是 u 空间的值
+
+        # 将专家 Δq 映射到 u 空间（atanh）
+        u_tanh_target = (delta_q_target / (self.dq_max + 1e-8)).clamp(-0.999, 0.999)
+        u_target      = torch.atanh(u_tanh_target)
+
+        # u 空间 MSE（主 BC loss，梯度健康）
+        bc_loss_u  = F.mse_loss(mean_raw, u_target)
+
+        # Δq 空间 MSE（辅助 loss，用于直接对齐输出）
+        delta_q_pred = torch.tanh(mean_raw) * self.dq_max
+        bc_loss_dq   = F.mse_loss(delta_q_pred, delta_q_target)
+
+        return bc_loss_u, bc_loss_dq, delta_q_pred
+
 
 # ==============================================================================
 # PPO Critic
@@ -593,13 +623,11 @@ class PPOAgent:
                 # Entropy
                 entropy_loss = -entropy.mean()
 
-                # BC Loss（Δq_actor vs Δq_expert）— 此处仅用于日志，梯度由下方 Actor 更新块处理
+                # BC Loss 占位（仅用于日志显示 rollout 样本上的 BC 误差）
                 if self.behavior_clone and self.bc_coef > 0:
                     with torch.no_grad():
-                        actor_dq_info, _, _ = self.actor.get_action(obs_b, deterministic=False)
-                        bc_loss = (F.mse_loss(actor_dq_info, bc_b)
-                                   if self.bc_loss_type == "mse"
-                                   else F.smooth_l1_loss(actor_dq_info, bc_b))
+                        _, bc_loss_dq_mon, _ = self.actor.bc_forward(obs_b, bc_b)
+                        bc_loss = bc_loss_dq_mon
                 else:
                     bc_loss = torch.zeros(1, device=self.device)
 
@@ -612,8 +640,6 @@ class PPOAgent:
                 self.opt_critic.step()
 
                 # Actor 更新（重新前向，因为 Critic 已更新但 Actor 参数未变）
-                # [FIX-A1] 获取 Actor 当前 deterministic 输出，用于 BC loss
-                actor_dq2, _, _ = self.actor.get_action(obs_b, deterministic=True)
                 # 重新计算 log_prob 以匹配已执行动作（用于 PPO ratio）
                 new_lp2_eval, entropy2_eval = self.actor.evaluate_actions(obs_b, dq_b)
                 ratio2       = (new_lp2_eval - old_lp_b).exp()
@@ -623,10 +649,10 @@ class PPOAgent:
                 entropy_loss2 = -entropy2_eval.mean()
 
                 if self.behavior_clone and self.bc_coef > 0:
-                    # [FIX-A1] BC loss 用 Actor 当前输出 vs 专家目标（有梯度回传到 Actor）
-                    bc_loss2 = (F.mse_loss(actor_dq2, bc_b)
-                                if self.bc_loss_type == "mse"
-                                else F.smooth_l1_loss(actor_dq2, bc_b))
+                    # [BC-FIX-1] 用 u 空间 BC loss，避免 tanh 饱和区梯度消失
+                    # 主 loss: u 空间 (0.7)，辅助 loss: Δq 空间 (0.3)
+                    bc_loss_u, bc_loss_dq, _ = self.actor.bc_forward(obs_b, bc_b)
+                    bc_loss2 = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
                 else:
                     bc_loss2 = torch.zeros(1, device=self.device)
 
