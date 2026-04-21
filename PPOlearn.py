@@ -129,15 +129,25 @@ def evaluate(agent, env, expert, n_episodes: int = 10,
     rewards, steps, successes = [], [], []
     is_ppo = (algo == "ppo")
 
-    for _ in range(n_episodes):
+    # [SKIP-INVALID] 与 test.py 一致：规划失败的场景跳过，不计入 n_episodes
+    ep_count = 0
+    attempt_count = 0
+    max_attempts = n_episodes * 3
+
+    while ep_count < n_episodes and attempt_count < max_attempts:
+        attempt_count += 1
         obs = env.reset()
+        planned_path = env.get_planned_path()
+        if planned_path is None:
+            continue   # 跳过失败场景
+
         if expert is not None:
             current_q = env.data.qpos[:7].copy()
-            expert.reset(obs, current_q)
-            planned_path = env.get_planned_path()
-            if planned_path is not None:
-                expert.set_path(planned_path)
+            # [INTERFACE] 与训练/test 一致：传 env=env
+            expert.reset(obs, current_q, env=env)
+            expert.set_path(planned_path)
 
+        ep_count += 1
         ep_reward = 0.0; step = 0; ep_success = False
 
         while True:
@@ -155,10 +165,16 @@ def evaluate(agent, env, expert, n_episodes: int = 10,
 
         rewards.append(ep_reward); steps.append(step); successes.append(float(ep_success))
 
+    if ep_count == 0:
+        # 所有 attempt 都失败，返回默认值
+        return {"success_rate": 0.0, "avg_reward": 0.0, "avg_steps": 0.0,
+                "episodes_valid": 0, "episodes_skipped": attempt_count}
     return {
         "success_rate": float(np.mean(successes)),
         "avg_reward":   float(np.mean(rewards)),
         "avg_steps":    float(np.mean(steps)),
+        "episodes_valid":   ep_count,
+        "episodes_skipped": attempt_count - ep_count,
     }
 
 
@@ -237,14 +253,20 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         # [BC-FIX-5] obs_norm update 策略
         update_norm_fraction = 1.0 if rnd == 0 else 0.3
 
-        for ep in range(n_eps):
+        # [SKIP-INVALID] while 循环：失败场景不占用 n_eps 配额
+        valid_eps = 0
+        attempt_cnt = 0
+        max_attempts = n_eps * 3
+        while valid_eps < n_eps and attempt_cnt < max_attempts:
+            attempt_cnt += 1
             obs = env.reset()
             current_q = env.data.qpos[:7].copy()
-            expert.reset(obs, current_q, env=env)
             planned_path = env.get_planned_path()
             if planned_path is None:
                 continue
+            expert.reset(obs, current_q, env=env)
             expert.set_path(planned_path)
+            valid_eps += 1
 
             ep_success = False
             step_in_ep = 0
@@ -288,9 +310,11 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
             if ep_success:
                 n_success += 1
 
-        sr = n_success / max(n_eps, 1)
+        sr = n_success / max(valid_eps, 1)
+        skipped = attempt_cnt - valid_eps
+        skip_note = f"，跳过 {skipped} 个无效场景" if skipped > 0 else ""
         print(f"  收集完成: +{n_new} 样本（总计 {len(all_obs)}）| "
-              f"执行成功率: {sr*100:.1f}%")
+              f"执行成功率: {sr*100:.1f}%{skip_note}")
 
         # [BC-FIX-4] 缓冲区裁剪
         if len(all_obs) > MAX_BUFFER_SIZE:
@@ -630,11 +654,13 @@ def train_ppo(log_dir: str, config: dict):
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
 
-        # expert 用于 BC 监督，不参与 rollout 主策略
-        expert.reset(obs, current_q, env=env)
+        # [SKIP-INVALID] 失败场景不计入 episode，直接重试
         planned_path = env.get_planned_path()
         if planned_path is None:
-            episode += 1; continue
+            # 不增加 episode，直接重新尝试下一场景
+            continue
+        # expert 用于 BC 监督，不参与 rollout 主策略
+        expert.reset(obs, current_q, env=env)
         expert.set_path(planned_path)
 
         ep_reward = 0.0; ep_steps = 0; ep_success = False

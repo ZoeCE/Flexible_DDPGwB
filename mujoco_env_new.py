@@ -260,6 +260,9 @@ class CableRobotEnvWithObstacles:
         path_width   = scene_plan_config.get("path_width", 0.4)
         # [WS] 机械臂工作空间硬约束半径（包含 payload 外接圆）
         workspace_r  = scene_plan_config.get("workspace_radius", 0.50)
+        # [WS] 路径单侧约束：强制 A* 和障碍物都在 y >= y_min_corridor 侧
+        # 当前起点 y=0.15, 终点 y=0.2，路径天然在 y>0 区间，强制障碍物也在 y>0
+        y_min_corridor = scene_plan_config.get("y_min_corridor", 0.0)
 
         obstacles = []
         direction = target_xy - start_xy
@@ -275,8 +278,11 @@ class CableRobotEnvWithObstacles:
                 s = rng.uniform(-path_width/2, path_width/2)
                 center = start_xy + t*L_path*direction + s*perp
                 r = rng.uniform(r_min, r_max)
-                # [WS] 障碍物中心 + 半径必须完全在工作空间内，避免让策略被迫绕出工作区
+                # [WS] 障碍物中心 + 半径必须完全在工作空间内
                 if np.linalg.norm(center) + r > workspace_r - 0.02:
+                    continue
+                # [WS] 障碍物必须完全在 y >= y_min_corridor 侧（同路径走廊约束）
+                if center[1] - r < y_min_corridor:
                     continue
                 if (np.linalg.norm(center-start_xy)<r+min_clr or
                         np.linalg.norm(center-target_xy)<r+min_clr or
@@ -297,10 +303,13 @@ class CableRobotEnvWithObstacles:
         def w2g(x,y): return (max(0,min(nx-1,int((x-x_min)/grid_res))),max(0,min(ny-1,int((y-y_min)/grid_res))))
         def g2w(i,j): return x_min+(i+.5)*grid_res, y_min+(j+.5)*grid_res
 
+        # 端点附近不受 y_min_corridor 约束（保证起终点可达）
+        endpoint_buf = 0.08  # 8cm
+        start_pt = np.asarray(start_xy, float)
+        target_pt = np.asarray(target_xy, float)
+
         occ = np.zeros((nx,ny),bool)
-        # [WS] 超出工作半径的网格点同样标记为不可通行
-        # 保证 A* 永远不会把路径规划到机械臂无法到达的区域
-        ws_r_eff = workspace_r - p_radius  # 去掉 payload 外接圆，保证 payload 整个在工作空间内
+        ws_r_eff = workspace_r - p_radius
         for i in range(nx):
             for j in range(ny):
                 wx,wy=g2w(i,j)
@@ -308,10 +317,13 @@ class CableRobotEnvWithObstacles:
                 if wx*wx + wy*wy > ws_r_eff*ws_r_eff:
                     occ[i,j]=True
                     continue
-                # 【新增】限制路径不走 Y 为负数的一侧
-                if wy < 0:
-                    occ[i,j] = True
-                    continue
+                # [WS] Y 单侧约束（端点附近保留可达性）
+                if wy < y_min_corridor:
+                    d_start = np.hypot(wx - start_pt[0], wy - start_pt[1])
+                    d_target = np.hypot(wx - target_pt[0], wy - target_pt[1])
+                    if d_start > endpoint_buf and d_target > endpoint_buf:
+                        occ[i,j] = True
+                        continue
                 # 障碍物占据判定
                 if any((wx-ox)**2+(wy-oy)**2<(r+min_clr)**2 for (ox,oy,r) in planning_obs):
                     occ[i,j]=True
@@ -347,7 +359,35 @@ class CableRobotEnvWithObstacles:
                     g_cost[nb]=ng; parent[nb]=cur
                     heapq.heappush(open_h,(ng+float(np.hypot(*(np.array(g2w(ni,nj))-target_xy))),nb))
 
-        if not found: path_2d=np.vstack([start_xy,target_xy])
+        if not found:
+            # [PATH-FAIL] A* 失败 → 不使用 fallback，返回 None
+            # 上层 (env.reset) 接到 None 会选择重试或标记该回合无效
+            # 这避免了"兜底路径"让坏场景混入训练/测试造成污染
+            print(f"[A*] 规划失败（n_obs={n_obs}, obstacles 层布置导致无可通行路径）→ 返回 None")
+
+            # 生成 XML（即便路径失败，scene 本身仍可用于调试）
+            xml = base_xml_content
+            if obstacles:
+                xml = xml.replace('  </asset>',
+                    '    <material name="obstacle" rgba="0.9 0.45 0.1 1"/>\n  </asset>', 1)
+            obs_z = scene_plan_config["obstacle_z_center"]
+            obs_hh = scene_plan_config["obstacle_halfheight"]
+            obs_b = "".join([
+                f'    <body name="obstacle_{i}" pos="{x} {y} {obs_z}">\n      '
+                f'<geom type="cylinder" size="{r} {obs_hh}" material="obstacle" '
+                f'contype="1" conaffinity="1"/>\n    </body>\n'
+                for i, (x, y, r) in enumerate(obstacles)])
+            repl = ('<geom name="floor" size="0 0 0.05" type="plane" '
+                    'material="groundplane"/>\n\n' + obs_b + '    ')
+            xml = xml.replace(
+                '<geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>\n\n    ',
+                repl, 1)
+            xml = re.sub(
+                r'(<body\s+name="target"\s+pos=")[^"]*(")',
+                rf'\g<1>{target_xy[0]} {target_xy[1]} 0\2',
+                xml, count=1)
+
+            return obstacles, None, xml   # 返回 path_3d=None 表示失败
         else:
             idx=[]; node=gi
             while node!=si: idx.append(node); node=parent.get(node); (node is None) and idx.append(si) or None
@@ -394,13 +434,25 @@ class CableRobotEnvWithObstacles:
         cfg_task=self.config["task"]; cfg_scene=self.config["scene"]
         cfg_plan=self.config["planning"]; cfg_reset=self.config["reset"]
 
-        noise    = self._obstacle_rng.uniform(-self.init_position_range, self.init_position_range, 2)
-        start_xy = self.default_start_xy + noise
-        target_xy= np.array(cfg_task["default_target_xy"]); self.target_pos=target_xy.copy()
+        # [PATH-FAIL] 场景生成重试机制：A* 失败时用新 seed 再生成，最多 max_retries 次
+        max_retries = 3
+        obstacles = None; path_3d = None; new_xml = None
+        start_xy = None; target_xy = None
 
-        spCfg={**cfg_scene,**cfg_plan}
-        obstacles,path_3d,new_xml=self.generate_scene_and_trajectory(
-            start_xy,target_xy,self._base_xml_content,spCfg,self._obstacle_rng)
+        for retry in range(max_retries + 1):
+            noise    = self._obstacle_rng.uniform(-self.init_position_range, self.init_position_range, 2)
+            start_xy = self.default_start_xy + noise
+            target_xy= np.array(cfg_task["default_target_xy"]); self.target_pos=target_xy.copy()
+
+            spCfg={**cfg_scene,**cfg_plan}
+            obstacles,path_3d,new_xml=self.generate_scene_and_trajectory(
+                start_xy,target_xy,self._base_xml_content,spCfg,self._obstacle_rng)
+
+            if path_3d is not None:
+                break  # 规划成功
+            if retry < max_retries:
+                print(f"[env.reset] 第 {retry+1} 次场景生成失败，重试...")
+
         self._obstacles=obstacles; self._planned_path=path_3d
 
         with tempfile.NamedTemporaryFile(mode='w',suffix='.xml',dir=self._assets_dir,delete=False,encoding='utf-8') as f:
@@ -454,7 +506,13 @@ class CableRobotEnvWithObstacles:
         # in_insertion = payload_z 已进入 entry_z 以下（进入插入阶段）
         self._insertion_hold_counter = 0
         self._in_insertion_phase     = False
-        self._best_insertion_z       = 10.0   # 记录 payload 到达过的最低 z（用于部分奖励）
+        self._best_insertion_z       = 10.0   # 记录 payload 到达过的最低 z
+
+        # [POT-NEW] 势能差分奖励状态（第一步置 None，用"当前即初始"值）
+        self._prev_goal_potential = None
+
+        # [STABLE] 抖动抑制：记录上一步 Δq，用于 action rate 惩罚
+        self._prev_delta_q = np.zeros(self.action_dim, dtype=np.float32)
 
         ee_init=self._get_ee_pos()
         self._prev_ee_pos=ee_init.copy(); self._ee_vel_cache=np.zeros(3)
@@ -471,7 +529,7 @@ class CableRobotEnvWithObstacles:
                 try: self.viewer.close()
                 except Exception: pass
             self._launch_viewer()
-            # ==========================================================
+            '''# ==========================================================
             # 新增逻辑：在开启渲染界面时，先同步画面，然后阻塞等待空格键
             # ==========================================================
             if hasattr(self, 'viewer') and self.viewer is not None:
@@ -482,20 +540,31 @@ class CableRobotEnvWithObstacles:
             input("⏸️  环境初始状态已加载，请在当前终端按下 [Enter 回车键] 开始运动...")
             print("="*50)
             print("▶️  开始执行！")
-            # ==========================================================
-
-        return self._get_obs()
+            # =========================================================='''
 
         return self._get_obs()
 
     # ── step ──────────────────────────────────────────────────────────────────
 
     def step(self, delta_q: np.ndarray):
-        """[ENV-DELTA-1] 接受 delta_q，累加到当前关节角后执行。"""
-        delta_q = np.clip(delta_q, self.action_space_low, self.action_space_high)
+        """[ENV-DELTA-1] 接受 delta_q，累加到当前关节角后执行。
+        [STABLE] 插入阶段 (_in_insertion_phase=True) 自动将 Δq 幅度乘 dq_scale_insertion。
+        """
+        # 保存原始 actor 输出（用于 reward 的 action_rate 惩罚与 BC 对齐）
+        delta_q_raw = np.clip(
+            np.asarray(delta_q, dtype=np.float32),
+            self.action_space_low, self.action_space_high
+        )
+
+        # 插入阶段自动缩减 Δq 幅度（减小抖动）
+        if getattr(self, '_in_insertion_phase', False):
+            scale = float(self.config["space"].get("dq_scale_insertion", 0.3))
+            delta_q_exec = delta_q_raw * scale
+        else:
+            delta_q_exec = delta_q_raw
 
         q_current = self.data.qpos[:7].copy().astype(np.float32)
-        q_cmd     = np.clip(q_current + delta_q, self.q_low, self.q_high)
+        q_cmd     = np.clip(q_current + delta_q_exec, self.q_low, self.q_high)
 
         self.action_queue.append(q_cmd.copy())
         effective_q = np.array(self.action_queue[0], np.float64)
@@ -543,8 +612,10 @@ class CableRobotEnvWithObstacles:
 
         current_q = self.data.qpos[:7].copy().astype(np.float32)
         reward, done, success, is_collision = self._compute_reward(
-            delta_q, current_q, self._prev_q, obs)
+            delta_q_raw, current_q, self._prev_q, obs)
         self._prev_q = current_q
+        # [STABLE] 保存本步 Δq 用于下一步 action_rate 惩罚
+        self._prev_delta_q = delta_q_raw.copy()
 
         self.current_step += 1
         if self.current_step >= self.config["sim"]["max_steps"]:
@@ -564,7 +635,7 @@ class CableRobotEnvWithObstacles:
 
     def _build_geom_id_sets(self):
         """
-        缓存 obstacle_geom_ids 和 rebar_geom_ids。
+        缓存 obstacle_geom_ids、rebar_geom_ids、floor_geom_ids。
         在 _reresolve_ids 之后调用一次；reset 后需要重新调用。
         """
         self._obstacle_geom_ids = set()
@@ -584,6 +655,12 @@ class CableRobotEnvWithObstacles:
                         break
                     cur = self.model.body_parentid[cur]
 
+        # [INS-NEW] floor geom id（用于地面接触检测，作为成功判定的一部分）
+        self._floor_geom_ids = set()
+        fid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_GEOM, "floor")
+        if fid >= 0:
+            self._floor_geom_ids.add(fid)
+
     def _check_prefab_collision_with_obstacles(self):
         """
         检查 prefab 子树任意 geom 与其他物体的 MuJoCo 真实接触。
@@ -591,14 +668,11 @@ class CableRobotEnvWithObstacles:
         用户需求：
           - prefab × obstacle → 视为"碰撞"，立即 reset
           - prefab × rebar    → 允许接触（插入过程自然摩擦），不终止
-          - prefab × floor    → 允许接触
+          - prefab × floor    → 允许接触（成功判定一部分）
           - prefab × robot    → 允许接触（cable 连接）
 
         返回：(hit_obstacle, hit_rebar)
-          仅 hit_obstacle=True 时才由调用方触发碰撞终止。
-          hit_rebar=True 仅作为信息，不导致终止。
         """
-        # 懒构建 geom_id 集合（reset 后需要重建）
         if not hasattr(self, '_obstacle_geom_ids'):
             self._build_geom_id_sets()
 
@@ -616,13 +690,32 @@ class CableRobotEnvWithObstacles:
             other = g2 if g1 in self._prefab_geom_ids else g1
             if other in self._obstacle_geom_ids:
                 hit_obstacle = True
-                # 撞到任何一个 obstacle 就 break（已经必然终止）
                 break
             elif other in self._rebar_geom_ids:
                 hit_rebar = True
-                # 继续循环，看有没有 obstacle 接触（obstacle 优先级更高）
 
         return hit_obstacle, hit_rebar
+
+    def _check_prefab_floor_contact(self):
+        """
+        [INS-NEW] 检查 payload 底部是否真实触碰到地面。
+        成功判定的一部分：用户要求"平稳接触地面则任务成功"。
+        """
+        if not hasattr(self, '_floor_geom_ids'):
+            self._build_geom_id_sets()
+        if not self._floor_geom_ids:
+            return False  # 没有 floor geom 就无法检测
+
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            g1, g2 = con.geom1, con.geom2
+            p_hit = (g1 in self._prefab_geom_ids) or (g2 in self._prefab_geom_ids)
+            if not p_hit:
+                continue
+            other = g2 if g1 in self._prefab_geom_ids else g1
+            if other in self._floor_geom_ids:
+                return True
+        return False
 
     # ── _compute_reward ────────────────────────────────────────────────────────
 
@@ -633,23 +726,23 @@ class CableRobotEnvWithObstacles:
 
     def _compute_reward(self, action, current_q, prev_q, obs):
         """
-        v3/v4 奖励函数 + 钢筋插入任务新成功判定。
+        [PPO-CURRICULUM] 双重势能奖励 + 严格姿态 + 触地成功判定。
 
-        奖励结构（执行顺序，按优先级）：
+        架构（严格按 PPO 课程学习需求设计）：
           1. 失稳早停（最优先）
-          2. step_penalty
-          3. 负指数连续惩罚（速度/swing/verticality/joint_smooth）
-          4. 吊装物姿态惩罚（tilt/yaw 线性+指数，大幅加强）
-          5. APF 障碍物排斥势 + 弱负指数背景
-          6. 稠密进展奖励（向航点方向）
-          7. [INS-NEW] 碰撞检测（obstacle 致命，rebar 允许）
-          8. [INS-NEW] 插入成功判定（连续下降 + hold）
-               - 每步检查：z ≤ success_z, XY, 姿态, 速度
-               - 满足 hold_steps 步 → success=True
-               - 插入阶段（z ≤ entry_z）内额外渐进奖励
-          9. reached_final Fallback（防止无限徘徊）
-          10. Crash 检测（grace period 后）
-          11. 航点前进奖励
+          2. 碰撞检测（obstacle 致命终止；rebar/floor 允许）
+          3. 【势能 1】终点吸引势能（差分式 shaping，主奖励信号）
+             U_goal_xy = k_xy × dtf²
+             U_goal_z  = k_z × (pz - target_pz)²   [仅 dtf<activate_dist 启用]
+             reward += -(U_t - U_{t-1})
+          4. 【势能 2】障碍物排斥势能 APF（保留旧调好曲线）
+          5. 姿态严格惩罚（tilt/yaw 线性 + 指数，核心）
+          6. 防摆惩罚（swing / 角速度，辅助）
+          7. 控制平滑（速度 / 关节变化 / action rate）
+          8. 插入阶段平滑对准奖励（二次，无梯度悬崖）
+          9. 插入阶段静止奖励 + 下降渐进
+          10. 成功判定：触地 + 姿态 + XY + 低速，连续 hold_steps 步
+          11. Crash 检测
           12. 单步奖励裁剪
         """
         reward = 0.0; done = False; success = False; is_collision = False
@@ -680,8 +773,8 @@ class CableRobotEnvWithObstacles:
         pl_angvel_xyz = self.data.qvel[dof_idx + 3: dof_idx + 6]
         pl_angvel_mag = float(np.linalg.norm(pl_angvel_xyz))
 
-        # payload 到 target 的 XY 距离（用于对准引导和终点判定）
         dtf = float(np.linalg.norm(payload_xy - self.target_pos))
+        vel_xy_scalar = float(np.linalg.norm(payload_vxy))
 
         # ══════════════════════════════════════════════════════════════════════
         # 第一部分：失稳早停
@@ -699,60 +792,71 @@ class CableRobotEnvWithObstacles:
             if abs_yaw   > cfg_logic.get("payload_yaw_max", 1.2):
                 unstable = True; reason_detail.append(f"yaw={abs_yaw:.2f}")
             if unstable:
-                reward = float(cfg_logic.get("instability_penalty", -10.0))
+                reward = float(cfg_rwd.get("instability_penalty",
+                    cfg_logic.get("instability_penalty", -15.0)))
                 self._termination_reason = "instability:" + ",".join(reason_detail)
                 return reward, True, False, False
 
-        # 每步固定惩罚
         reward += float(cfg_rwd.get("step_penalty", 0.0))
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第二部分：负指数连续惩罚
+        # 第二部分：碰撞检测（最优先，成功判定之前）
+        #   obstacle 接触 → 立即终止
+        #   rebar 接触   → 允许（插入过程正常接触）
+        #   floor 接触   → 允许（作为成功条件之一）
         # ══════════════════════════════════════════════════════════════════════
-        reward -= self._neg_exp(pl_vel,
-            cfg_rwd.get("velocity_penalty_coef", 0.03),
-            cfg_rwd.get("velocity_penalty_scale", 0.3))
+        use_mjc_contact = cfg_rwd.get("use_mujoco_contact", True)
+        if use_mjc_contact:
+            hit_obs, hit_rebar = self._check_prefab_collision_with_obstacles()
+            if hit_obs:
+                reward = float(cfg_rwd.get("collision_penalty", -30.0))
+                self._termination_reason = "collision_obstacle"
+                return reward, True, False, True
+        else:
+            for (ox, oy, orad) in self._obstacles:
+                if float(np.linalg.norm(payload_xy - np.array([ox, oy]))) < \
+                        (orad + self.payload_radius):
+                    reward = float(cfg_rwd.get("collision_penalty", -30.0))
+                    self._termination_reason = "collision_obstacle"
+                    return reward, True, False, True
 
-        reward -= self._neg_exp(swing_xy,
-            cfg_rwd.get("swing_penalty_coef", 0.15),
-            cfg_rwd.get("swing_penalty_scale", 0.03))
-
-        rope_len = max(ee_z - payload_z, 0.05)
-        swing_angle = swing_xy / rope_len
-        reward -= self._neg_exp(swing_angle,
-            cfg_rwd.get("verticality_penalty_coef", 0.1),
-            cfg_rwd.get("verticality_penalty_scale", 0.15))
-
-        dq_change = float(np.linalg.norm(current_q - prev_q))
-        reward -= self._neg_exp(dq_change,
-            cfg_rwd.get("joint_smooth_penalty_coef", 0.02),
-            cfg_rwd.get("joint_smooth_penalty_scale", 0.1))
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 第三部分：[MERGE-3] 吊装物姿态复合惩罚（大幅加强）
-        # ══════════════════════════════════════════════════════════════════════
-
-        # tilt 线性项（裁剪）+ 指数项
-        tilt_lin_clip = cfg_rwd.get("payload_tilt_linear_clip", 1.0)
-        reward -= cfg_rwd.get("payload_tilt_linear_coef", 0.5) * min(tilt, tilt_lin_clip)
-        reward -= self._neg_exp(tilt,
-            cfg_rwd.get("payload_tilt_penalty_coef", 0.3),
-            cfg_rwd.get("payload_tilt_penalty_scale", 0.08))
-
-        # yaw 线性项（裁剪）+ 指数项
-        yaw_lin_clip = cfg_rwd.get("payload_yaw_linear_clip", 1.0)
-        reward -= cfg_rwd.get("payload_yaw_linear_coef", 0.6) * min(abs_yaw, yaw_lin_clip)
-        reward -= self._neg_exp(abs_yaw,
-            cfg_rwd.get("payload_yaw_penalty_coef", 0.4),
-            cfg_rwd.get("payload_yaw_penalty_scale", 0.1))
-
-        # 角速度惩罚
-        reward -= self._neg_exp(pl_angvel_mag,
-            cfg_rwd.get("payload_angvel_penalty_coef", 0.08),
-            cfg_rwd.get("payload_angvel_penalty_scale", 0.5))
+        # 底座碰撞（机器人底座半径 3cm）
+        if float(np.linalg.norm(payload_xy)) < 0.03:
+            reward = float(cfg_rwd.get("collision_penalty", -30.0))
+            self._termination_reason = "collision_base"
+            return reward, True, False, True
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第四部分：[v3-APF] 障碍物排斥势
+        # 第三部分：【势能 1】终点吸引势能（差分式 shaping）
+        # reward += -(U_t - U_{t-1})
+        # 累计 = U_0 - U_end，方向无偏，与 γ=0.99 相容
+        # ══════════════════════════════════════════════════════════════════════
+        k_goal_xy = cfg_rwd.get("goal_potential_xy_coef", 100.0)
+        k_goal_z  = cfg_rwd.get("goal_potential_z_coef",  100.0)
+        goal_activate = cfg_rwd.get("goal_potential_activate_dist", 0.15)
+        target_pz = cfg_ins.get("target_payload_z", 0.10)
+
+        # U_xy 总是启用（主引导信号）
+        U_xy = k_goal_xy * (dtf ** 2)
+        # U_z 仅在 XY 接近后启用（避免早期乱下降）
+        if dtf < goal_activate:
+            U_z = k_goal_z * ((payload_z - target_pz) ** 2)
+        else:
+            U_z = 0.0
+        U_goal = U_xy + U_z
+
+        if self._prev_goal_potential is None:
+            self._prev_goal_potential = U_goal
+        # 势能差分：-(U_t - U_{t-1})
+        # 势能下降 → 正奖励；势能上升 → 负奖励
+        potential_reward = -(U_goal - self._prev_goal_potential)
+        # clip 避免极端值（单步势能跳变不应超过 ±2）
+        potential_reward = float(np.clip(potential_reward, -2.0, 2.0))
+        reward += potential_reward
+        self._prev_goal_potential = U_goal
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第四部分：【势能 2】障碍物排斥 APF（保留旧调好曲线）
         # ══════════════════════════════════════════════════════════════════════
         rho_0     = cfg_rwd.get("obstacle_rho_0", 0.10)
         d_min     = cfg_rwd.get("obstacle_d_min", 0.005)
@@ -765,191 +869,179 @@ class CableRobotEnvWithObstacles:
         for (ox, oy, orad) in self._obstacles:
             dist_center = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
             dist_edge   = dist_center - orad - self.payload_radius
-
             if dist_edge < rho_0:
                 d_eff   = max(dist_edge, d_min)
                 apf_pen = apf_coef * (1.0 / d_eff - 1.0 / rho_0) ** 2
                 apf_pen = min(apf_pen, apf_max)
                 total_apf += apf_pen
-
             if dist_edge > 0.0:
                 reward -= bg_coef * np.exp(-dist_edge / max(bg_scale, 1e-8))
-
         reward -= total_apf
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第五部分：稠密进展奖励
+        # 第五部分：姿态严格惩罚（核心）
         # ══════════════════════════════════════════════════════════════════════
-        if self._planned_path is not None and not self.reached_final:
-            wp = self._planned_path[min(self.current_wp_idx, len(self._planned_path) - 1)]
-            curr_dist = float(np.linalg.norm(
-                np.array([payload_xy[0], payload_xy[1], payload_z]) - wp))
-            if self.last_dist is None:
-                self.last_dist = curr_dist
-            progress = float(np.clip(
-                self.last_dist - curr_dist, 0.0,
-                cfg_rwd.get("progress_clip", 0.1)))
-            reward += cfg_rwd.get("progress_coef", 5.0) * progress
+        tilt_lin_clip = cfg_rwd.get("payload_tilt_linear_clip", 1.0)
+        reward -= cfg_rwd.get("payload_tilt_linear_coef", 0.5) * min(tilt, tilt_lin_clip)
+        reward -= self._neg_exp(tilt,
+            cfg_rwd.get("payload_tilt_penalty_coef", 0.3),
+            cfg_rwd.get("payload_tilt_penalty_scale", 0.08))
+
+        yaw_lin_clip = cfg_rwd.get("payload_yaw_linear_clip", 1.0)
+        reward -= cfg_rwd.get("payload_yaw_linear_coef", 0.6) * min(abs_yaw, yaw_lin_clip)
+        reward -= self._neg_exp(abs_yaw,
+            cfg_rwd.get("payload_yaw_penalty_coef", 0.4),
+            cfg_rwd.get("payload_yaw_penalty_scale", 0.1))
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第六部分：[INS-1 NEW] 钢筋对准引导奖励
-        # 当 payload 接近 target 时，激励 XY 对准和姿态归零（tilt/yaw 同时小）
-        # 这是在 reached_final 之前的"准备插入"阶段的引导信号
+        # 第六部分：防摆（辅助，非核心）
         # ══════════════════════════════════════════════════════════════════════
-        align_dist = cfg_rwd.get("alignment_activate_dist", 0.15)
-        if dtf < align_dist:
-            # 1) XY 对准奖励：距离越小奖励越大
-            align_xy_coef  = cfg_rwd.get("alignment_xy_coef", 2.0)
-            align_xy_scale = cfg_rwd.get("alignment_xy_scale", 0.02)
-            align_xy_bonus = align_xy_coef * np.exp(-dtf / max(align_xy_scale, 1e-6))
-            reward += align_xy_bonus
-
-            # 2) 姿态对准奖励：tilt+yaw 共同小才给高分
-            # pose_error = sqrt(tilt^2 + yaw^2)，越小越好
-            pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
-            align_pose_coef  = cfg_rwd.get("alignment_pose_coef", 3.0)
-            align_pose_scale = cfg_rwd.get("alignment_pose_scale", 0.05)
-            align_pose_bonus = align_pose_coef * np.exp(-pose_err / max(align_pose_scale, 1e-6))
-            reward += align_pose_bonus
+        reward -= self._neg_exp(pl_angvel_mag,
+            cfg_rwd.get("payload_angvel_penalty_coef", 0.04),
+            cfg_rwd.get("payload_angvel_penalty_scale", 0.5))
+        reward -= self._neg_exp(swing_xy,
+            cfg_rwd.get("swing_penalty_coef", 0.10),
+            cfg_rwd.get("swing_penalty_scale", 0.03))
+        rope_len = max(ee_z - payload_z, 0.05)
+        swing_angle = swing_xy / rope_len
+        reward -= self._neg_exp(swing_angle,
+            cfg_rwd.get("verticality_penalty_coef", 0.08),
+            cfg_rwd.get("verticality_penalty_scale", 0.15))
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第七部分：[INS-3 NEW] 碰撞检测（最优先，在成功判定之前）
-        # 用户需求：
-        #   - obstacle 碰撞  → 立即终止（reset）+ collision_penalty
-        #   - rebar 接触     → 完全允许（插入过程必然接触），不影响任何判定
-        #   - 底座碰撞       → 终止
+        # 第七部分：控制平滑（速度/关节/action_rate）
         # ══════════════════════════════════════════════════════════════════════
-        use_mjc_contact = cfg_rwd.get("use_mujoco_contact", True)
+        reward -= self._neg_exp(pl_vel,
+            cfg_rwd.get("velocity_penalty_coef", 0.03),
+            cfg_rwd.get("velocity_penalty_scale", 0.3))
+        dq_change = float(np.linalg.norm(current_q - prev_q))
+        reward -= self._neg_exp(dq_change,
+            cfg_rwd.get("joint_smooth_penalty_coef", 0.02),
+            cfg_rwd.get("joint_smooth_penalty_scale", 0.1))
 
-        if use_mjc_contact:
-            hit_obs, hit_rebar = self._check_prefab_collision_with_obstacles()
-            # rebar 接触：无论如何都不视为碰撞（允许自然接触与摩擦）
-            # 仅 obstacle 接触才触发碰撞终止
-            if hit_obs:
-                reward = float(cfg_rwd.get("collision_penalty", -20.0))
-                self._termination_reason = "collision_obstacle_contact"
-                return reward, True, False, True
-        else:
-            # 回退：基于 payload_xy 中心距离（旧版行为，不检测 rebar）
-            for (ox, oy, orad) in self._obstacles:
-                if float(np.linalg.norm(payload_xy - np.array([ox, oy]))) < \
-                        (orad + self.payload_radius):
-                    reward = float(cfg_rwd.get("collision_penalty", -20.0))
-                    self._termination_reason = "collision_obstacle"
-                    return reward, True, False, True
-
-        # 底座碰撞（机器人底座半径 3cm）
-        if float(np.linalg.norm(payload_xy)) < 0.03:
-            reward = float(cfg_rwd.get("collision_penalty", -20.0))
-            self._termination_reason = "collision_base"
-            return reward, True, False, True
+        # action rate penalty (Δq_t - Δq_{t-1})
+        prev_dq = getattr(self, '_prev_delta_q', None)
+        if prev_dq is not None and prev_dq.shape == np.asarray(action).shape:
+            dq_rate = float(np.linalg.norm(np.asarray(action) - prev_dq))
+            ar_coef  = cfg_rwd.get("action_rate_coef", 0.5)
+            ar_scale = cfg_rwd.get("action_rate_scale", 0.03)
+            if self._in_insertion_phase:
+                ar_coef *= 2.0
+            reward -= self._neg_exp(dq_rate, ar_coef, ar_scale)
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第八部分：[INS-NEW] 插入成功判定（基于连续下降 + 保持稳定）
-        #
-        # 判定流程（每步都检查，不必等 reached_final）：
-        #   1. 首先检查 payload_z 是否进入 "插入阶段"（entry_z）
-        #      → 进入后开始累计 hold_counter
-        #   2. 每步检查：XY 对准 + 姿态 + 速度 + z ≤ success_z
-        #      → 满足 → hold_counter += 1
-        #      → 不满足 → hold_counter = 0（重新开始计数）
-        #   3. hold_counter ≥ hold_steps → 判定成功
-        #
-        # 同时记录 _best_insertion_z（历史最低 payload_z），用于部分奖励。
+        # 第八部分：插入阶段状态机 + 平滑对准奖励
         # ══════════════════════════════════════════════════════════════════════
-        entry_z       = cfg_ins.get("entry_z",       0.16)
-        success_z     = cfg_ins.get("success_z",     0.13)
-        deep_z        = cfg_ins.get("deep_z",        0.11)
-        hold_steps    = int(cfg_ins.get("hold_steps", 5))
-        xy_tol        = cfg_ins.get("xy_tolerance",  0.006)
-        tilt_tol      = cfg_ins.get("tilt_tolerance",0.10)
-        yaw_tol       = cfg_ins.get("yaw_tolerance", 0.05)
-        vxy_tol       = cfg_ins.get("vel_xy_tolerance", 0.15)
-        vz_tol        = cfg_ins.get("vel_z_tolerance",  0.30)
-        vel_xy_scalar = float(np.linalg.norm(payload_vxy))
+        entry_z   = cfg_ins.get("entry_z", 0.16)
+        target_pz_ins = cfg_ins.get("target_payload_z", 0.10)
+        z_tol     = cfg_ins.get("success_z_tolerance", 0.015)
+        xy_tol    = cfg_ins.get("xy_tolerance",  0.003)
+        tilt_tol  = cfg_ins.get("tilt_tolerance", 0.05)
+        yaw_tol   = cfg_ins.get("yaw_tolerance",  0.04)
+        vxy_tol   = cfg_ins.get("vel_xy_tolerance", 0.05)
+        vz_tol    = cfg_ins.get("vel_z_tolerance",  0.05)
+        hold_steps = int(cfg_ins.get("hold_steps", 5))
+        require_floor = cfg_ins.get("require_floor_contact", True)
 
-        # 更新历史最低 payload_z（仅在进入 entry_z 后记录，作为"插入深度"指标）
+        # 更新历史最低 payload_z
         if payload_z < entry_z and payload_z < self._best_insertion_z:
             self._best_insertion_z = float(payload_z)
 
-        # 1) 阶段判定：是否进入插入阶段
+        # 进入插入阶段（单向：一旦进入不再退出，避免反复切换）
         if not self._in_insertion_phase and payload_z <= entry_z:
             self._in_insertion_phase = True
 
-        # 2) 每步"在位"判定：6 个条件同时满足才算在位
-        pose_ok = (tilt < tilt_tol) and (abs_yaw < yaw_tol)
+        # 平滑对准奖励（二次，无梯度悬崖）—— 仅在 XY 接近时激活
+        align_dist = cfg_rwd.get("alignment_activate_dist", 0.05)
+        if dtf < align_dist:
+            align_xy_coef = cfg_rwd.get("alignment_xy_coef", 3.0)
+            xy_frac = max(0.0, 1.0 - dtf / align_dist)
+            reward += align_xy_coef * (xy_frac ** 2)
+
+        pose_activate = cfg_rwd.get("alignment_pose_activate", 0.10)
+        pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
+        if pose_err < pose_activate:
+            align_pose_coef = cfg_rwd.get("alignment_pose_coef", 3.0)
+            pose_frac = max(0.0, 1.0 - pose_err / pose_activate)
+            reward += align_pose_coef * (pose_frac ** 2)
+
+        # 插入阶段内静止奖励
+        if self._in_insertion_phase:
+            vel_thresh = cfg_rwd.get("stability_vel_threshold", 0.05)
+            if vel_xy_scalar < vel_thresh:
+                stab_bonus = cfg_rwd.get("stability_bonus", 1.5)
+                stab_frac = 1.0 - vel_xy_scalar / max(vel_thresh, 1e-6)
+                reward += stab_bonus * stab_frac
+            # 下降渐进（越深越好）
+            descent_depth = max(0.0, entry_z - payload_z)
+            reward += 3.0 * descent_depth
+
+        # ══════════════════════════════════════════════════════════════════════
+        # 第九部分：成功判定（触地 + XY + 姿态 + 速度，连续 hold_steps）
+        # ══════════════════════════════════════════════════════════════════════
+        z_err = abs(payload_z - target_pz_ins)
+        z_ok    = (z_err < z_tol)
         xy_ok   = (dtf < xy_tol)
+        pose_ok = (tilt < tilt_tol) and (abs_yaw < yaw_tol)
         vel_ok  = (vel_xy_scalar < vxy_tol) and (abs(payload_vz) < vz_tol)
-        z_ok    = (payload_z <= success_z)
 
-        on_target = pose_ok and xy_ok and vel_ok and z_ok
+        # 可选：MuJoCo 地面真实接触
+        if require_floor:
+            floor_ok = self._check_prefab_floor_contact()
+        else:
+            floor_ok = True
 
-        # 3) 更新 hold_counter
+        on_target = z_ok and xy_ok and pose_ok and vel_ok and floor_ok
+
         if on_target:
             self._insertion_hold_counter += 1
         else:
             self._insertion_hold_counter = 0
 
-        # 4) 成功触发：连续 hold_steps 步满足条件
         if self._insertion_hold_counter >= hold_steps:
-            reward += cfg_rwd.get("success_bonus", 80.0)
+            reward += cfg_rwd.get("success_bonus", 100.0)
             success = True
-            done    = True
-            # 插入越深奖励越高（bonus on top of success_bonus）
-            if payload_z <= deep_z:
-                reward += 20.0    # 深度插入额外 +20
+            done = True
             self._termination_reason = (
-                f"insert_success:z={payload_z*1000:.0f}mm,dtf={dtf*1000:.1f}mm,"
-                f"tilt={tilt:.3f},yaw={abs_yaw:.3f},hold={self._insertion_hold_counter}"
+                f"success:z={payload_z*1000:.0f}mm,dtf={dtf*1000:.1f}mm,"
+                f"tilt={tilt:.3f},yaw={abs_yaw:.3f},floor={floor_ok}"
             )
             return reward, done, success, is_collision
 
-        # 5) 渐进奖励：鼓励策略朝"进入插入阶段"和"下降更深"的方向探索
-        # 只在插入阶段内给予，避免干扰巡航阶段
-        if self._in_insertion_phase:
-            # 每低 1cm 给 0.2 奖励（引导持续下降）
-            # 基准 z = entry_z = 0.16，最低可达 ~0.10（insertion depth 100%）
-            descent_depth = max(0.0, entry_z - payload_z)  # 0 ~ 0.06
-            reward += 3.0 * descent_depth  # 0 ~ 0.18 per step（小量，但持续累积）
-
-            # 插入阶段内的"接近在位"奖励（即使未触发 hold，也给连续信号）
-            if xy_ok and pose_ok:
-                reward += 0.5  # 每步 0.5，激励在 entry_z 以下保持对准姿态
-
         # ══════════════════════════════════════════════════════════════════════
-        # 第九部分：reached_final Fallback（仅在 step 即将超时时触发）
-        #
-        # 旧版：只要 reached_final 就直接结束 → 策略没机会继续下降
-        # 新版：即使最后航点到达，也让策略继续尝试下降到 success_z
-        #       只有在 step 接近 max_steps 时（buffer=10 步内）才 fallback 终止
-        #       给最大 max_steps - 10 步的下降窗口
+        # 第十部分：reached_final 软成功 Fallback（即将超时且几乎成功）
         # ══════════════════════════════════════════════════════════════════════
         max_steps = self.config["sim"]["max_steps"]
         near_timeout = (self.current_step >= max_steps - 10)
 
         if self.reached_final and near_timeout:
-            # 即将超时且仍未成功 → 给部分奖励并终止
-            partial_scale = cfg_ins.get("partial_dist_scale", 0.05)
-
-            dist_bonus = max(0.0, 1.0 - dtf / partial_scale) * 20.0
-            depth_ref = max(0.01, entry_z - deep_z)
-            depth_frac = max(0.0, min(1.0,
-                (entry_z - self._best_insertion_z) / depth_ref))
-            z_bonus   = depth_frac * 20.0
-            vel_bonus = max(0.0, 1.0 - vel_xy_scalar / 0.3) * 5.0
-            tilt_bonus = max(0.0, 1.0 - tilt    / 0.3) * 10.0
-            yaw_bonus  = max(0.0, 1.0 - abs_yaw / 0.3) * 10.0
-
-            reward += dist_bonus + z_bonus + vel_bonus + tilt_bonus + yaw_bonus
-            self._termination_reason = (
-                f"reached_final:dtf={dtf*1000:.1f}mm,best_z={self._best_insertion_z*1000:.0f}mm,"
-                f"tilt={tilt:.3f},yaw={abs_yaw:.3f},hold={self._insertion_hold_counter}"
-            )
+            # 几乎成功（达 3/5 条件以上）→ soft_success_bonus
+            cond_met = int(z_ok) + int(xy_ok) + int(pose_ok) + int(vel_ok) + int(floor_ok)
+            if cond_met >= 3:
+                reward += cfg_rwd.get("soft_success_bonus", 40.0) * (cond_met / 5.0)
+                self._termination_reason = (
+                    f"soft_success:cond={cond_met}/5,z={payload_z*1000:.0f}mm,"
+                    f"dtf={dtf*1000:.1f}mm"
+                )
+            else:
+                # 连续部分奖励（鼓励接近，但量级较小）
+                partial_scale = cfg_ins.get("partial_dist_scale", 0.05)
+                dist_bonus = max(0.0, 1.0 - dtf / partial_scale) * 10.0
+                depth_frac = max(0.0, min(1.0,
+                    (entry_z - self._best_insertion_z) / max(entry_z - target_pz_ins, 1e-6)))
+                z_bonus    = depth_frac * 10.0
+                tilt_bonus = max(0.0, 1.0 - tilt    / 0.3) * 5.0
+                yaw_bonus  = max(0.0, 1.0 - abs_yaw / 0.3) * 5.0
+                reward += dist_bonus + z_bonus + tilt_bonus + yaw_bonus
+                self._termination_reason = (
+                    f"reached_final:cond={cond_met}/5,dtf={dtf*1000:.1f}mm,"
+                    f"best_z={self._best_insertion_z*1000:.0f}mm"
+                )
             done = True
             return reward, done, success, is_collision
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第九部分：Crash 检测（grace period 后生效）
+        # 第十一部分：Crash 检测
         # ══════════════════════════════════════════════════════════════════════
         grace_steps = cfg_logic.get("crash_grace_steps", 30)
         if self.current_step >= grace_steps:
@@ -960,15 +1052,12 @@ class CableRobotEnvWithObstacles:
                 return reward, True, False, False
 
         # ══════════════════════════════════════════════════════════════════════
-        # 第十部分：航点前进奖励
+        # 第十二部分：航点前进 + 单步裁剪
         # ══════════════════════════════════════════════════════════════════════
         if getattr(self, '_wp_just_advanced', False):
             reward += cfg_rwd.get("waypoint_bonus", 1.0)
             self._wp_just_advanced = False
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第十一部分：单步奖励裁剪
-        # ══════════════════════════════════════════════════════════════════════
         r_min = cfg_logic.get("reward_clip_min", -5.0)
         r_max = cfg_logic.get("reward_clip_max",  5.0)
         reward = float(np.clip(reward, r_min, r_max))

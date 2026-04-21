@@ -83,7 +83,7 @@ DEFAULT_CONFIG = {
     # 【state_dim 计算】(n=5): 10 + 15 + 26 = 51
     # ==========================================================================
     "scene": {
-        "n_obstacles":        5,            # 课程最高难度上限（state_dim 所依赖）
+        "n_obstacles":        3,            # 课程最高难度上限（state_dim 所依赖）
         "radius_range":       (0.006, 0.015),
         "obstacle_z_center":  0.15,
         "obstacle_halfheight": 0.15,
@@ -107,29 +107,39 @@ DEFAULT_CONFIG = {
     #   保守取 0.40m（±0.2m 散布）
     # ==========================================================================
     "planning": {
-        # [WS-1] 机械臂工作半径（A* 硬约束，超出此半径的网格点不可通行）
+        # [WS-1] 机械臂工作半径（A* 硬约束）
         "workspace_radius":  0.50,
 
         # payload_radius = socket 外接圆 sqrt(0.05²+0.05²)=0.0707 + 安全余量 → 0.075
         "payload_radius":    0.075,
-        "planning_margin":   0.02,
-        "planning_grid_res": 0.02,
+        "planning_margin":   0.03,
+        "planning_grid_res": 0.025,
 
-        # [WS-2] path_width 从 scene 节移到 planning，严格推导为 0.4m
-        "path_width":        1.2,
+        # [WS-2] path_width 严格推导：2×(ws_r - mid_r - payload_r) = 2×(0.5-0.175-0.075) = 0.5m
+        #        保守取 0.4m（±0.2m 散布），避免 A* 把路径规划到工作空间外
+        "path_width":        0.6,
+
+        # [CORR] 走廊方向约束（障碍物与 A* 走廊同侧）
+        # perp = (-dy, dx)；对 start(0.3,0.15)→target(-0.3,0.2), perp≈(0,-1)
+        #   +1: 障碍物 & 走廊都在 perp 正侧（即 -Y，靠近底座）
+        #   -1: 障碍物 & 走廊都在 perp 负侧（即 +Y，远离底座）
+        "corridor_side":          +1,
+        "corridor_forbid_margin": 0.05,
 
         "bounds_margin":     0.5,
         "max_expansions":    100000,
 
-        # 巡航高度：从 0.25 → 0.30，保证 payload 顶面 (cruise + 0.1) = 0.40 > obstacle 顶 0.30
+        # [Z-1] 巡航高度 = 0.25（payload 中心 z）
+        # payload 顶面 z = 0.25 + 0.1 = 0.35 > obstacle 顶 0.30 ✓
         "payload_z_cruise":  0.25,
 
-        # [INS] target_z_descent = 插入入口 z (payload 中心)
-        # 物理：payload 底面 = target_z_descent - socket_hz = 0.16 - 0.1 = 0.06m
-        # 距 rebar 顶 (z=0.04) 有 20mm 缓冲，策略从此开始自主下降
-        "target_z_descent":  0.1,
+        # [Z-2] target_z_descent = A* 轨迹末端 payload 中心 z
+        # 新钢筋几何：rebar 总高 20mm（从 z=0 立到 z=0.02）
+        # target_z_descent 应高于 "触地+完全插入" 的最终 z（0.10），
+        # 给 RL 策略留下降空间。取 0.12 表示 payload 底面 0.02m（刚好钢筋顶端）
+        "target_z_descent":  0.12,
 
-        "num_descent_steps": 15,          # 8→6（下降更紧凑）
+        "num_descent_steps": 10,          # 下降航点数（多航点 → 下降平滑）
         "num_lift_steps":    3,
     },
 
@@ -170,82 +180,115 @@ DEFAULT_CONFIG = {
     #   4. 新增钢筋"对准奖励"：payload 接近正确插入姿势时给予引导
     #   5. 成功奖励大幅提高（+80），拉开与平台期差距
     # ==========================================================================
+    # ==========================================================================
+    # 7. 奖励函数系数（PPO 课程学习专用架构）
+    #
+    # 设计目标：为 PPO 课程学习（0 → N 障碍物）提供清晰梯度信号
+    #
+    # 架构：
+    #   【势能 1】终点吸引（potential-based shaping）：
+    #     U_goal_xy = k_goal_xy × ||p_xy - target_xy||²
+    #     U_goal_z  = k_goal_z × (p_z - target_z)²   [仅 dtf<激活阈值时]
+    #     reward += -(U_t - U_{t-1})   # 势能差分式 shaping，γ=0.99 相容
+    #     好处：累积和 = U_start - U_end，无需调节每步量级
+    #
+    #   【势能 2】障碍物排斥（APF）：
+    #     U_obs = Σ k × max(0, 1/d_eff - 1/rho_0)²
+    #     保留原调好的曲线，仅在 dist_edge < rho_0 激活
+    #
+    #   【姿态严格控制】（核心）：
+    #     tilt/yaw 线性 + 负指数复合惩罚
+    #     payload_tilt_penalty_coef=0.3, scale=0.08（强梯度）
+    #     线性项 0.5*tilt（小偏差持续引导）
+    #
+    #   【防摆】（辅助，不是核心）：
+    #     payload_angvel_penalty_coef = 0.04（从旧 0.08 减半）
+    #     swing_xy 连续指数惩罚
+    #
+    #   【成功/失败奖励】（终止信号，量级清晰）：
+    #     success_bonus  = +100  ← 拉开与失败差距
+    #     collision      = -30
+    #     crash          = -20
+    #     instability    = -15
+    #     timeout        = -5
+    #     预期 return 差距 > 220
+    # ==========================================================================
     "reward": {
-        # ── 终止奖励 ──────────────────────────────────────────────────────────
-        "success_bonus":          80.0,     # 旧 50 → 80（插入任务难度更大，奖励相应提高）
-        "timeout_penalty":        -10.0,
-        "collision_penalty":      -20.0,    # 旧 -15 → -20（新 socket 体积更大，碰撞更致命）
+        # ── 终止奖励（量级清晰，拉开差距）──────────────────────────────────
+        "success_bonus":          100.0,    # 成功插入 + 触地稳定
+        "soft_success_bonus":     40.0,     # "软成功"（几乎成功但超时）给部分奖励
+        "timeout_penalty":        -5.0,
+        "collision_penalty":      -30.0,    # 撞障碍物（致命）
         "out_of_bounds_penalty":  -15.0,
-        "crash_penalty":          -20.0,    # 旧 -15 → -20
+        "crash_penalty":          -20.0,    # payload 坠落
+        "instability_penalty":    -15.0,    # 失稳早停
 
-        # ── 稠密进展奖励 ─────────────────────────────────────────────────────
-        "progress_coef":          5.0,
-        "progress_clip":          0.1,
+        # ── 势能 1：终点吸引势能（主奖励信号）──────────────────────────────
+        # U_goal_xy = k × dtf²，势能差分式 shaping（Ng et al. 1999）
+        # 量级：起终点距离 0.6m → U_start = 1.0 × 0.36 = 0.36
+        #       总累计 ≈ +0.36（靠近时递减到 0）
+        # 放大后：+36（占成功奖励的约 30%）
+        "goal_potential_xy_coef":   100.0,  # U_xy = 100 × dtf²（dtf=0.6→U=36）
+        "goal_potential_z_coef":    100.0,  # U_z  = 100 × dz²（dz=0.1→U=1）
+        "goal_potential_activate_dist":  0.15,  # dtf<15cm 才启用 Z 势能
 
-        # ── 里程碑奖励 ────────────────────────────────────────────────────────
-        "waypoint_bonus":         1.0,
-
-        # ── 每步惩罚 ─────────────────────────────────────────────────────────
-        "step_penalty":           0.0,
-
-        # ── 负指数连续惩罚 ───────────────────────────────────────────────────
-
-        "velocity_penalty_coef":  0.03,
-        "velocity_penalty_scale": 0.3,
-
-        "swing_penalty_coef":     0.15,
-        "swing_penalty_scale":    0.03,
-
-        "verticality_penalty_coef": 0.1,
-        "verticality_penalty_scale": 0.15,
-
-        "joint_smooth_penalty_coef":  0.02,
-        "joint_smooth_penalty_scale": 0.1,
-
-        # ── [MERGE-3] 吊装物姿态惩罚（插入任务大幅强化）────────────────────
-        # 旧版 v4 (coef=0.08, scale=0.15) 对于吊运任务够用，
-        # 但插入要求 tilt<0.08，必须更强的梯度信号。
-        # 采用：线性项 + 负指数 的复合形式，小偏差有线性梯度，大偏差饱和
-        "payload_tilt_penalty_coef":     0.3,     # 0.08 → 0.3（指数项加大 4×）
-        "payload_tilt_penalty_scale":    0.08,    # 0.15 → 0.08（scale 缩小，让小偏差也被惩罚）
-        "payload_tilt_linear_coef":      0.5,     # 恢复线性项，提供持续梯度
-        "payload_tilt_linear_clip":      1.0,     # 线性项上限（防止大偏差时爆炸）
-
-        "payload_yaw_penalty_coef":      0.4,     # 0.06 → 0.4（yaw 对 4 孔插入最敏感）
-        "payload_yaw_penalty_scale":     0.1,     # 0.3 → 0.1
-        "payload_yaw_linear_coef":       0.6,
-        "payload_yaw_linear_clip":       1.0,
-
-        "payload_angvel_penalty_coef":   0.08,    # 0.02 → 0.08 加强角速度抑制
-        "payload_angvel_penalty_scale":  0.5,
-
-        # ── [v3-APF] 障碍物 APF 排斥势（保留旧版校准曲线）────────────────────
-        # 作用半径调整为与新 payload_radius=0.075 协调
-        "obstacle_rho_0":           0.10,   # 0.08 → 0.10（payload 变大，警告半径扩大）
+        # ── 势能 2：障碍物排斥（APF，保留旧调好的曲线）──────────────────────
+        "obstacle_rho_0":           0.10,
         "obstacle_d_min":           0.005,
         "obstacle_apf_coef":        3.0e-4,
         "obstacle_apf_max":         1.0,
         "obstacle_penalty_coef":    0.02,
         "obstacle_penalty_scale":   0.05,
 
-        # ── [MERGE-3 NEW] 钢筋对准引导奖励（插入任务专属）──────────────────
-        # 目标：当 payload 接近目标位置时，激励正确的 XY 对齐和姿态
-        # 几何考量：新 xy_tolerance=6mm，scale 取其 1.5-2 倍（稍宽，有梯度）
-        # 1) 对准距离奖励：payload_xy 到 target_xy 距离 < alignment_activate_dist 时激活
-        # 2) 高度下降奖励：payload_z 接近目标插入 z 时给予渐增奖励
-        # 3) 成功插入的精确条件见 _compute_reward 中的终点判定
-        "alignment_activate_dist":   0.08,   # XY 距离 < 8cm 激活对准引导
-        "alignment_xy_coef":         3.0,    # XY 对准奖励系数
-        "alignment_xy_scale":        0.01,   # 1cm 尺度（比 xy_tol 稍宽，有梯度）
-        "alignment_pose_coef":       4.0,    # 姿态对准奖励
-        "alignment_pose_scale":      0.05,   # 姿态尺度（与 tilt/yaw 容差同量级）
+        # ── 姿态严格控制（核心，线性+指数复合）──────────────────────────────
+        "payload_tilt_penalty_coef":     0.3,
+        "payload_tilt_penalty_scale":    0.08,
+        "payload_tilt_linear_coef":      0.5,
+        "payload_tilt_linear_clip":      1.0,
 
-        # ── [MERGE-4 NEW] 真实 MuJoCo 接触检测开关 ─────────────────────────────
-        # True = 使用 data.contact 检测 prefab_body 与 obstacle/rebar 的真实接触
-        # False = 仅使用 payload_xy 距离（旧版行为）
+        "payload_yaw_penalty_coef":      0.4,
+        "payload_yaw_penalty_scale":     0.1,
+        "payload_yaw_linear_coef":       0.6,
+        "payload_yaw_linear_clip":       1.0,
+
+        # ── 防摆（辅助，不是核心）──────────────────────────────────────────
+        "payload_angvel_penalty_coef":   0.04,   # 从旧 0.08 减半（非核心）
+        "payload_angvel_penalty_scale":  0.5,
+        "swing_penalty_coef":     0.10,          # 旧 0.15 微降
+        "swing_penalty_scale":    0.03,
+        "verticality_penalty_coef": 0.08,        # 旧 0.10 微降
+        "verticality_penalty_scale": 0.15,
+
+        # ── 控制平滑（减小抖动）────────────────────────────────────────────
+        "velocity_penalty_coef":  0.03,
+        "velocity_penalty_scale": 0.3,
+        "joint_smooth_penalty_coef":  0.02,
+        "joint_smooth_penalty_scale": 0.1,
+
+        # ── 对准精细奖励（平滑二次，插入阶段激活）────────────────────────────
+        # 替代原指数悬崖，避免抖动
+        # coef × (1 - dtf/activate_dist)² 全程平滑
+        "alignment_activate_dist":   0.05,   # dtf<5cm 激活
+        "alignment_xy_coef":         3.0,    # dtf=0 时 +3
+        "alignment_pose_coef":       3.0,    # pose_err=0 时 +3
+        "alignment_pose_activate":   0.10,   # pose_err<0.10 rad 激活
+
+        # ── 抖动抑制（插入阶段内）──────────────────────────────────────────
+        "stability_vel_threshold":   0.05,   # <5cm/s 视为静止
+        "stability_bonus":           1.5,
+        "action_rate_coef":          0.5,    # Δq_t - Δq_{t-1} 惩罚
+        "action_rate_scale":         0.03,
+
+        # ── 进展奖励（旧版保留，辅助 shaping）────────────────────────────────
+        "progress_coef":          2.0,    # 旧 5.0 → 2.0（势能差分已提供主梯度）
+        "progress_clip":          0.1,
+        "waypoint_bonus":         1.0,
+        "step_penalty":           0.0,
+
+        # ── MuJoCo 真实接触检测开关 ────────────────────────────────────────
         "use_mujoco_contact":        True,
 
-        # ── 关节极限惩罚（保留但不启用） ──────────────────────────────────────
+        # ── 关节极限（保留但当前不启用）──────────────────────────────────
         "joint_limit_penalty":   -0.05,
         "joint_limit_margin":     0.1,
         "joint_smooth_penalty":  -0.005,
@@ -415,8 +458,8 @@ DEFAULT_CONFIG = {
         # ── 性能触发参数（主模式）──
         "ramp_mode":                  "performance",
         "perf_window":                30,
-        "perf_sr_threshold":          0.7,
-        "perf_reward_threshold":      60.0,
+        "perf_sr_threshold":          0.6,      # 60% 成功率（比 0.7 宽松，便于 0→1 首次升级）
+        "perf_reward_threshold":      80.0,     # 匹配新奖励量级（成功 ≈150~200，失败 ≈-50）
         "perf_min_episodes_per_level": 100,
         "perf_regression_tol":       -30.0,
         "perf_hard_cap_steps":       600_000,
@@ -429,7 +472,7 @@ DEFAULT_CONFIG = {
             (1_500_000,  4),
             (2_000_000,  5),
         ],
-        "ppo_max_n_obstacles":        5,
+        "ppo_max_n_obstacles":        3,
         "ppo_stable_n_obstacles":     0,
         "ppo_stable_timesteps":       400_000,
         "ppo_ramp_start_timesteps":   400_000,
@@ -491,7 +534,7 @@ DEFAULT_CONFIG = {
     "test": {
         "n_episodes":         20,
         "render":             False,
-        "n_obstacles":        5,        # 必须 ≤ scene.n_obstacles = 5
+        "n_obstacles":        3,        # 必须 ≤ scene.n_obstacles = 5
         "obstacle_seed":      6,
         "save_paths":         False,
         "save_paths_dir":     "test_paths",
@@ -510,59 +553,70 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 19. 插入任务成功判定参数（基于 "下降到位并保持稳定"）
+    # 19. 插入任务成功判定（基于 "触地 + 姿态 + XY" 物理约束）
     #
-    # 物理分析（严格数学推导）：
-    # ──────────────────────────────────────
-    #   rebar 从 z=0 立起到 z=0.04（total 40mm）
-    #   payload 底面 z = payload_center_z - socket_hz = payload_z - 0.1
+    # 新几何参数（用户设定）：
+    #   钢筋：半径 3mm，总高 20mm（从 z=0 立到 z=0.02）
+    #   方孔：半宽 7mm，深度 60mm
+    #   单边径向余量 = 4mm
     #
-    #   payload_z=0.16 → 底面 z=0.06（rebar 顶上方 20mm，即将接触）
-    #   payload_z=0.14 → 底面 z=0.04（刚接触 rebar 顶端）
-    #   payload_z=0.13 → 底面 z=0.03（插入深度 10mm，25% 深度）
-    #   payload_z=0.12 → 底面 z=0.02（插入深度 20mm，50% 深度）
-    #   payload_z=0.11 → 底面 z=0.01（插入深度 30mm，75% 深度）
-    #   payload_z=0.10 → 底面 z=0.00（插入深度 40mm，100% 深度，触地）
+    # payload_z → 底面 z → 插入深度 对照（严格）：
+    # ──────────────────────────────────────────
+    #   payload_z=0.12 → 底面 z=+0.020（刚接触钢筋顶端，0% 插入）
+    #   payload_z=0.11 → 底面 z=+0.010（插入 10mm，50% 深度）
+    #   payload_z=0.10 → 底面 z=+0.000（触地，钢筋完全嵌入 20mm，100%）
+    #   payload_z<0.10 → 物理不可能（底面 < 地面）
     #
-    # 成功判定策略：
-    # ──────────────────────────────────────
-    #   1. "进入插入阶段"：payload_z ≤ entry_z = 0.16 且 XY 对准
-    #      → 开始累计 hold_counter（不立即成功，允许 rebar 物理接触）
-    #   2. "成功插入"：payload_z ≤ success_z = 0.13 （插入深度 ≥ 25%）
-    #      AND XY 对准、姿态稳定、速度低  持续 hold_steps 步
-    #      → is_success=True，episode 终止 + 全额奖励
-    #   3. reached_final 到达但未满足成功判定 → Tier-2/Tier-3 部分奖励
+    # 成功判定（用户要求"触地稳定即成功"）：
+    #   必须同时满足（连续 hold_steps 步）：
+    #     (1) payload_z ∈ [success_z_min, success_z_max]  ← 底面接近地面
+    #     (2) dtf < xy_tolerance  ← XY 对准
+    #     (3) tilt < tilt_tolerance  ← 竖直
+    #     (4) yaw < yaw_tolerance  ← 4 孔对 4 杆
+    #     (5) vel_xy < vel_xy_tol, |vz| < vel_z_tol  ← 稳定不运动
+    #     (6) (可选) MuJoCo 检测到 floor 接触
     #
-    # XY/姿态 容差（比旧版宽）：
-    # ──────────────────────────────────────
-    #   由于在插入过程中 rebar 会物理约束 payload 的 XY 和 yaw，
-    #   成功判定时容差可以放宽。策略只需要把 payload 下降到指定深度即可。
-    #   xy_tolerance:   0.006 (6mm，因为 rebar 会把 payload 对齐到孔位)
-    #   tilt_tolerance: 0.10  (5.7°，rebar 插入后会纠正部分倾斜)
-    #   yaw_tolerance:  0.05  (2.9°，rebar 会强约束 yaw)
+    # 容差严格推导（单边余量 4mm，分配到 xy/yaw/tilt）：
+    #   xy_tolerance × 1 + yaw_tolerance × 49.5mm + tilt_tolerance × 60mm ≤ 4mm 余量
+    #   (49.5mm = 对角半径 sqrt(0.035²+0.035²) 是 yaw 偏差导致的最大 XY 位移杠杆)
+    #   (60mm = 孔深，tilt 偏差在孔底处的位移杠杆)
+    #   任意两项叠加 ≤ 4mm （第三项为零或很小）
+    #
+    # 实用容差（考虑 rebar 动力学软纠正）：
+    #   xy_tolerance   = 0.003 (3mm)  ← 严格，1mm 安全余量
+    #   yaw_tolerance  = 0.04 (2.3°)  ← 位移 ~2mm，与 xy 合计 5mm（略超余量，但动力学纠正）
+    #   tilt_tolerance = 0.05 (2.9°)  ← 位移 ~3mm（略宽，因插入后会自动纠正）
     # ==========================================================================
     "insertion": {
-        # 插入阶段触发阈值（payload 中心 z，进入此阶段开始连续判定）
-        "entry_z":               0.12,     # 底面 z=0.06，即将接触 rebar
-        # 成功判定阈值（payload 中心 z，低于此视为成功插入）
-        "success_z":             0.07,     # 底面 z=0.03，插入深度 ≥ 25%
-        # 完全插入阈值（给部分奖励用，越深越好）
-        "deep_z":                0.11,     # 底面 z=0.01，插入深度 ≥ 75%
+        # 进入插入阶段阈值（payload 进入此 z 以下时 in_insertion_phase=True）
+        "entry_z":               0.16,     # 底面 z=0.06（钢筋顶 4cm 上方）
 
-        # 连续保持多少步才判定成功（防止一闪而过）
-        "hold_steps":            3,        # 5 步 @ 10Hz = 0.5s
+        # 成功区间 [success_z_min, success_z_max]（payload 中心 z）
+        # 目标 = payload 底面触地（底面 z≈0 → payload_z=0.10）
+        "target_payload_z":      0.10,     # 最终成功位置（底面触地）
+        "success_z_tolerance":   0.015,    # ±15mm（底面 z 在 [-5mm, +25mm]）
+        #   实际触发：payload_z ∈ [0.085, 0.115]
+        #   0.115 底面 z=15mm，钢筋已插入 5mm（>25%，物理上会产生触地前的接触）
+        #   0.085 底面被地面约束住（MuJoCo 不让穿透）
 
-        # XY/姿态 容差（成功判定需同时满足）
-        # 此容差在 "插入中" 阶段使用，相对宽松（依赖 rebar 物理约束）
-        "xy_tolerance":          0.006,    # 6mm（插入前要 XY 对准，但 rebar 会进一步纠正）
-        "tilt_tolerance":        0.10,     # 5.7°（允许一定倾斜，插入后会改善）
-        "yaw_tolerance":         0.05,     # 2.9°（rebar 强约束 yaw）
+        # 连续 hold_steps 步满足所有条件 → 成功
+        "hold_steps":            5,        # 5 步 @ 10Hz = 0.5s 稳定
 
-        # 速度容差（成功判定需静止或缓慢下降）
-        "vel_xy_tolerance":      0.15,     # 插入时 XY 速度需小
-        "vel_z_tolerance":       0.30,     # Z 速度（下降中，允许轻微下降）
+        # 姿态 & XY 容差（严格按 4mm 径向余量推导，动力学略放宽）
+        "xy_tolerance":          0.003,    # 3mm（单边余量 4mm，留 1mm 安全）
+        "tilt_tolerance":        0.05,     # 2.9°（rebar 接触后会纠正）
+        "yaw_tolerance":         0.04,     # 2.3°（对角半径 49.5mm × 0.04 ≈ 2mm 位移）
 
-        # 部分奖励的距离标度
-        "partial_dist_scale":    0.05,     # dtf < 5cm 给 Tier-3 部分奖励
+        # 速度容差（成功判定需低速平稳）
+        "vel_xy_tolerance":      0.05,     # <5cm/s
+        "vel_z_tolerance":       0.05,     # <5cm/s（触地后应静止）
+
+        # 是否启用真实 MuJoCo 地面接触检测
+        # True: 必须 payload 与 floor 有真实 contact 才算成功（最严格）
+        # False: 仅依赖 payload_z 范围判断
+        "require_floor_contact": True,
+
+        # 部分奖励的距离尺度
+        "partial_dist_scale":    0.05,     # dtf<5cm 给 Tier-3 部分奖励
     },
 }

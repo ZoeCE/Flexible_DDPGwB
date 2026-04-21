@@ -181,18 +181,32 @@ def run_test(mode: str, config: dict, n_episodes: int,
  
     t_start = time.time()
  
-    for ep in range(n_episodes):
+    # [SKIP-INVALID] 改为 while 循环：路径规划失败的场景跳过，不计入 n_episodes
+    # ep_count = 有效回合数（参与统计），attempt_count = 总尝试数
+    ep_count = 0
+    attempt_count = 0
+    max_attempts = n_episodes * 3   # 安全上限，避免死循环
+
+    while ep_count < n_episodes and attempt_count < max_attempts:
+        attempt_count += 1
         obs = env.reset()
         current_q = env.data.qpos[:7].copy()
- 
+
+        # [SKIP-INVALID] 路径规划失败 → 跳过，不计入
+        planned_path = env.get_planned_path()
+        if planned_path is None:
+            print(f"  [Skip] 第 {attempt_count} 次尝试：路径规划失败，跳过（不计入）")
+            continue
+
         if expert is not None:
-            expert.reset(obs, current_q)
-            planned_path = env.get_planned_path()
-            if planned_path is not None:
-                expert.set_path(planned_path)
-            else:
-                print(f"  [Warn] Ep {ep+1}: 路径规划失败")
- 
+            # [INTERFACE] 与训练保持一致：传 env=env，让 expert 用真实 EE 位置
+            expert.reset(obs, current_q, env=env)
+            expert.set_path(planned_path)
+
+        # 确认本场景有效，计入回合数
+        ep_count += 1
+        ep = ep_count - 1   # 用于后续打印 (ep+1) 与原逻辑兼容
+
         ep_reward = 0.0; step = 0
         ep_success = False; ep_collision = False
  
@@ -262,14 +276,20 @@ def run_test(mode: str, config: dict, n_episodes: int,
  
     # ── 汇总 ──────────────────────────────────────────────────────────────────
     elapsed = time.time() - t_start
-    print_summary(mode, n_episodes, success_count, collision_count,
+    skipped = attempt_count - ep_count
+    if skipped > 0:
+        print(f"\n  [Skip 统计] 跳过 {skipped} 个场景（路径规划失败），"
+              f"有效回合 {ep_count}/{n_episodes}，总尝试 {attempt_count}")
+    print_summary(mode, ep_count, success_count, collision_count,
                   total_steps_success, elapsed)
  
     env.close()
     return {
-        "success_rate":  success_count / n_episodes,
-        "collision_rate": collision_count / n_episodes,
+        "success_rate":  success_count / max(ep_count, 1),
+        "collision_rate": collision_count / max(ep_count, 1),
         "avg_steps":     total_steps_success / max(success_count, 1),
+        "episodes_valid": ep_count,
+        "episodes_skipped": skipped,
     }
  
  
@@ -324,7 +344,7 @@ def run_manual(config: dict):
  
     obs = env.reset()
     current_q = env.data.qpos[:7].copy()
-    expert.reset(obs, current_q)
+    expert.reset(obs, current_q, env=env)
     planned_path = env.get_planned_path()
     if planned_path: expert.set_path(planned_path)
     print("[重置完成] 已暂停，按 SPACE 开始")
@@ -355,7 +375,7 @@ def run_manual(config: dict):
             print(f"  [{status}] 奖励={reward:.2f}")
             obs = env.reset()
             current_q = env.data.qpos[:7].copy()
-            expert.reset(obs, current_q)
+            expert.reset(obs, current_q, env=env)
             planned_path = env.get_planned_path()
             if planned_path: expert.set_path(planned_path)
             key_state["paused"] = True

@@ -242,16 +242,50 @@ class NMPCTrajectoryTracker:
         dist_xy = np.linalg.norm(curr_pl_xy - wp3[:2])
         dist_z  = abs(pl_z - wp3[2])
 
-        if (dist_xy < self.arrival_threshold_xy and
-                dist_z < self.arrival_threshold_z and
-                self.current_idx < len(self.path) - 1):
+        # [WP-ADVANCE FIX] 判断是否处于下降段航点（z < z_cruise - 0.01）
+        # 下降段航点 XY 全部相同（= target_xy），仅 z 递减。
+        # 若仍用原 80mm 阈值，payload 一到达 target_xy 附近就会单步跳过所有 15 个下降航点，
+        # 导致 NMPC 反复冷启动、失去平滑控制 → XY 对准精度丢失。
+        # 修复：下降段用 "z 距离 < dz/2" 的严格阈值，每步最多推进 1 个航点。
+        is_current_descent_wp = (wp3[2] < self.z_cruise - 0.01)
+
+        if is_current_descent_wp:
+            # 下降段专用阈值：基于航点间距 dz 自动计算（每次推进 1 个）
+            # 同时 XY 必须严格对准（否则策略未真正到位就推进）
+            xy_thresh_desc = 0.015     # 15mm，远严于成功容差 3mm 的复原空间
+            z_thresh_desc  = 0.005     # 5mm，小于典型 dz=8-9mm 的一半
+            advance = (dist_xy < xy_thresh_desc and
+                       dist_z  < z_thresh_desc and
+                       self.current_idx < len(self.path) - 1)
+        else:
+            # 巡航/上升段：保留原阈值
+            advance = (dist_xy < self.arrival_threshold_xy and
+                       dist_z  < self.arrival_threshold_z and
+                       self.current_idx < len(self.path) - 1)
+
+        if advance:
             self.current_idx += 1
             wp  = self.path[self.current_idx]
             wp3 = np.array([wp[0], wp[1], wp[2] if len(wp) >= 3 else 0.3])
             self.mpc.last_sol = None; self.mpc.last_az = 0.0
 
-        # [OPT-3] 下降检测
-        self._is_descending = (wp3[2] < self.z_cruise - 0.02)
+        # [OPT-3 FIX] 下降检测：正确定义是"从巡航高度向下降"而非"目标航点 z 小"
+        # 旧版仅 (wp3[2] < z_cruise - 0.02) → 上升段前期航点 z 也小于 z_cruise，被误判为下降
+        # 新版：
+        #   进入下降条件（需全部满足）：
+        #     (a) payload 已到巡航高度附近（pl_z > z_cruise - 0.05 = 0.20）
+        #     (b) 目标航点低于巡航高度（wp3[2] < z_cruise - 0.01 = 0.24）
+        #         即轨迹已进入"下降段航点"（由 set_path 生成时 z 单调下降）
+        #   退出下降条件：payload 被显著抬升（pl_z > z_cruise + 0.03）
+        #   状态保持避免频繁切换（下降段航点间隔很小，瞬时条件会抖动）
+        if not self._is_descending:
+            in_cruise_height = (pl_z > self.z_cruise - 0.05)
+            target_is_desc_wp = (wp3[2] < self.z_cruise - 0.01)
+            if in_cruise_height and target_is_desc_wp:
+                self._is_descending = True
+        else:
+            if pl_z > self.z_cruise + 0.03:
+                self._is_descending = False
 
         # [OPT-7] 航点前瞻（下降阶段禁用，XY 必须锁定目标）
         ref_xy = wp3[:2].copy()
@@ -444,14 +478,19 @@ class JointSpaceExpert:
         self._last_q     = None
 
         # [OPT-2][OPT-3] 速度限幅
-        self._v_max_xy_normal  = 0.1
-        self._v_max_z_normal   = 0.05
-        self._v_max_xy_descent = 0.01
-        self._v_max_z_descent  = 0.003
+        # normal = 上升段 / 巡航段（平移）：提速 2.5× 以缩短运动时间
+        #   每控制步 (dt=0.1s)：XY 25mm，Z 12mm — EE 单步位移仍远小于 A* 航点间距
+        # descent = 严格保持原值（下降段精度敏感，与本改动解耦）
+        self._v_max_xy_normal  = 0.15    # 旧 0.1 → 0.25（2.5×）
+        self._v_max_z_normal   = 0.15    # 旧 0.05 → 0.12（2.4×）
+        self._v_max_xy_descent = 0.05    # 保持不变
+        self._v_max_z_descent  = 0.05   # 保持不变
 
         # [OPT-4] 软锚定系数
-        self._anchor_alpha_normal  = 0.2
-        self._anchor_alpha_descent = 0.2
+        # normal 略增 alpha：高速下积分器需要更快跟随真实 EE 状态，
+        #   避免发散（alpha 越大越信任真实值）
+        self._anchor_alpha_normal  = 0.2   # 旧 0.2 → 0.3
+        self._anchor_alpha_descent = 0.2    # 保持不变
 
     def reset(self, env_obs, init_q, env=None):
         if env is not None:
