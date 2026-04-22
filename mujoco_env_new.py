@@ -112,8 +112,10 @@ class CableRobotEnvWithObstacles:
         for _ in range(max(1, self.latency_steps + 1)):
             self.action_queue.append(init_q_default.copy())
 
-        # 状态维度（10 + 3n + 26）
-        self.state_dim = 10 + (self.n_obstacles * 3) + 26
+        # [V3-OBS] 状态维度（10 + 3n + 26 + 9）
+        # 新增9维: phase_encode(3) + progress(1) + z_error(1) + rebar_errors(4)
+        # 注: payload_tilt/yaw 替换了原来的两个0.占位，不增加维度
+        self.state_dim = 10 + (self.n_obstacles * 3) + 26 + 9
 
         self._prev_q        = init_q_default.copy()
         self._q_margin_ratio = float(self.cfg_reward.get("joint_limit_margin", 0.1))
@@ -510,6 +512,9 @@ class CableRobotEnvWithObstacles:
 
         # [POT-NEW] 势能差分奖励状态（第一步置 None，用"当前即初始"值）
         self._prev_goal_potential = None
+        # [V3] 新增势能状态
+        self._prev_phi_z = None
+        self._prev_descent_depth = 0.0
 
         # [STABLE] 抖动抑制：记录上一步 Δq，用于 action rate 惩罚
         self._prev_delta_q = np.zeros(self.action_dim, dtype=np.float32)
@@ -717,41 +722,48 @@ class CableRobotEnvWithObstacles:
                 return True
         return False
 
-    # ── _compute_reward ────────────────────────────────────────────────────────
+    # ── _compute_reward V3 ──────────────────────────────────────────────────
 
     @staticmethod
     def _neg_exp(value, coef, scale):
         """负指数惩罚：coef * (1 - exp(-value/scale))。"""
         return coef * (1.0 - np.exp(-value / max(scale, 1e-8)))
 
+    @staticmethod
+    def _log_potential(d, k, eps):
+        """对数势能: Φ(d) = k * log(d + eps)"""
+        return k * np.log(d + eps)
+
+    def _compute_rebar_errors(self, payload_xy, payload_mat):
+        """计算4根钢筋与对应方孔的XY偏差。"""
+        rebar_pos = np.array([
+            [ 0.035,  0.035], [ 0.035, -0.035],
+            [-0.035,  0.035], [-0.035, -0.035]], dtype=np.float64)
+        R_pl = payload_mat[:2, :2]
+        errors = np.zeros(4)
+        for i in range(4):
+            hole_w = payload_xy + R_pl @ rebar_pos[i]
+            rebar_w = self.target_pos + rebar_pos[i]
+            errors[i] = float(np.linalg.norm(hole_w - rebar_w))
+        return errors, float(np.max(errors)), float(np.mean(errors))
+
     def _compute_reward(self, action, current_q, prev_q, obs):
         """
-        [PPO-CURRICULUM] 双重势能奖励 + 严格姿态 + 触地成功判定。
+        [V3] 分层阶段感知Reward。
 
-        架构（严格按 PPO 课程学习需求设计）：
-          1. 失稳早停（最优先）
-          2. 碰撞检测（obstacle 致命终止；rebar/floor 允许）
-          3. 【势能 1】终点吸引势能（差分式 shaping，主奖励信号）
-             U_goal_xy = k_xy × dtf²
-             U_goal_z  = k_z × (pz - target_pz)²   [仅 dtf<activate_dist 启用]
-             reward += -(U_t - U_{t-1})
-          4. 【势能 2】障碍物排斥势能 APF（保留旧调好曲线）
-          5. 姿态严格惩罚（tilt/yaw 线性 + 指数，核心）
-          6. 防摆惩罚（swing / 角速度，辅助）
-          7. 控制平滑（速度 / 关节变化 / action rate）
-          8. 插入阶段平滑对准奖励（二次，无梯度悬崖）
-          9. 插入阶段静止奖励 + 下降渐进
-          10. 成功判定：触地 + 姿态 + XY + 低速，连续 hold_steps 步
-          11. Crash 检测
-          12. 单步奖励裁剪
+        Layer 0 - Safety:   碰撞/失稳/crash → 终止
+        Layer 1 - Progress: 对数势能差分 + per-rebar + 条件门控下降
+        Layer 2 - Quality:  姿态/平滑 → 阶段自适应软约束
+
+        返回: (reward, done, success, is_collision) — 签名与旧版一致
         """
         reward = 0.0; done = False; success = False; is_collision = False
         cfg_rwd   = self.config["reward"]
         cfg_logic = self.config["step_logic"]
         cfg_ins   = self.cfg_insertion
 
-        # ── 预计算常用量 ──────────────────────────────────────────────────
-        payload_xy = obs[4:6]; payload_vxy = obs[6:8]
+        # ── 预计算 ──────────────────────────────────────────────────────
+        payload_xy = obs[4:6].copy(); payload_vxy = obs[6:8].copy()
         payload_z  = self.data.body('prefab').xpos[2]
         dof_idx    = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz = self.data.qvel[dof_idx + 2]
@@ -762,27 +774,37 @@ class CableRobotEnvWithObstacles:
 
         pl_mat   = self.data.body('prefab').xmat.reshape(3, 3)
         pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
-        pl_roll  = float(pl_euler[0])
-        pl_pitch = float(pl_euler[1])
-        pl_yaw   = float(pl_euler[2])
-        tilt     = float(np.sqrt(pl_roll**2 + pl_pitch**2))
-        abs_yaw  = abs(pl_yaw)
+        tilt     = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
+        abs_yaw  = abs(float(pl_euler[2]))
+        pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
 
         swing_xy = float(np.linalg.norm(ee_xy - payload_xy))
-
         pl_angvel_xyz = self.data.qvel[dof_idx + 3: dof_idx + 6]
         pl_angvel_mag = float(np.linalg.norm(pl_angvel_xyz))
 
         dtf = float(np.linalg.norm(payload_xy - self.target_pos))
         vel_xy_scalar = float(np.linalg.norm(payload_vxy))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第一部分：失稳早停
-        # ══════════════════════════════════════════════════════════════════════
-        instab_grace = cfg_logic.get("instability_grace_steps", 30)
+        # 阶段检测
+        entry_z = cfg_ins.get("entry_z", 0.16)
+        if not self._in_insertion_phase and payload_z <= entry_z:
+            self._in_insertion_phase = True
+
+        if self._in_insertion_phase:
+            phase = "INSERTION"
+        elif self.reached_final:
+            phase = "ALIGN"
+        else:
+            phase = "CRUISE"
+
+        # ══════════════════════════════════════════════════════════════
+        # Layer 0: SAFETY
+        # ══════════════════════════════════════════════════════════════
+
+        # 失稳早停
+        instab_grace = cfg_logic.get("instability_grace_steps", 50)
         if cfg_logic.get("instability_check", True) and self.current_step >= instab_grace:
-            unstable = False
-            reason_detail = []
+            unstable = False; reason_detail = []
             if swing_xy  > cfg_logic.get("swing_xy_max", 0.25):
                 unstable = True; reason_detail.append(f"swing={swing_xy:.3f}")
             if pl_vel    > cfg_logic.get("payload_vel_max", 2.0):
@@ -792,206 +814,167 @@ class CableRobotEnvWithObstacles:
             if abs_yaw   > cfg_logic.get("payload_yaw_max", 1.2):
                 unstable = True; reason_detail.append(f"yaw={abs_yaw:.2f}")
             if unstable:
-                reward = float(cfg_rwd.get("instability_penalty",
-                    cfg_logic.get("instability_penalty", -15.0)))
+                reward = float(cfg_rwd.get("instability_penalty", -5.0))
                 self._termination_reason = "instability:" + ",".join(reason_detail)
                 return reward, True, False, False
 
-        reward += float(cfg_rwd.get("step_penalty", 0.0))
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 第二部分：碰撞检测（最优先，成功判定之前）
-        #   obstacle 接触 → 立即终止
-        #   rebar 接触   → 允许（插入过程正常接触）
-        #   floor 接触   → 允许（作为成功条件之一）
-        # ══════════════════════════════════════════════════════════════════════
+        # 碰撞检测
         use_mjc_contact = cfg_rwd.get("use_mujoco_contact", True)
         if use_mjc_contact:
             hit_obs, hit_rebar = self._check_prefab_collision_with_obstacles()
             if hit_obs:
-                reward = float(cfg_rwd.get("collision_penalty", -30.0))
+                reward = float(cfg_rwd.get("collision_penalty", -10.0))
                 self._termination_reason = "collision_obstacle"
                 return reward, True, False, True
         else:
             for (ox, oy, orad) in self._obstacles:
                 if float(np.linalg.norm(payload_xy - np.array([ox, oy]))) < \
                         (orad + self.payload_radius):
-                    reward = float(cfg_rwd.get("collision_penalty", -30.0))
+                    reward = float(cfg_rwd.get("collision_penalty", -10.0))
                     self._termination_reason = "collision_obstacle"
                     return reward, True, False, True
 
-        # 底座碰撞（机器人底座半径 3cm）
         if float(np.linalg.norm(payload_xy)) < 0.03:
-            reward = float(cfg_rwd.get("collision_penalty", -30.0))
+            reward = float(cfg_rwd.get("collision_penalty", -10.0))
             self._termination_reason = "collision_base"
             return reward, True, False, True
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第三部分：【势能 1】终点吸引势能（差分式 shaping）
-        # reward += -(U_t - U_{t-1})
-        # 累计 = U_0 - U_end，方向无偏，与 γ=0.99 相容
-        # ══════════════════════════════════════════════════════════════════════
-        k_goal_xy = cfg_rwd.get("goal_potential_xy_coef", 100.0)
-        k_goal_z  = cfg_rwd.get("goal_potential_z_coef",  100.0)
-        goal_activate = cfg_rwd.get("goal_potential_activate_dist", 0.15)
-        target_pz = cfg_ins.get("target_payload_z", 0.10)
+        # ══════════════════════════════════════════════════════════════
+        # Layer 1: PROGRESS — 对数势能差分
+        # ══════════════════════════════════════════════════════════════
 
-        # U_xy 总是启用（主引导信号）
-        U_xy = k_goal_xy * (dtf ** 2)
-        # U_z 仅在 XY 接近后启用（避免早期乱下降）
-        if dtf < goal_activate:
-            U_z = k_goal_z * ((payload_z - target_pz) ** 2)
+        # 时间步惩罚
+        if phase == "INSERTION":
+            reward += cfg_rwd.get("step_penalty_insertion", -0.001)
         else:
-            U_z = 0.0
-        U_goal = U_xy + U_z
+            reward += cfg_rwd.get("step_penalty", -0.003)
 
-        if self._prev_goal_potential is None:
-            self._prev_goal_potential = U_goal
-        # 势能差分：-(U_t - U_{t-1})
-        # 势能下降 → 正奖励；势能上升 → 负奖励
-        potential_reward = -(U_goal - self._prev_goal_potential)
-        # clip 避免极端值（单步势能跳变不应超过 ±2）
-        potential_reward = float(np.clip(potential_reward, -2.0, 2.0))
-        reward += potential_reward
-        self._prev_goal_potential = U_goal
+        # 1a. 对数势能: XY目标吸引
+        log_eps = cfg_rwd.get("goal_log_eps", 0.002)
+        k_xy = cfg_rwd.get("goal_log_coef_xy", 3.0)
+        phi_xy = self._log_potential(dtf, k_xy, log_eps)
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第四部分：【势能 2】障碍物排斥 APF（保留旧调好曲线）
-        # ══════════════════════════════════════════════════════════════════════
-        rho_0     = cfg_rwd.get("obstacle_rho_0", 0.10)
-        d_min     = cfg_rwd.get("obstacle_d_min", 0.005)
-        apf_coef  = cfg_rwd.get("obstacle_apf_coef", 3.0e-4)
-        apf_max   = cfg_rwd.get("obstacle_apf_max", 1.0)
-        bg_coef   = cfg_rwd.get("obstacle_penalty_coef", 0.02)
-        bg_scale  = cfg_rwd.get("obstacle_penalty_scale", 0.05)
+        if self._prev_goal_potential is not None:
+            r_pot_xy = self._prev_goal_potential - phi_xy
+            r_pot_xy = float(np.clip(r_pot_xy, -2.0, 2.0))
+            reward += r_pot_xy
+        self._prev_goal_potential = phi_xy
 
-        total_apf = 0.0
+        # 1b. 对数势能: Z轴（仅对准/插入阶段）
+        target_pz = cfg_ins.get("target_payload_z", 0.10)
+        if phase in ("ALIGN", "INSERTION"):
+            k_z = cfg_rwd.get("goal_log_coef_z", 2.0)
+            dz = abs(payload_z - target_pz)
+            phi_z = self._log_potential(dz, k_z, log_eps)
+            prev_phi_z = getattr(self, '_prev_phi_z', None)
+            if prev_phi_z is not None:
+                r_pot_z = prev_phi_z - phi_z
+                r_pot_z = float(np.clip(r_pot_z, -1.5, 1.5))
+                reward += r_pot_z
+            self._prev_phi_z = phi_z
+
+        # 1c. 航点进展
+        if getattr(self, '_wp_just_advanced', False):
+            reward += cfg_rwd.get("waypoint_bonus", 1.0)
+            self._wp_just_advanced = False
+
+        # 1d. Per-rebar对准奖励（近距离）
+        rebar_act_dist = cfg_rwd.get("rebar_activate_dist", 0.03)
+        if phase in ("ALIGN", "INSERTION") and dtf < rebar_act_dist:
+            _, worst_err, avg_err = self._compute_rebar_errors(
+                payload_xy.astype(np.float64), pl_mat)
+            w_worst = cfg_rwd.get("rebar_worst_weight", 0.7)
+            combined_err = w_worst * worst_err + (1.0 - w_worst) * avg_err
+            rebar_coef = cfg_rwd.get("rebar_align_coef", 5.0)
+            r_rebar = rebar_coef * max(0, 1.0 - combined_err / rebar_act_dist)
+            reward += r_rebar
+
+        # 1e. 条件门控下降奖励（插入阶段）
+        if phase == "INSERTION":
+            descent_depth = max(0.0, entry_z - payload_z)
+            if payload_z < self._best_insertion_z:
+                self._best_insertion_z = float(payload_z)
+
+            xy_aligned = dtf < cfg_rwd.get("descent_align_thresh_xy", 0.008)
+            pose_aligned = pose_err < cfg_rwd.get("descent_align_thresh_pose", 0.06)
+            prev_depth = getattr(self, '_prev_descent_depth', 0.0)
+            depth_delta = descent_depth - prev_depth
+
+            if depth_delta > 0:
+                if xy_aligned and pose_aligned:
+                    reward += cfg_rwd.get("descent_reward_coef", 3.0) * depth_delta
+                else:
+                    reward -= cfg_rwd.get("descent_penalty_coef", 2.0) * depth_delta
+            self._prev_descent_depth = descent_depth
+
+        # 1f. 障碍物排斥APF
+        rho_0    = cfg_rwd.get("obstacle_rho_0", 0.10)
+        d_min    = cfg_rwd.get("obstacle_d_min", 0.005)
+        apf_coef = cfg_rwd.get("obstacle_apf_coef", 3.0e-4)
+        apf_max  = cfg_rwd.get("obstacle_apf_max", 1.0)
+        bg_coef  = cfg_rwd.get("obstacle_penalty_coef", 0.02)
+        bg_scale = cfg_rwd.get("obstacle_penalty_scale", 0.05)
+
         for (ox, oy, orad) in self._obstacles:
             dist_center = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
             dist_edge   = dist_center - orad - self.payload_radius
             if dist_edge < rho_0:
-                d_eff   = max(dist_edge, d_min)
+                d_eff = max(dist_edge, d_min)
                 apf_pen = apf_coef * (1.0 / d_eff - 1.0 / rho_0) ** 2
                 apf_pen = min(apf_pen, apf_max)
-                total_apf += apf_pen
+                reward -= apf_pen
             if dist_edge > 0.0:
                 reward -= bg_coef * np.exp(-dist_edge / max(bg_scale, 1e-8))
-        reward -= total_apf
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第五部分：姿态严格惩罚（核心）
-        # ══════════════════════════════════════════════════════════════════════
-        tilt_lin_clip = cfg_rwd.get("payload_tilt_linear_clip", 1.0)
-        reward -= cfg_rwd.get("payload_tilt_linear_coef", 0.5) * min(tilt, tilt_lin_clip)
-        reward -= self._neg_exp(tilt,
-            cfg_rwd.get("payload_tilt_penalty_coef", 0.3),
-            cfg_rwd.get("payload_tilt_penalty_scale", 0.08))
+        # ══════════════════════════════════════════════════════════════
+        # Layer 2: QUALITY — 阶段自适应软约束
+        # ══════════════════════════════════════════════════════════════
 
-        yaw_lin_clip = cfg_rwd.get("payload_yaw_linear_clip", 1.0)
-        reward -= cfg_rwd.get("payload_yaw_linear_coef", 0.6) * min(abs_yaw, yaw_lin_clip)
-        reward -= self._neg_exp(abs_yaw,
-            cfg_rwd.get("payload_yaw_penalty_coef", 0.4),
-            cfg_rwd.get("payload_yaw_penalty_scale", 0.1))
+        # 2a. 姿态惩罚
+        if phase == "INSERTION":
+            reward -= cfg_rwd.get("tilt_penalty_coef_insertion", 0.5) * tilt
+            reward -= cfg_rwd.get("yaw_penalty_coef_insertion", 0.6) * abs_yaw
+        else:
+            reward -= cfg_rwd.get("tilt_penalty_coef_cruise", 0.15) * tilt
+            reward -= cfg_rwd.get("yaw_penalty_coef_cruise", 0.2) * abs_yaw
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第六部分：防摆（辅助，非核心）
-        # ══════════════════════════════════════════════════════════════════════
-        reward -= self._neg_exp(pl_angvel_mag,
-            cfg_rwd.get("payload_angvel_penalty_coef", 0.04),
-            cfg_rwd.get("payload_angvel_penalty_scale", 0.5))
-        reward -= self._neg_exp(swing_xy,
-            cfg_rwd.get("swing_penalty_coef", 0.10),
-            cfg_rwd.get("swing_penalty_scale", 0.03))
-        rope_len = max(ee_z - payload_z, 0.05)
-        swing_angle = swing_xy / rope_len
-        reward -= self._neg_exp(swing_angle,
-            cfg_rwd.get("verticality_penalty_coef", 0.08),
-            cfg_rwd.get("verticality_penalty_scale", 0.15))
+        # 2b. 防摆（主要在巡航段生效）
+        if phase == "CRUISE":
+            reward -= self._neg_exp(swing_xy,
+                cfg_rwd.get("swing_penalty_coef", 0.05),
+                cfg_rwd.get("swing_penalty_scale", 0.05))
+            reward -= self._neg_exp(pl_angvel_mag,
+                cfg_rwd.get("angvel_penalty_coef", 0.02),
+                cfg_rwd.get("angvel_penalty_scale", 0.5))
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第七部分：控制平滑（速度/关节/action_rate）
-        # ══════════════════════════════════════════════════════════════════════
-        reward -= self._neg_exp(pl_vel,
-            cfg_rwd.get("velocity_penalty_coef", 0.03),
-            cfg_rwd.get("velocity_penalty_scale", 0.3))
-        dq_change = float(np.linalg.norm(current_q - prev_q))
-        reward -= self._neg_exp(dq_change,
-            cfg_rwd.get("joint_smooth_penalty_coef", 0.02),
-            cfg_rwd.get("joint_smooth_penalty_scale", 0.1))
+        # 2c. 控制平滑
+        if phase == "INSERTION":
+            ar_coef = cfg_rwd.get("action_rate_coef_insertion", 0.5)
+        else:
+            ar_coef = cfg_rwd.get("action_rate_coef_cruise", 0.1)
 
-        # action rate penalty (Δq_t - Δq_{t-1})
         prev_dq = getattr(self, '_prev_delta_q', None)
         if prev_dq is not None and prev_dq.shape == np.asarray(action).shape:
             dq_rate = float(np.linalg.norm(np.asarray(action) - prev_dq))
-            ar_coef  = cfg_rwd.get("action_rate_coef", 0.5)
-            ar_scale = cfg_rwd.get("action_rate_scale", 0.03)
-            if self._in_insertion_phase:
-                ar_coef *= 2.0
-            reward -= self._neg_exp(dq_rate, ar_coef, ar_scale)
+            reward -= ar_coef * dq_rate
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第八部分：插入阶段状态机 + 平滑对准奖励
-        # ══════════════════════════════════════════════════════════════════════
-        entry_z   = cfg_ins.get("entry_z", 0.16)
-        target_pz_ins = cfg_ins.get("target_payload_z", 0.10)
-        z_tol     = cfg_ins.get("success_z_tolerance", 0.015)
-        xy_tol    = cfg_ins.get("xy_tolerance",  0.003)
-        tilt_tol  = cfg_ins.get("tilt_tolerance", 0.05)
-        yaw_tol   = cfg_ins.get("yaw_tolerance",  0.04)
-        vxy_tol   = cfg_ins.get("vel_xy_tolerance", 0.05)
-        vz_tol    = cfg_ins.get("vel_z_tolerance",  0.05)
-        hold_steps = int(cfg_ins.get("hold_steps", 5))
-        require_floor = cfg_ins.get("require_floor_contact", True)
+        dq_change = float(np.linalg.norm(current_q - prev_q))
+        reward -= cfg_rwd.get("joint_smooth_coef", 0.01) * dq_change
 
-        # 更新历史最低 payload_z
-        if payload_z < entry_z and payload_z < self._best_insertion_z:
-            self._best_insertion_z = float(payload_z)
+        # ══════════════════════════════════════════════════════════════
+        # 成功判定
+        # ══════════════════════════════════════════════════════════════
+        z_tol    = cfg_ins.get("success_z_tolerance", 0.020)
+        xy_tol   = cfg_ins.get("xy_tolerance",  0.005)
+        tilt_tol = cfg_ins.get("tilt_tolerance", 0.08)
+        yaw_tol  = cfg_ins.get("yaw_tolerance",  0.06)
+        hold_steps = int(cfg_ins.get("hold_steps", 3))
 
-        # 进入插入阶段（单向：一旦进入不再退出，避免反复切换）
-        if not self._in_insertion_phase and payload_z <= entry_z:
-            self._in_insertion_phase = True
-
-        # 平滑对准奖励（二次，无梯度悬崖）—— 仅在 XY 接近时激活
-        align_dist = cfg_rwd.get("alignment_activate_dist", 0.05)
-        if dtf < align_dist:
-            align_xy_coef = cfg_rwd.get("alignment_xy_coef", 3.0)
-            xy_frac = max(0.0, 1.0 - dtf / align_dist)
-            reward += align_xy_coef * (xy_frac ** 2)
-
-        pose_activate = cfg_rwd.get("alignment_pose_activate", 0.10)
-        pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
-        if pose_err < pose_activate:
-            align_pose_coef = cfg_rwd.get("alignment_pose_coef", 3.0)
-            pose_frac = max(0.0, 1.0 - pose_err / pose_activate)
-            reward += align_pose_coef * (pose_frac ** 2)
-
-        # 插入阶段内静止奖励
-        if self._in_insertion_phase:
-            vel_thresh = cfg_rwd.get("stability_vel_threshold", 0.05)
-            if vel_xy_scalar < vel_thresh:
-                stab_bonus = cfg_rwd.get("stability_bonus", 1.5)
-                stab_frac = 1.0 - vel_xy_scalar / max(vel_thresh, 1e-6)
-                reward += stab_bonus * stab_frac
-            # 下降渐进（越深越好）
-            descent_depth = max(0.0, entry_z - payload_z)
-            reward += 3.0 * descent_depth
-
-        # ══════════════════════════════════════════════════════════════════════
-        # 第九部分：成功判定（触地 + XY + 姿态 + 速度，连续 hold_steps）
-        # ══════════════════════════════════════════════════════════════════════
-        z_err = abs(payload_z - target_pz_ins)
+        z_err   = abs(payload_z - target_pz)
         z_ok    = (z_err < z_tol)
         xy_ok   = (dtf < xy_tol)
         pose_ok = (tilt < tilt_tol) and (abs_yaw < yaw_tol)
-        vel_ok  = (vel_xy_scalar < vxy_tol) and (abs(payload_vz) < vz_tol)
-
-        # 可选：MuJoCo 地面真实接触
-        if require_floor:
-            floor_ok = self._check_prefab_floor_contact()
-        else:
-            floor_ok = True
-
-        on_target = z_ok and xy_ok and pose_ok and vel_ok and floor_ok
+        on_target = z_ok and xy_ok and pose_ok
 
         if on_target:
             self._insertion_hold_counter += 1
@@ -999,65 +982,45 @@ class CableRobotEnvWithObstacles:
             self._insertion_hold_counter = 0
 
         if self._insertion_hold_counter >= hold_steps:
-            reward += cfg_rwd.get("success_bonus", 100.0)
-            success = True
-            done = True
+            reward += cfg_rwd.get("success_bonus", 50.0)
+            success = True; done = True
             self._termination_reason = (
                 f"success:z={payload_z*1000:.0f}mm,dtf={dtf*1000:.1f}mm,"
-                f"tilt={tilt:.3f},yaw={abs_yaw:.3f},floor={floor_ok}"
-            )
+                f"tilt={tilt:.3f},yaw={abs_yaw:.3f}")
             return reward, done, success, is_collision
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第十部分：reached_final 软成功 Fallback（即将超时且几乎成功）
-        # ══════════════════════════════════════════════════════════════════════
+        # Soft success (timeout附近)
         max_steps = self.config["sim"]["max_steps"]
         near_timeout = (self.current_step >= max_steps - 10)
-
         if self.reached_final and near_timeout:
-            # 几乎成功（达 3/5 条件以上）→ soft_success_bonus
-            cond_met = int(z_ok) + int(xy_ok) + int(pose_ok) + int(vel_ok) + int(floor_ok)
-            if cond_met >= 3:
-                reward += cfg_rwd.get("soft_success_bonus", 40.0) * (cond_met / 5.0)
-                self._termination_reason = (
-                    f"soft_success:cond={cond_met}/5,z={payload_z*1000:.0f}mm,"
-                    f"dtf={dtf*1000:.1f}mm"
-                )
-            else:
-                # 连续部分奖励（鼓励接近，但量级较小）
-                partial_scale = cfg_ins.get("partial_dist_scale", 0.05)
-                dist_bonus = max(0.0, 1.0 - dtf / partial_scale) * 10.0
-                depth_frac = max(0.0, min(1.0,
-                    (entry_z - self._best_insertion_z) / max(entry_z - target_pz_ins, 1e-6)))
-                z_bonus    = depth_frac * 10.0
-                tilt_bonus = max(0.0, 1.0 - tilt    / 0.3) * 5.0
-                yaw_bonus  = max(0.0, 1.0 - abs_yaw / 0.3) * 5.0
-                reward += dist_bonus + z_bonus + tilt_bonus + yaw_bonus
-                self._termination_reason = (
-                    f"reached_final:cond={cond_met}/5,dtf={dtf*1000:.1f}mm,"
-                    f"best_z={self._best_insertion_z*1000:.0f}mm"
-                )
+            dist_frac  = max(0.0, 1.0 - dtf / 0.05)
+            depth_frac = max(0.0, min(1.0,
+                (entry_z - self._best_insertion_z) / max(entry_z - target_pz, 1e-6)))
+            pose_frac = max(0.0, 1.0 - pose_err / 0.3)
+            # Per-rebar bonus
+            rebar_frac = 0.0
+            if dtf < rebar_act_dist:
+                _, worst_err, _ = self._compute_rebar_errors(
+                    payload_xy.astype(np.float64), pl_mat)
+                rebar_frac = max(0.0, 1.0 - worst_err / 0.01)
+            combined = 0.3*dist_frac + 0.2*depth_frac + 0.2*pose_frac + 0.3*rebar_frac
+            reward += cfg_rwd.get("soft_success_bonus", 20.0) * combined
+            self._termination_reason = (
+                f"soft_success:score={combined:.2f},dtf={dtf*1000:.1f}mm,"
+                f"best_z={self._best_insertion_z*1000:.0f}mm")
             done = True
             return reward, done, success, is_collision
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第十一部分：Crash 检测
-        # ══════════════════════════════════════════════════════════════════════
+        # Crash检测
         grace_steps = cfg_logic.get("crash_grace_steps", 30)
         if self.current_step >= grace_steps:
             if payload_z < cfg_logic["crash_z_threshold"] and \
                     payload_vz < cfg_logic["crash_vz_threshold"]:
-                reward = float(cfg_rwd.get("crash_penalty", -20.0))
+                reward = float(cfg_rwd.get("crash_penalty", -8.0))
                 self._termination_reason = f"crash:z={payload_z:.3f},vz={payload_vz:.2f}"
                 return reward, True, False, False
 
-        # ══════════════════════════════════════════════════════════════════════
-        # 第十二部分：航点前进 + 单步裁剪
-        # ══════════════════════════════════════════════════════════════════════
-        if getattr(self, '_wp_just_advanced', False):
-            reward += cfg_rwd.get("waypoint_bonus", 1.0)
-            self._wp_just_advanced = False
-
+        # 裁剪
         r_min = cfg_logic.get("reward_clip_min", -5.0)
         r_max = cfg_logic.get("reward_clip_max",  5.0)
         reward = float(np.clip(reward, r_min, r_max))
@@ -1088,13 +1051,57 @@ class CableRobotEnvWithObstacles:
         joint_q=self.data.qpos[:7].copy().astype(np.float32)
         joint_dq=self.data.qvel[:7].copy().astype(np.float32)
 
+        # [V3-OBS] payload姿态（替换原来的两个0.占位）
+        pl_mat = self.data.body('prefab').xmat.reshape(3, 3)
+        pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+        payload_tilt = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
+        payload_yaw_val = float(pl_euler[2])
+
+        # [V3-OBS] 阶段编码 (one-hot 3维)
+        entry_z = self.cfg_insertion.get("entry_z", 0.16)
+        phase_encode = [0.0, 0.0, 0.0]
+        if payload_z <= entry_z or getattr(self, '_in_insertion_phase', False):
+            phase_encode[2] = 1.0   # INSERTION
+        elif self.reached_final:
+            phase_encode[1] = 1.0   # ALIGN
+        else:
+            phase_encode[0] = 1.0   # CRUISE
+
+        # [V3-OBS] 航点进度
+        if self._planned_path is not None and len(self._planned_path) > 0:
+            progress = float(self.current_wp_idx) / len(self._planned_path)
+        else:
+            progress = 0.0
+
+        # [V3-OBS] Z误差
+        target_pz = self.cfg_insertion.get("target_payload_z", 0.10)
+        z_error = float(payload_z - target_pz)
+
+        # [V3-OBS] Per-rebar偏差 (4维)
+        rebar_errors = [0.0, 0.0, 0.0, 0.0]
+        payload_xy_arr = np.array([payload_x, payload_y])
+        dtf_obs = float(np.linalg.norm(payload_xy_arr - self.target_pos))
+        if dtf_obs < 0.05:
+            rebar_pos = np.array([
+                [ 0.035,  0.035], [ 0.035, -0.035],
+                [-0.035,  0.035], [-0.035, -0.035]], dtype=np.float64)
+            R_pl = pl_mat[:2, :2]
+            for i in range(4):
+                hole_w = payload_xy_arr + R_pl @ rebar_pos[i]
+                rebar_w = self.target_pos + rebar_pos[i]
+                rebar_errors[i] = float(np.linalg.norm(hole_w - rebar_w))
+
         return np.array(
             [ee_x,ee_y,ee_vx,ee_vy,payload_x,payload_y,payload_vx,payload_vy,rel_tx,rel_ty]
             +obs_data[:tl]
             +[ee_z,ee_vz,payload_z,payload_vz,
               ee_roll,ee_roll_v,ee_pitch,ee_pitch_v,
-              ee_yaw,ee_yaw_v,0.,0.]
-            +list(joint_q)+list(joint_dq),
+              ee_yaw,ee_yaw_v,
+              payload_tilt, payload_yaw_val]
+            +list(joint_q)+list(joint_dq)
+            +phase_encode
+            +[progress, z_error]
+            +rebar_errors,
             dtype=np.float32)
 
 

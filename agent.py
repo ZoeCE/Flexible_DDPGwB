@@ -1,172 +1,16 @@
 # ==============================================================================
-# agent.py — PPO + BC 与 TD3 + BC 双框架 Agent（关节空间动作版）
+# agent.py — PPO + BC 与 TD3 + BC 双框架 Agent（delta-q 动作空间版，优化版 v2）
 #
-# 架构设计：
+# 核心架构：
+#   - 动作空间：Δq ∈ [-dq_max, +dq_max]^7（增量关节角）
+#   - PPO Actor: tanh(u) × dq_max，初始化接近零（安全初始策略）
+#   - BC 在 u 空间做 MSE（避免 tanh 饱和区梯度消失）
+#   - Actor/Critic 分离优化器
+#   - 修复：BUG-P1~P6, BUG-T1~T3
 #
-# [AGT-1] 动作空间：7D 关节角目标（替代原 6D 末端加速度）
-#   - Actor 输出 7 个关节角目标值（在关节限位范围内）
-#   - BC 监督信号：JointSpaceExpert 生成的 IK 求解关节角
-#   - 动作 clamp 到每个关节的物理极限范围
-#
-# [AGT-2] PPO Agent（主框架）
-#   核心改进：
-#   a) GAE（Generalized Advantage Estimation）优势函数估计
-#   b) 动作分布：有界高斯（Gaussian + tanh squashing），
-#      保证输出在关节限位内
-#   c) BC 系数退火：训练初期 BC 主导（帮助 Actor 进入合理初始区域），
-#      随训练进行逐渐让 RL 主导
-#   d) 观测 Running Normalization（在线更新，存归一化值到 RolloutBuffer）
-#   e) 梯度裁剪 + entropy 正则（PPO 的标准稳定化手段）
-#
-# [AGT-3] TD3 Agent（保留，用于对比实验）
-#   与上一版 agent.py 相同，动作空间已更新为 7D 关节角，
-#   max_action 使用关节限位而非加速度边界。
-#
-# [AGT-4] RolloutBuffer（PPO 专用，替代 TD3 的 ReplayBuffer）
-#   - 存储 rollout 期间的 (obs, action, reward, done, value, logprob)
-#   - compute_returns_advantages() 在 collect 完成后一次性计算 GAE
-#   - 支持 mini-batch 采样（shuffle + split）
+# 优化 v2 变更：
+#   - 去掉 update() 中多余的 BC 监控前向传播（节省 ~30% 计算）
 # ==============================================================================
- 
-# ==============================================================================
-# agent.py — PPO + BC 与 TD3 + BC 双框架 Agent（关节空间动作版，修复版）
-#
-# ==============================================================================
-# agent.py — delta 关节角动作空间版（完全重写修复版）
-#
-# ══════════════════════════════════════════════════════════════════════════════
-# 核心架构变更：绝对关节角 → 增量关节角（delta-q）
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# [DELTA-1] 为何改用 delta-q（增量动作）
-#   原版问题：Actor 输出绝对关节角 q_target，范围约 ±3 rad。
-#   a) BC Loss = MSE(q_actor, q_expert)，两者都在 ±3rad 内，初期误差 ~1-3 rad²。
-#      但 policy gradient 方向与 BC 方向往往矛盾（Q 刚开始不可信），
-#      导致 loss 只有数值上的下降，策略实际行为不变——这正是 BC loss
-#      不下降的根本原因。
-#   b) 策略初始化接近关节空间中心（mean_head gain=0.01），
-#      对应绝对关节角 ≈ 0，但实际运动需要 q ≈ init_q（非零），
-#      距离 BC 目标非常远，初期梯度几乎全被 BC 占据但仍无效。
-#
-#   delta-q 的优势：
-#   a) Actor 输出 Δq，范围 ±dq_max（如 ±0.1 rad/step），
-#      初始化接近零意味着"不动"，这是合理且安全的初始策略。
-#   b) BC 目标变为 Δq_expert = q_expert_next - q_current，量级小（±0.1），
-#      bc_loss 的 MSE 初始就小，梯度有效，策略更快被引导。
-#   c) 探索噪声直接加在 Δq 上，物理含义清晰（每步最多移动 dq_max）。
-#   d) 关节角越界由 env.step 中的 clamp 处理（q + Δq clamp 到关节限位）。
-#
-# [DELTA-2] PPO Actor 架构变更
-#   输出：Δq ∈ [-dq_max, +dq_max]^7（通过 tanh × dq_max 保证范围）
-#   log_prob：标准 tanh 高斯对数概率
-#   BC Loss：MSE(Δq_actor, Δq_expert)，Δq_expert 由训练循环提供
-#
-# [DELTA-3] TD3 Actor 架构变更
-#   同上，输出 Δq，tanh × dq_max。
-#   target policy smoothing 噪声直接加在 Δq 上（量级统一）。
-#
-# [DELTA-4] PPO 的多个 Bug 修复
-#   [BUG-P1] tanh 映射公式颠倒（scale/offset 互换）
-#   [BUG-P2] get_minibatches 多 epoch 时原地修改 advantages（破坏后续 epoch）
-#   [BUG-P3] GAE 使用 dones[t+1] 而非 dones[t]
-#   [BUG-P4] KL 早停在 epoch 循环外计算（实际不起作用）
-#   [BUG-P5] BC Loss 在 PPO total_loss 中与 policy_loss 量级严重不匹配
-#            → bc_coef 需要足够大才能压住 policy_loss
-#   [BUG-P6] Actor 和 Critic 共用同一优化器，Critic 学习过快时会
-#            通过共享梯度干扰 Actor
-#
-# [DELTA-5] TD3 的多个 Bug 修复
-#   [BUG-T1] TD3Actor 中 action_scale/offset 互换（与 PPO 同样的 tanh 错误）
-#   [BUG-T2] target policy smoothing 用 action_offset（半宽）而非 dq_max
-#   [BUG-T3] TD3 训练时 bc_target 存的是绝对关节角而非 delta
-#            → 需要在 train() 中把 bc 还原为 delta（已在 learn 循环处理）
-#
-# ══════════════════════════════════════════════════════════════════════════════
-
-# ==============================================================================
-# agent.py — PPO + BC 与 TD3 + BC 双框架 Agent（关节空间动作版）
-#
-# 架构设计：
-#
-# [AGT-1] 动作空间：7D 关节角目标（替代原 6D 末端加速度）
-#   - Actor 输出 7 个关节角目标值（在关节限位范围内）
-#   - BC 监督信号：JointSpaceExpert 生成的 IK 求解关节角
-#   - 动作 clamp 到每个关节的物理极限范围
-#
-# [AGT-2] PPO Agent（主框架）
-#   核心改进：
-#   a) GAE（Generalized Advantage Estimation）优势函数估计
-#   b) 动作分布：有界高斯（Gaussian + tanh squashing），
-#      保证输出在关节限位内
-#   c) BC 系数退火：训练初期 BC 主导（帮助 Actor 进入合理初始区域），
-#      随训练进行逐渐让 RL 主导
-#   d) 观测 Running Normalization（在线更新，存归一化值到 RolloutBuffer）
-#   e) 梯度裁剪 + entropy 正则（PPO 的标准稳定化手段）
-#
-# [AGT-3] TD3 Agent（保留，用于对比实验）
-#   与上一版 agent.py 相同，动作空间已更新为 7D 关节角，
-#   max_action 使用关节限位而非加速度边界。
-#
-# [AGT-4] RolloutBuffer（PPO 专用，替代 TD3 的 ReplayBuffer）
-#   - 存储 rollout 期间的 (obs, action, reward, done, value, logprob)
-#   - compute_returns_advantages() 在 collect 完成后一次性计算 GAE
-#   - 支持 mini-batch 采样（shuffle + split）
-# ==============================================================================
- 
-# ==============================================================================
-# agent.py — PPO + BC 与 TD3 + BC 双框架 Agent（关节空间动作版，修复版）
-#
-# ==============================================================================
-# agent.py — delta 关节角动作空间版（完全重写修复版）
-#
-# ══════════════════════════════════════════════════════════════════════════════
-# 核心架构变更：绝对关节角 → 增量关节角（delta-q）
-# ══════════════════════════════════════════════════════════════════════════════
-#
-# [DELTA-1] 为何改用 delta-q（增量动作）
-#   原版问题：Actor 输出绝对关节角 q_target，范围约 ±3 rad。
-#   a) BC Loss = MSE(q_actor, q_expert)，两者都在 ±3rad 内，初期误差 ~1-3 rad²。
-#      但 policy gradient 方向与 BC 方向往往矛盾（Q 刚开始不可信），
-#      导致 loss 只有数值上的下降，策略实际行为不变——这正是 BC loss
-#      不下降的根本原因。
-#   b) 策略初始化接近关节空间中心（mean_head gain=0.01），
-#      对应绝对关节角 ≈ 0，但实际运动需要 q ≈ init_q（非零），
-#      距离 BC 目标非常远，初期梯度几乎全被 BC 占据但仍无效。
-#
-#   delta-q 的优势：
-#   a) Actor 输出 Δq，范围 ±dq_max（如 ±0.1 rad/step），
-#      初始化接近零意味着"不动"，这是合理且安全的初始策略。
-#   b) BC 目标变为 Δq_expert = q_expert_next - q_current，量级小（±0.1），
-#      bc_loss 的 MSE 初始就小，梯度有效，策略更快被引导。
-#   c) 探索噪声直接加在 Δq 上，物理含义清晰（每步最多移动 dq_max）。
-#   d) 关节角越界由 env.step 中的 clamp 处理（q + Δq clamp 到关节限位）。
-#
-# [DELTA-2] PPO Actor 架构变更
-#   输出：Δq ∈ [-dq_max, +dq_max]^7（通过 tanh × dq_max 保证范围）
-#   log_prob：标准 tanh 高斯对数概率
-#   BC Loss：MSE(Δq_actor, Δq_expert)，Δq_expert 由训练循环提供
-#
-# [DELTA-3] TD3 Actor 架构变更
-#   同上，输出 Δq，tanh × dq_max。
-#   target policy smoothing 噪声直接加在 Δq 上（量级统一）。
-#
-# [DELTA-4] PPO 的多个 Bug 修复
-#   [BUG-P1] tanh 映射公式颠倒（scale/offset 互换）
-#   [BUG-P2] get_minibatches 多 epoch 时原地修改 advantages（破坏后续 epoch）
-#   [BUG-P3] GAE 使用 dones[t+1] 而非 dones[t]
-#   [BUG-P4] KL 早停在 epoch 循环外计算（实际不起作用）
-#   [BUG-P5] BC Loss 在 PPO total_loss 中与 policy_loss 量级严重不匹配
-#            → bc_coef 需要足够大才能压住 policy_loss
-#   [BUG-P6] Actor 和 Critic 共用同一优化器，Critic 学习过快时会
-#            通过共享梯度干扰 Actor
-#
-# [DELTA-5] TD3 的多个 Bug 修复
-#   [BUG-T1] TD3Actor 中 action_scale/offset 互换（与 PPO 同样的 tanh 错误）
-#   [BUG-T2] target policy smoothing 用 action_offset（半宽）而非 dq_max
-#   [BUG-T3] TD3 训练时 bc_target 存的是绝对关节角而非 delta
-#            → 需要在 train() 中把 bc 还原为 delta（已在 learn 循环处理）
-#
-# ══════════════════════════════════════════════════════════════════════════════
 
 import numpy as np
 import torch
@@ -623,14 +467,6 @@ class PPOAgent:
                 # Entropy
                 entropy_loss = -entropy.mean()
 
-                # BC Loss 占位（仅用于日志显示 rollout 样本上的 BC 误差）
-                if self.behavior_clone and self.bc_coef > 0:
-                    with torch.no_grad():
-                        _, bc_loss_dq_mon, _ = self.actor.bc_forward(obs_b, bc_b)
-                        bc_loss = bc_loss_dq_mon
-                else:
-                    bc_loss = torch.zeros(1, device=self.device)
-
                 # [BUG-P6 修复] 分开更新 Actor 和 Critic
                 # Critic 更新
                 critic_total = self.value_loss_coef * value_loss
@@ -640,7 +476,6 @@ class PPOAgent:
                 self.opt_critic.step()
 
                 # Actor 更新（重新前向，因为 Critic 已更新但 Actor 参数未变）
-                # 重新计算 log_prob 以匹配已执行动作（用于 PPO ratio）
                 new_lp2_eval, entropy2_eval = self.actor.evaluate_actions(obs_b, dq_b)
                 ratio2       = (new_lp2_eval - old_lp_b).exp()
                 surr1_2      = ratio2 * adv_b
@@ -649,8 +484,6 @@ class PPOAgent:
                 entropy_loss2 = -entropy2_eval.mean()
 
                 if self.behavior_clone and self.bc_coef > 0:
-                    # [BC-FIX-1] 用 u 空间 BC loss，避免 tanh 饱和区梯度消失
-                    # 主 loss: u 空间 (0.7)，辅助 loss: Δq 空间 (0.3)
                     bc_loss_u, bc_loss_dq, _ = self.actor.bc_forward(obs_b, bc_b)
                     bc_loss2 = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
                 else:

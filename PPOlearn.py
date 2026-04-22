@@ -186,24 +186,23 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 n_epochs: int = 100, batch_size: int = 256,
                 lr: float = 3e-4, algo: str = "ppo"):
     """
-    Phase 1: DAgger 预训练（β-混合执行策略）。
+    Phase 1: DAgger 预训练（V3 修复版）。
 
-    [BC-FIX-2] 核心特性：
-      a) obs_norm 在采集完成后冻结，避免训练/测试分布偏移
-      b) 使用 bc_forward 在 u 空间做 BC，避免 tanh 饱和
-      c) Round 4 崩溃修复：β>0.5 阶段收集的数据更干净，保留权重
-      d) 每轮训练时同时冻结 log_std，防止策略方差失控
+    修复列表：
+      [FIX-BC1] 每步标注前同步专家内部状态到真实环境（消除积分器漂移）
+      [FIX-BC2] Smooth L1 Loss + per-joint归一化权重（消除大δq主导）
+      [FIX-BC3] 分阶段样本加权（巡航=1.0, 精细=0.3）
+      [FIX-BC4] 执行后再次同步专家（解决DAgger脱节）
+      [FIX-BC5] 增强诊断：per-joint MAE + 分阶段MAE
     """
     print(f"\n{'='*60}")
-    print(f"  Phase 1: DAgger 预训练 ({algo.upper()})")
+    print(f"  Phase 1: DAgger 预训练 V3 ({algo.upper()})")
     print(f"{'='*60}")
 
-    # [v3-CURRICULUM] BC 预训练使用 curriculum.bc_n_obstacles（默认 0）
     bc_config = copy.deepcopy(config)
     cur_cfg = config.get("curriculum", {})
     if cur_cfg.get("enabled", False):
         bc_n_obs = int(cur_cfg.get("bc_n_obstacles", 0))
-        # 重要：state_dim 仍然基于 config 的 n_obstacles（上限）计算
         bc_config["scene"]["n_obstacles"] = int(config["scene"]["n_obstacles"])
         print(f"  [Curriculum] BC 阶段目标障碍物数 = {bc_n_obs} "
               f"(state_dim 上限 = {config['scene']['n_obstacles']})")
@@ -211,16 +210,23 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         bc_n_obs = int(config["scene"]["n_obstacles"])
 
     env = CableRobotEnvWithObstacles(config=bc_config)
-    # 运行时切换到 BC 阶段的障碍物数
     env.set_curriculum_n_obstacles(bc_n_obs)
     expert = JointSpaceExpert(bc_config, env.ik_solver)
     dq_max = np.array(config["space"].get("dq_max", [0.1]*7), dtype=np.float32)
     is_ppo = (algo == "ppo")
 
+    # [FIX-BC2] Per-joint归一化权重
+    import torch
+    jw = torch.tensor(1.0 / (dq_max + 1e-6),
+                      dtype=torch.float32, device=agent.device)
+    jw = jw / jw.mean()
+    print(f"  Per-joint weights: {jw.cpu().numpy().round(3)}")
+
     all_obs = []
     all_dq  = []
+    all_weights = []  # [FIX-BC3] 每个样本的loss权重
 
-    # [BC-FIX-2a] BC 只训练 mean_head + backbone，不训练 log_std
+    # BC 只训练 mean_head + backbone，不训练 log_std
     bc_params = []
     if is_ppo:
         for name, p in agent.actor.named_parameters():
@@ -230,15 +236,13 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         bc_params = list(agent.actor.parameters())
     bc_optimizer = torch.optim.Adam(bc_params, lr=lr)
 
-    # DAgger 参数
-    # [BC-FIX-3] 更保守的 β 调度：不降到 0，保留少量专家干预
     BETA_SCHEDULE   = [1.0, 0.8, 0.6, 0.4, 0.3, 0.2]
     EPS_PER_ROUND   = [n_episodes, 120, 120, 120, 100, 100]
     EPOCHS_SCHEDULE = [80, 50, 40, 30, 25, 20]
     TARGET_SR       = 0.6
-
-    # [BC-FIX-4] 每轮数据最大容量上限（防止旧数据占比过高）
     MAX_BUFFER_SIZE = 250000
+
+    entry_z = config.get("insertion", {}).get("entry_z", 0.16)
 
     for rnd, beta in enumerate(BETA_SCHEDULE):
         n_eps = EPS_PER_ROUND[rnd] if rnd < len(EPS_PER_ROUND) else 80
@@ -247,13 +251,12 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         print(f"\n[DAgger Round {rnd}] β={beta:.1f} | "
               f"{n_eps} 回合 | {train_epochs} epochs")
 
-        n_new = 0
+        n_new_cruise = 0
+        n_new_fine = 0
         n_success = 0
 
-        # [BC-FIX-5] obs_norm update 策略
         update_norm_fraction = 1.0 if rnd == 0 else 0.3
 
-        # [SKIP-INVALID] while 循环：失败场景不占用 n_eps 配额
         valid_eps = 0
         attempt_cnt = 0
         max_attempts = n_eps * 3
@@ -269,21 +272,37 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
             valid_eps += 1
 
             ep_success = False
-            step_in_ep = 0
             while True:
                 do_update = (random.random() < update_norm_fraction)
                 norm_obs = agent.normalize_obs(obs, update=do_update)
 
-                # 专家标注当前状态
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
+
+                # ═══════════════════════════════════════════════════
+                # [FIX-BC1] 标注前同步专家内部状态到真实环境
+                # ═══════════════════════════════════════════════════
+                expert._ee_pos = env._get_ee_pos().copy().astype(np.float64)
+                expert._ee_vel = env._ee_vel_cache.copy().astype(np.float64)
+                if hasattr(expert, '_integral_xy'):
+                    expert._integral_xy = np.zeros(2, np.float64)
+
                 bc_dq = expert.compute_delta_q_target(obs, current_q)
 
+                # [FIX-BC3] 分阶段加权
                 if not np.any(np.isnan(bc_dq)):
                     all_obs.append(norm_obs.copy())
                     all_dq.append(bc_dq.copy())
-                    n_new += 1
 
-                # β-混合：以概率 β 用专家动作，否则用 actor 动作
+                    payload_z = float(env.data.body('prefab').xpos[2])
+                    is_fine = (env.reached_final or payload_z <= entry_z)
+                    if is_fine:
+                        all_weights.append(0.3)
+                        n_new_fine += 1
+                    else:
+                        all_weights.append(1.0)
+                        n_new_cruise += 1
+
+                # β-混合执行
                 if random.random() < beta:
                     action = bc_dq
                 else:
@@ -300,10 +319,18 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                         action = np.clip(action, -dq_max, dq_max)
 
                 next_obs, reward, terminated, truncated, info = env.step(action)
+
+                # ═══════════════════════════════════════════════════
+                # [FIX-BC4] 执行后再次同步专家
+                # ═══════════════════════════════════════════════════
+                expert._ee_pos = env._get_ee_pos().copy().astype(np.float64)
+                expert._ee_vel = env._ee_vel_cache.copy().astype(np.float64)
+                if hasattr(expert, '_integral_xy'):
+                    expert._integral_xy = np.zeros(2, np.float64)
+
                 if info.get("is_success"):
                     ep_success = True
                 obs = next_obs
-                step_in_ep += 1
                 if terminated or truncated:
                     break
 
@@ -313,80 +340,101 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         sr = n_success / max(valid_eps, 1)
         skipped = attempt_cnt - valid_eps
         skip_note = f"，跳过 {skipped} 个无效场景" if skipped > 0 else ""
-        print(f"  收集完成: +{n_new} 样本（总计 {len(all_obs)}）| "
-              f"执行成功率: {sr*100:.1f}%{skip_note}")
+        print(f"  收集完成: cruise={n_new_cruise}, fine={n_new_fine} "
+              f"(总计 {len(all_obs)}) | SR={sr*100:.1f}%{skip_note}")
 
-        # [BC-FIX-4] 缓冲区裁剪
+        # 缓冲区裁剪
         if len(all_obs) > MAX_BUFFER_SIZE:
             excess = len(all_obs) - MAX_BUFFER_SIZE
             all_obs = all_obs[excess:]
             all_dq  = all_dq[excess:]
+            all_weights = all_weights[excess:]
             print(f"  缓冲区裁剪至 {MAX_BUFFER_SIZE} 样本")
 
         # ── 训练 ─────────────────────────────────────────────────────────
         obs_arr = np.array(all_obs, dtype=np.float32)
         dq_arr  = np.array(all_dq,  dtype=np.float32)
+        w_arr   = np.array(all_weights, dtype=np.float32)
         obs_t = torch.tensor(obs_arr, device=agent.device)
         dq_t  = torch.tensor(dq_arr,  device=agent.device)
+        w_t   = torch.tensor(w_arr,   device=agent.device)
         n_samples = len(obs_arr)
 
         print(f"  训练 {train_epochs} epochs on {n_samples} 样本...")
 
         for epoch in range(train_epochs):
             indices = np.random.permutation(n_samples)
-            total_loss_u  = 0.0
-            total_loss_dq = 0.0
+            total_loss = 0.0
             n_batches = 0
 
             for start in range(0, n_samples, batch_size):
                 idx = indices[start: start + batch_size]
                 obs_b = obs_t[idx]
                 dq_b  = dq_t[idx]
+                w_b   = w_t[idx]
 
                 if is_ppo:
-                    # [BC-FIX-1] 使用 bc_forward，主 loss 在 u 空间
-                    bc_loss_u, bc_loss_dq, _ = agent.actor.bc_forward(obs_b, dq_b)
-                    # 总 loss：u 空间主导（0.7），Δq 空间辅助（0.3）
-                    loss = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
-                    total_loss_u  += bc_loss_u.item()
-                    total_loss_dq += bc_loss_dq.item()
+                    bc_loss_u, bc_loss_dq, dq_pred = agent.actor.bc_forward(
+                        obs_b, dq_b)
+
+                    # [FIX-BC2] Smooth L1 + per-joint权重 + 样本权重
+                    per_sample = F.smooth_l1_loss(
+                        dq_pred * jw.unsqueeze(0),
+                        dq_b * jw.unsqueeze(0),
+                        reduction='none'
+                    ).mean(dim=-1)
+                    weighted_loss = (per_sample * w_b).sum() / (w_b.sum() + 1e-8)
+                    loss = 0.85 * weighted_loss + 0.15 * bc_loss_u
                 else:
                     pred_dq = agent.actor(obs_b)
-                    loss = F.mse_loss(pred_dq, dq_b)
-                    total_loss_dq += loss.item()
+                    per_sample = F.smooth_l1_loss(
+                        pred_dq * jw.unsqueeze(0),
+                        dq_b * jw.unsqueeze(0),
+                        reduction='none'
+                    ).mean(dim=-1)
+                    loss = (per_sample * w_b).sum() / (w_b.sum() + 1e-8)
 
                 bc_optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(bc_params, 1.0)
                 bc_optimizer.step()
 
+                total_loss += loss.item()
                 n_batches += 1
 
-            avg_u  = total_loss_u  / max(n_batches, 1)
-            avg_dq = total_loss_dq / max(n_batches, 1)
+            avg_loss = total_loss / max(n_batches, 1)
 
+            # [FIX-BC5] 增强诊断
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 with torch.no_grad():
+                    n_eval = min(2000, n_samples)
                     if is_ppo:
                         eval_dq, _, _ = agent.actor.get_action(
-                            obs_t[:1000], deterministic=True)
+                            obs_t[:n_eval], deterministic=True)
                     else:
-                        eval_dq = agent.actor(obs_t[:1000])
-                    dq_mae = (eval_dq - dq_t[:1000]).abs().mean().item()
-                if is_ppo:
-                    print(f"    Epoch {epoch+1:3d} | U-MSE: {avg_u:.6f} | "
-                          f"DQ-MSE: {avg_dq:.6f} | MAE: {dq_mae:.4f} rad")
-                else:
-                    print(f"    Epoch {epoch+1:3d} | MSE: {avg_dq:.6f} | "
-                          f"MAE: {dq_mae:.4f} rad")
+                        eval_dq = agent.actor(obs_t[:n_eval])
+                    err = (eval_dq - dq_t[:n_eval]).abs()
+                    dq_mae = err.mean().item()
+                    per_j = err.mean(dim=0).cpu().numpy()
 
-        # [BC-FIX-7] 每轮训练后，将 log_std 重置到配置初值
+                    cruise_mask = w_t[:n_eval] > 0.5
+                    fine_mask = ~cruise_mask
+                    mae_c = err[cruise_mask].mean().item() if cruise_mask.any() else 0
+                    mae_f = err[fine_mask].mean().item() if fine_mask.any() else 0
+
+                pj_str = " ".join([f"J{i}:{v:.4f}" for i, v in enumerate(per_j)])
+                print(f"    Ep {epoch+1:3d} | L={avg_loss:.5f} | "
+                      f"MAE={dq_mae:.4f} (cruise={mae_c:.4f}, fine={mae_f:.4f})")
+                if (epoch + 1) % 20 == 0:
+                    print(f"      Per-joint: {pj_str}")
+
+        # 重置 log_std
         if is_ppo:
             with torch.no_grad():
                 init_val = float(agent.config["ppo_agent"].get("log_std_init", -1.0))
                 agent.actor.log_std.data.fill_(init_val)
 
-        # ── 评估 actor 独立成功率 ─────────────────────────────────────────
+        # ── 评估 ─────────────────────────────────────────────────────────
         eval_cfg = copy.deepcopy(config)
         eval_cfg["scene"]["seed"] = 42
         eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
