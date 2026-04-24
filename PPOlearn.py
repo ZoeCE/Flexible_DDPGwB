@@ -186,17 +186,12 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 n_epochs: int = 100, batch_size: int = 256,
                 lr: float = 3e-4, algo: str = "ppo"):
     """
-    Phase 1: DAgger 预训练（V3 修复版）。
-
-    修复列表：
-      [FIX-BC1] 每步标注前同步专家内部状态到真实环境（消除积分器漂移）
-      [FIX-BC2] Smooth L1 Loss + per-joint归一化权重（消除大δq主导）
-      [FIX-BC3] 分阶段样本加权（巡航=1.0, 精细=0.3）
-      [FIX-BC4] 执行后再次同步专家（解决DAgger脱节）
-      [FIX-BC5] 增强诊断：per-joint MAE + 分阶段MAE
+    Phase 1: DAgger 预训练 (修复版 V4.1)
+      - 移除所有对专家内部状态的强制同步，保证控制连续性
+      - 其余同 V4
     """
     print(f"\n{'='*60}")
-    print(f"  Phase 1: DAgger 预训练 V3 ({algo.upper()})")
+    print(f"  Phase 1: DAgger 预训练 V4.1 ({algo.upper()})")
     print(f"{'='*60}")
 
     bc_config = copy.deepcopy(config)
@@ -215,18 +210,14 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
     dq_max = np.array(config["space"].get("dq_max", [0.1]*7), dtype=np.float32)
     is_ppo = (algo == "ppo")
 
-    # [FIX-BC2] Per-joint归一化权重
-    import torch
-    jw = torch.tensor(1.0 / (dq_max + 1e-6),
-                      dtype=torch.float32, device=agent.device)
+    jw = torch.tensor(1.0 / (dq_max + 1e-6), dtype=torch.float32, device=agent.device)
     jw = jw / jw.mean()
     print(f"  Per-joint weights: {jw.cpu().numpy().round(3)}")
 
     all_obs = []
     all_dq  = []
-    all_weights = []  # [FIX-BC3] 每个样本的loss权重
+    all_weights = []
 
-    # BC 只训练 mean_head + backbone，不训练 log_std
     bc_params = []
     if is_ppo:
         for name, p in agent.actor.named_parameters():
@@ -234,15 +225,29 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 bc_params.append(p)
     else:
         bc_params = list(agent.actor.parameters())
-    bc_optimizer = torch.optim.Adam(bc_params, lr=lr)
+    bc_optimizer = torch.optim.AdamW(bc_params, lr=lr, weight_decay=1e-5)
 
     BETA_SCHEDULE   = [1.0, 0.8, 0.6, 0.4, 0.3, 0.2]
-    EPS_PER_ROUND   = [n_episodes, 120, 120, 120, 100, 100]
-    EPOCHS_SCHEDULE = [80, 50, 40, 30, 25, 20]
+    EPS_PER_ROUND   = [n_episodes, 200, 200, 150, 150, 150]
+    EPOCHS_SCHEDULE = [120, 100, 80, 60, 50, 40]
     TARGET_SR       = 0.6
-    MAX_BUFFER_SIZE = 250000
+    MAX_BUFFER_SIZE = 300000
 
     entry_z = config.get("insertion", {}).get("entry_z", 0.16)
+
+    # 初始化观测归一化统计量（仍可短暂更新后锁定）
+    print("  初始化观测归一化统计量...")
+    for _ in range(10):
+        obs = env.reset()
+        planned = env.get_planned_path()
+        if planned is None: continue
+        agent.normalize_obs(obs, update=True)
+        for _ in range(50):
+            action = np.random.uniform(-dq_max, dq_max).astype(np.float32)
+            obs, _, term, trunc, _ = env.step(action)
+            agent.normalize_obs(obs, update=True)
+            if term or trunc: break
+    print(f"  观测归一化统计量就绪 (n={agent.obs_norm.n})，后续 BC 阶段不再更新。")
 
     for rnd, beta in enumerate(BETA_SCHEDULE):
         n_eps = EPS_PER_ROUND[rnd] if rnd < len(EPS_PER_ROUND) else 80
@@ -255,8 +260,6 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
         n_new_fine = 0
         n_success = 0
 
-        update_norm_fraction = 1.0 if rnd == 0 else 0.3
-
         valid_eps = 0
         attempt_cnt = 0
         max_attempts = n_eps * 3
@@ -267,32 +270,22 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
             planned_path = env.get_planned_path()
             if planned_path is None:
                 continue
-            expert.reset(obs, current_q, env=env)
+            expert.reset(obs, current_q, env=env)   # 唯一同步点
             expert.set_path(planned_path)
             valid_eps += 1
 
             ep_success = False
             while True:
-                do_update = (random.random() < update_norm_fraction)
-                norm_obs = agent.normalize_obs(obs, update=do_update)
+                norm_obs = agent.normalize_obs(obs, update=False)
 
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
 
-                # ═══════════════════════════════════════════════════
-                # [FIX-BC1] 标注前同步专家内部状态到真实环境
-                # ═══════════════════════════════════════════════════
-                expert._ee_pos = env._get_ee_pos().copy().astype(np.float64)
-                expert._ee_vel = env._ee_vel_cache.copy().astype(np.float64)
-                if hasattr(expert, '_integral_xy'):
-                    expert._integral_xy = np.zeros(2, np.float64)
-
+                # 专家连续计算，内部状态不被打断
                 bc_dq = expert.compute_delta_q_target(obs, current_q)
 
-                # [FIX-BC3] 分阶段加权
                 if not np.any(np.isnan(bc_dq)):
                     all_obs.append(norm_obs.copy())
                     all_dq.append(bc_dq.copy())
-
                     payload_z = float(env.data.body('prefab').xpos[2])
                     is_fine = (env.reached_final or payload_z <= entry_z)
                     if is_fine:
@@ -302,31 +295,20 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                         all_weights.append(1.0)
                         n_new_cruise += 1
 
-                # β-混合执行
                 if random.random() < beta:
                     action = bc_dq
                 else:
                     with torch.no_grad():
                         s_t = torch.tensor(norm_obs.reshape(1, -1),
-                                           dtype=torch.float32,
-                                           device=agent.device)
+                                           dtype=torch.float32, device=agent.device)
                         if is_ppo:
-                            action_t, _, _ = agent.actor.get_action(
-                                s_t, deterministic=True)
+                            action_t, _, _ = agent.actor.get_action(s_t, deterministic=True)
                         else:
                             action_t = agent.actor(s_t)
                         action = action_t.cpu().numpy().flatten()
                         action = np.clip(action, -dq_max, dq_max)
 
                 next_obs, reward, terminated, truncated, info = env.step(action)
-
-                # ═══════════════════════════════════════════════════
-                # [FIX-BC4] 执行后再次同步专家
-                # ═══════════════════════════════════════════════════
-                expert._ee_pos = env._get_ee_pos().copy().astype(np.float64)
-                expert._ee_vel = env._ee_vel_cache.copy().astype(np.float64)
-                if hasattr(expert, '_integral_xy'):
-                    expert._integral_xy = np.zeros(2, np.float64)
 
                 if info.get("is_success"):
                     ep_success = True
@@ -377,7 +359,6 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                     bc_loss_u, bc_loss_dq, dq_pred = agent.actor.bc_forward(
                         obs_b, dq_b)
 
-                    # [FIX-BC2] Smooth L1 + per-joint权重 + 样本权重
                     per_sample = F.smooth_l1_loss(
                         dq_pred * jw.unsqueeze(0),
                         dq_b * jw.unsqueeze(0),
@@ -404,7 +385,6 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
 
             avg_loss = total_loss / max(n_batches, 1)
 
-            # [FIX-BC5] 增强诊断
             if (epoch + 1) % 10 == 0 or epoch == 0:
                 with torch.no_grad():
                     n_eval = min(2000, n_samples)
@@ -425,8 +405,6 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
                 pj_str = " ".join([f"J{i}:{v:.4f}" for i, v in enumerate(per_j)])
                 print(f"    Ep {epoch+1:3d} | L={avg_loss:.5f} | "
                       f"MAE={dq_mae:.4f} (cruise={mae_c:.4f}, fine={mae_f:.4f})")
-                if (epoch + 1) % 20 == 0:
-                    print(f"      Per-joint: {pj_str}")
 
         # 重置 log_std
         if is_ppo:
@@ -461,8 +439,8 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
 # Phase 2: 纯 PPO 训练（v5 性能触发课程）
 # ==============================================================================
 
-def train_ppo(log_dir: str, config: dict):
-    """纯 PPO 训练（两阶段版本：先 BC 预训练，再纯 PPO fine-tune）。"""
+def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
+    """纯 PPO 训练（可跳过BC预训练，支持课程学习衔接）。"""
     cfg_train  = config["train"]
     cfg_ppo    = config["ppo_agent"]
 
@@ -482,31 +460,49 @@ def train_ppo(log_dir: str, config: dict):
     print("[Train-PPO] 初始化 Agent...")
     agent = PPOAgent(log_dir, STATE_DIM, ACTION_DIM, config=config)
 
-    # ── Phase 1: BC 预训练 ────────────────────────────────────────────────
-    bc_cfg = config.get("bc_pretrain", {})
-    bc_episodes = int(bc_cfg.get("n_episodes", 200))
-    bc_epochs   = int(bc_cfg.get("n_epochs", 50))
-    bc_lr       = float(bc_cfg.get("lr", 1e-3))
-    bc_batch    = int(bc_cfg.get("batch_size", 256))
+    # ── 分支：是否跳过 BC 预训练 ──
+    if bc_ckpt_path is not None and os.path.exists(bc_ckpt_path):
+        print(f"[Train-PPO] 跳过 BC 预训练，直接加载检查点: {bc_ckpt_path}")
+        agent.load(bc_ckpt_path)
+        save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+    else:
+        bc_cfg = config.get("bc_pretrain", {})
+        bc_episodes = int(bc_cfg.get("n_episodes", 200))
+        bc_epochs   = int(bc_cfg.get("n_epochs", 50))
+        bc_lr       = float(bc_cfg.get("lr", 1e-3))
+        bc_batch    = int(bc_cfg.get("batch_size", 256))
 
-    pretrain_bc(agent, config,
-                n_episodes=bc_episodes, n_epochs=bc_epochs,
-                batch_size=bc_batch, lr=bc_lr, algo="ppo")
+        pretrain_bc(agent, config,
+                    n_episodes=bc_episodes, n_epochs=bc_epochs,
+                    batch_size=bc_batch, lr=bc_lr, algo="ppo")
+        save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
 
-    # BC 预训练后保存
-    save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+    # ── BC 后稳定化设置 ──
+    with torch.no_grad():
+        agent.actor.log_std.data.fill_(-4.5)           
+    agent._freeze_obs_norm = True
+    agent._freeze_actor = True
 
-    # [BC-FIX-8 v4] BC 软锚衰减策略
-    # 早期（PPO stable 阶段）保持较强 BC 引导，进入课程后快速衰减
+    CRITIC_WARMUP_STEPS = 10240
+    POLICY_RAMP_START = 5000                # 解冻后 5000 步开始恢复 PPO 权重
+    POLICY_RAMP_STEPS = 30000               # 3万步内从0恢复到1
+    BASE_LOG_STD = -4.5
+    MAX_LOG_STD = -2.0
+    ANNEAL_STEPS_PER_LEVEL = 200000         # 噪声退火长度
+    DETERMINISTIC_CURRICULUM_SWITCH_EP = 20
+
+    agent.entropy_coef = 0.0
     agent.behavior_clone = True
-    agent.bc_coef = float(cfg_ppo.get("bc_coef_final", 0.3))   # 起始软锚 0.3
-    agent.bc_coef_init = agent.bc_coef
-    agent.bc_coef_final = 0.02        # 长期衰减到接近 0
-    agent.bc_anneal_steps = 1_500_000  # 1.5M 步内完成退火
-    print(f"[Train-PPO] BC 软锚点开启 (coef={agent.bc_coef}，"
-          f"退火至 {agent.bc_coef_final} 经过 {agent.bc_anneal_steps} 步) → 进入 PPO 阶段")
+    agent.bc_coef = 10.0
+    agent.bc_coef_init = 10.0
+    agent.bc_coef_final = 0.5
+    agent.bc_anneal_steps = 2_000_000
 
-    # ── Phase 2: 纯 PPO 训练 ─────────────────────────────────────────────
+    print(f"[Train-PPO] Critic预热{CRITIC_WARMUP_STEPS}步，"
+          f"PPO权重在{POLICY_RAMP_START}步后恢复，噪声在权重恢复后释放")
+    print(f"[Train-PPO] BC锚系数={agent.bc_coef} -> {agent.bc_coef_final}")
+
+    # ── Phase 2: 纯 PPO 训练 ──
     expert = JointSpaceExpert(config, env.ik_solver)
 
     logger = Logger(log_dir, "cable_robot_ppo", os.path.basename(log_dir))
@@ -519,17 +515,16 @@ def train_ppo(log_dir: str, config: dict):
             "success", "success_rate", "steps",
             "policy_loss", "value_loss", "entropy_loss",
             "approx_kl", "clip_fraction",
-            "curr_n_obs",   # [v3-CURRICULUM] 记录当前课程难度
+            "curr_n_obs",
         ])
 
-    # ── [v5-CURRICULUM] 基于性能的课程调度器 ────────────────────────────────
+    # ── 课程学习调度器 ──
     cur_cfg = config.get("curriculum", {})
     use_curriculum = cur_cfg.get("enabled", False)
     max_n_obs      = int(cur_cfg.get("ppo_max_n_obstacles", config["scene"]["n_obstacles"]))
     ramp_mode      = str(cur_cfg.get("ramp_mode", "performance"))
     milestones     = cur_cfg.get("milestones", None)
 
-    # 性能触发参数（v5）
     perf_window         = int(cur_cfg.get("perf_window", 30))
     perf_sr_thresh      = float(cur_cfg.get("perf_sr_threshold", 0.7))
     perf_reward_thresh  = float(cur_cfg.get("perf_reward_threshold", 60.0))
@@ -537,7 +532,6 @@ def train_ppo(log_dir: str, config: dict):
     perf_regression_tol = float(cur_cfg.get("perf_regression_tol", -30.0))
     perf_hard_cap_steps = int(cur_cfg.get("perf_hard_cap_steps", 600_000))
 
-    # 课程状态
     class CurriculumState:
         def __init__(self):
             self.level = 0
@@ -547,7 +541,6 @@ def train_ppo(log_dir: str, config: dict):
             self.demotions  = 0
     cur_state = CurriculumState()
 
-    # 兼容旧 step/linear 模式参数
     stable_n_obs   = int(cur_cfg.get("ppo_stable_n_obstacles", 0))
     stable_until   = int(cur_cfg.get("ppo_stable_timesteps", 500_000))
     ramp_start     = int(cur_cfg.get("ppo_ramp_start_timesteps", 500_000))
@@ -555,7 +548,6 @@ def train_ppo(log_dir: str, config: dict):
     ramp_step_size = int(cur_cfg.get("ramp_step_size", 1))
 
     def compute_curriculum_n_obs_by_timestep(tstep: int) -> int:
-        """时间触发的课程 (milestone / step / linear 模式)。"""
         if ramp_mode == "milestone" and milestones is not None:
             n = 0
             for thresh, n_val in milestones:
@@ -570,94 +562,65 @@ def train_ppo(log_dir: str, config: dict):
         frac = max(0.0, min(1.0, frac))
         if ramp_mode == "linear":
             n = stable_n_obs + int(round(frac * (max_n_obs - stable_n_obs)))
-        else:  # step
+        else:
             n_steps = max(1, (max_n_obs - stable_n_obs) // max(ramp_step_size, 1))
             step_idx = int(frac * n_steps)
             n = stable_n_obs + step_idx * ramp_step_size
             n = min(n, max_n_obs)
         return int(n)
 
-    def compute_curriculum_by_performance(
-            cur_level: int,
-            recent_sr: float, recent_reward: float,
-            episodes_at_level: int, steps_at_level: int) -> int:
-        """基于性能的课程推进。
-        规则：
-          1. 若 (SR 达标 AND reward 达标) 且最少 episodes 已达成 → 推进
-          2. 若单级停留步数超过 hard_cap → 强制推进（保险）
-        """
+    def compute_curriculum_by_performance(cur_level, recent_sr, recent_reward, eps_at_level, steps_at_level):
         if cur_level >= max_n_obs:
             return cur_level
         if steps_at_level >= perf_hard_cap_steps:
             return cur_level + 1
-        if episodes_at_level < perf_min_episodes:
+        if eps_at_level < perf_min_episodes:
             return cur_level
         if recent_sr >= perf_sr_thresh and recent_reward >= perf_reward_thresh:
             return cur_level + 1
         return cur_level
 
-    def compute_curriculum_n_obs(tstep: int, episode: int,
-                                 recent_sr: float = 0.0,
-                                 recent_reward: float = 0.0) -> int:
-        """综合调度：performance 模式优先，其余回退到 timestep 模式。"""
+    def compute_curriculum_n_obs(tstep: int, episode: int, recent_sr=0.0, recent_reward=0.0) -> int:
         if not use_curriculum:
             return int(config["scene"]["n_obstacles"])
-
         if ramp_mode == "performance":
             eps_at_level = episode - cur_state.level_entered_episode
             steps_at_level = tstep - cur_state.level_entered_step
             return compute_curriculum_by_performance(
-                cur_state.level, recent_sr, recent_reward,
-                eps_at_level, steps_at_level)
+                cur_state.level, recent_sr, recent_reward, eps_at_level, steps_at_level)
         else:
             return compute_curriculum_n_obs_by_timestep(tstep)
 
-    # 初始化当前课程障碍物数
     current_n_obs = compute_curriculum_n_obs(0, 0, 0.0, 0.0)
     cur_state.level = current_n_obs
     env.set_curriculum_n_obstacles(current_n_obs)
-    if use_curriculum:
-        if ramp_mode == "performance":
-            print(f"[Curriculum v5] Phase 2 开始（performance 模式）:")
-            print(f"  触发条件: 近 {perf_window} 回合 SR ≥ {perf_sr_thresh*100:.0f}% "
-                  f"且 avg_reward ≥ {perf_reward_thresh}")
-            print(f"  每级最少 {perf_min_episodes} 回合，hard_cap = {perf_hard_cap_steps} 步")
-            print(f"  最大障碍物数 = {max_n_obs}")
-            print(f"  当前 n_obs = {current_n_obs}")
-        elif ramp_mode == "milestone":
-            print(f"[Curriculum] Phase 2 开始（milestone 模式）:")
-            for thresh, n in (milestones or []):
-                print(f"  t ≥ {thresh:>8d}: n_obs = {n}")
-            print(f"  当前 n_obs = {current_n_obs}")
-        else:
-            print(f"[Curriculum] Phase 2 开始（{ramp_mode} 模式）：n_obs={current_n_obs}")
-        _ = env.reset()
-        actual = len(env._obstacles)
-        print(f"[Diag] PPO 主 env 首次 reset 后: config.n_obstacles={env.config['scene']['n_obstacles']}, "
-              f"实际 len(_obstacles)={actual}")
-        if actual != current_n_obs:
-            print(f"[WARN] 实际障碍物数与期望不符！检查 set_curriculum_n_obstacles 是否生效")
 
-    stats    = EpisodeStats(window=SMOOTH_WIN)
-    cur_stats = EpisodeStats(window=perf_window) if use_curriculum else None
-    episode  = 0
+    # ─── 必须在这之后初始化 ───
+    level_step_counter = 0
+    last_curriculum_level = current_n_obs
+
+    if use_curriculum:
+        print(f"[Curriculum] Phase 2 开始 ({ramp_mode} 模式)，当前 n_obs = {current_n_obs}")
+
+    stats       = EpisodeStats(window=SMOOTH_WIN)
+    cur_stats   = EpisodeStats(window=perf_window) if use_curriculum else None
+    episode     = 0
     total_steps = 0
-    best_sr  = 0.0
-    t_start  = time.time()
+    best_sr     = 0.0
+    t_start     = time.time()
     last_result = agent._last_result
 
-    # [v3-DIAG] 终止原因统计
     from collections import Counter, deque
     DIAG_WINDOW = 50
     DIAG_INTERVAL = 20
     term_history = deque(maxlen=DIAG_WINDOW)
     last_term_reason = None
 
-    print(f"[Train-PPO] 开始纯 PPO 训练，目标总步数 {TOTAL_STEPS}...")
+
+    print(f"[Train-PPO] 开始 PPO 训练，目标总步数 {TOTAL_STEPS}...")
 
     while total_steps < TOTAL_STEPS:
-
-        # [v5-CURRICULUM] 每个 episode 检查是否需要调整难度
+        # ── 课程推进 ──
         if use_curriculum and cur_stats is not None:
             recent_sr = cur_stats.success_rate()
             recent_reward = cur_stats.mean("reward")
@@ -680,45 +643,48 @@ def train_ppo(log_dir: str, config: dict):
             if cur_stats is not None:
                 cur_stats = EpisodeStats(window=perf_window)
 
-            print(f"\n{'='*70}")
-            if new_n_obs > prev_level:
-                print(f"  [CURRICULUM PROMOTE] t={total_steps} ep={episode} "
-                      f"SR={recent_sr*100:.0f}% avgR={recent_reward:.1f} "
-                      f"→ n_obstacles: {prev_level} → {new_n_obs}")
-            else:
-                print(f"  [CURRICULUM DEMOTE] t={total_steps} ep={episode} "
-                      f"SR={recent_sr*100:.0f}% avgR={recent_reward:.1f} "
-                      f"→ n_obstacles: {prev_level} → {new_n_obs}")
-            print(f"{'='*70}\n")
-            current_n_obs = new_n_obs
+            # ═════════════════════════════════════════════════════════
+            # 课程切换时重置噪声与确定性保护
+            # ═════════════════════════════════════════════════════════
+            with torch.no_grad():
+                agent.actor.log_std.data.fill_(BASE_LOG_STD)
+            level_step_counter = 0
+            last_curriculum_level = new_n_obs
 
+            print(f"\n[Curriculum] n_obs: {prev_level} → {new_n_obs}，"
+                  f"噪声重置 std≈{np.exp(BASE_LOG_STD):.3f}")
             logger.log(episode, {
                 "curriculum/switch_event": float(new_n_obs),
                 "curriculum/switch_total_steps": total_steps,
                 "curriculum/promotions": cur_state.promotions,
                 "curriculum/demotions":  cur_state.demotions,
             })
+            current_n_obs = new_n_obs
+
+        # ── 噪声退火（基于当前难度级别内的步数） ──
+        if level_step_counter > 0 and agent.policy_loss_coef >= 1.0:
+            progress = min(1.0, level_step_counter / ANNEAL_STEPS_PER_LEVEL)
+            current_log_std = BASE_LOG_STD + progress * (MAX_LOG_STD - BASE_LOG_STD)
+            with torch.no_grad():
+                agent.actor.log_std.data.fill_(current_log_std)
+
+        episodes_at_level = episode - cur_state.level_entered_episode
+        deterministic = (episodes_at_level < DETERMINISTIC_CURRICULUM_SWITCH_EP) or (level_step_counter < CRITIC_WARMUP_STEPS)
 
         obs = env.reset()
-        current_q = env.data.qpos[:7].copy()
-
-        # [SKIP-INVALID] 失败场景不计入 episode，直接重试
         planned_path = env.get_planned_path()
         if planned_path is None:
-            # 不增加 episode，直接重新尝试下一场景
-            continue
-        # expert 用于 BC 监督，不参与 rollout 主策略
-        expert.reset(obs, current_q, env=env)
+            continue   # 跳过规划失败场景
+
+        expert.reset(obs, env.data.qpos[:7].copy(), env=env)
         expert.set_path(planned_path)
 
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         rollout_done = False
 
         while not rollout_done:
-
             norm_obs = agent.normalize_obs(obs, update=True)
 
-            # 采集专家 BC 目标（软锚点监督信号）
             current_q = env.data.qpos[:7].copy().astype(np.float32)
             try:
                 bc_delta_q = expert.compute_delta_q_target(obs, current_q)
@@ -727,18 +693,18 @@ def train_ppo(log_dir: str, config: dict):
             except Exception:
                 bc_delta_q = np.zeros(ACTION_DIM, np.float32)
 
-            delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
+            delta_q, log_prob, value = agent.act(norm_obs, deterministic=deterministic)
 
             next_obs, reward, terminated, truncated, info = env.step(delta_q)
             done = terminated or truncated
 
-            # [v3-DIAG] 捕获终止原因
             if done:
                 last_term_reason = info.get("termination_reason", "unknown")
 
             ep_reward += reward
             ep_steps  += 1
             total_steps += 1
+            level_step_counter += 1
             agent.total_steps = total_steps
             if info.get("is_success"):
                 ep_success = True
@@ -753,26 +719,38 @@ def train_ppo(log_dir: str, config: dict):
                 else:
                     with torch.no_grad():
                         ns_norm = agent.normalize_obs(next_obs, update=False)
-                        s_t = torch.tensor(ns_norm, dtype=torch.float32,
-                                           device=agent.device).unsqueeze(0)
+                        s_t = torch.tensor(ns_norm, dtype=torch.float32, device=agent.device).unsqueeze(0)
                         last_val = agent.critic(s_t).item()
 
-                agent.buffer.compute_returns_and_advantages(
-                    last_val, agent.gamma, agent.gae_lambda
-                )
+                agent.buffer.compute_returns_and_advantages(last_val, agent.gamma, agent.gae_lambda)
                 last_result = agent.update()
+                # 解冻 Actor
+                if agent._freeze_actor and total_steps >= CRITIC_WARMUP_STEPS:
+                    agent._freeze_actor = False
+                    agent.policy_loss_coef = 0.0
+                    agent.entropy_coef = 0.0
+                    print(f"[Train-PPO] Critic预热完成 (step {total_steps})，"
+                          f"解冻Actor，PPO权重=0，仅BC微调")
+
+                # 逐步恢复 PPO 权重
+                if not agent._freeze_actor and agent.policy_loss_coef < 1.0:
+                    if total_steps >= CRITIC_WARMUP_STEPS + POLICY_RAMP_START:
+                        progress = min(1.0, (total_steps - CRITIC_WARMUP_STEPS - POLICY_RAMP_START) / POLICY_RAMP_STEPS)
+                        agent.policy_loss_coef = progress
+                        if progress >= 1.0:
+                            agent.entropy_coef = 0.001
+                            print(f"[Train-PPO] PPO权重已完全恢复 (step {total_steps})，熵系数恢复")
                 rollout_done = True
 
             if done:
                 rollout_done = True
 
-        # ── 回合统计 ──────────────────────────────────────────────────
+        # ── 回合统计 ──
         stats.update(reward=ep_reward, steps=ep_steps, success=float(ep_success))
         avg_r = stats.mean("reward"); sr = stats.success_rate()
         if cur_stats is not None:
             cur_stats.update(reward=ep_reward, success=float(ep_success))
 
-        # [v3-DIAG] 记录本回合终止原因
         reason_key = (last_term_reason or "unknown").split(":")[0]
         term_history.append(reason_key)
 
@@ -816,7 +794,6 @@ def train_ppo(log_dir: str, config: dict):
                 current_n_obs,
             ])
 
-        # 诊断：定期打印终止原因统计
         if episode > 0 and episode % DIAG_INTERVAL == 0 and len(term_history) > 0:
             counter = Counter(term_history)
             top = counter.most_common(5)
@@ -831,7 +808,6 @@ def train_ppo(log_dir: str, config: dict):
             eval_cfg = copy.deepcopy(config)
             eval_cfg["scene"]["seed"] = 42
             eval_env    = CableRobotEnvWithObstacles(config=eval_cfg)
-            # 评估时按当前课程难度
             eval_env.set_curriculum_n_obstacles(current_n_obs)
             eval_expert = JointSpaceExpert(eval_cfg, eval_env.ik_solver)
             result = evaluate(agent, eval_env, eval_expert,
@@ -1010,7 +986,7 @@ def train_td3(log_dir: str, config: dict):
 # 主入口
 # ==============================================================================
 
-def train(log_dir: str, algo: str = "ppo", custom_config: dict = None):
+def train(log_dir: str, algo: str = "ppo", custom_config: dict = None, bc_ckpt_path: str = None):
     """
     统一训练入口。
 
@@ -1033,7 +1009,7 @@ def train(log_dir: str, algo: str = "ppo", custom_config: dict = None):
     print(f"[Train] 算法: {algo.upper()} | 保存目录: {log_dir}")
 
     if algo == "ppo":
-        return train_ppo(log_dir, config)
+        return train_ppo(log_dir, config, bc_ckpt_path=bc_ckpt_path)
     elif algo == "td3":
         return train_td3(log_dir, config)
     else:
@@ -1053,6 +1029,8 @@ if __name__ == "__main__":
                         help="覆盖 total_timesteps（PPO 用）")
     parser.add_argument("--render",   action="store_true")
     parser.add_argument("--gpu",      type=int, default=0)
+    parser.add_argument("--bc-ckpt", type=str, default=None,
+                    help="跳过BC预训练，直接加载指定的BC检查点（.pt）")
     args = parser.parse_args()
 
     cli_cfg = {}
@@ -1061,4 +1039,5 @@ if __name__ == "__main__":
     if args.episodes:  cli_cfg.setdefault("train", {})["n_episodes"]       = args.episodes
     if args.timesteps: cli_cfg.setdefault("train", {})["total_timesteps"]  = args.timesteps
 
-    train(args.log_dir, algo=args.algo, custom_config=cli_cfg or None)
+    train(args.log_dir, algo=args.algo, custom_config=cli_cfg or None,
+      bc_ckpt_path=args.bc_ckpt)

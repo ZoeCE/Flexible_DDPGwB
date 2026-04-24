@@ -525,6 +525,11 @@ class CableRobotEnvWithObstacles:
         self._prev_ee_euler=R.from_matrix(mat_init).as_euler('xyz').copy()
         self._ee_euler_vel_cache=np.zeros(3)
 
+        # 新奖励需要的状态变量
+        self._prev_ref_dist = None
+        self._prev_descent_depth = 0.0
+        self._best_insertion_z = 10.0   # 记录 payload 曾达到的最低 z (值越小越好)
+
         self.action_queue.clear()
         for _ in range(max(1, self.latency_steps+1)):
             self.action_queue.append(init_q.copy().astype(np.float32))
@@ -733,7 +738,7 @@ class CableRobotEnvWithObstacles:
     def _log_potential(d, k, eps):
         """对数势能: Φ(d) = k * log(d + eps)"""
         return k * np.log(d + eps)
-
+    
     def _compute_rebar_errors(self, payload_xy, payload_mat):
         """计算4根钢筋与对应方孔的XY偏差。"""
         rebar_pos = np.array([
@@ -749,62 +754,39 @@ class CableRobotEnvWithObstacles:
 
     def _compute_reward(self, action, current_q, prev_q, obs):
         """
-        [V3] 分层阶段感知Reward。
-
-        Layer 0 - Safety:   碰撞/失稳/crash → 终止
-        Layer 1 - Progress: 对数势能差分 + per-rebar + 条件门控下降
-        Layer 2 - Quality:  姿态/平滑 → 阶段自适应软约束
-
-        返回: (reward, done, success, is_collision) — 签名与旧版一致
+        简化奖励 V5.1：
+          - 增加吊装物姿态软约束（tilt/yaw 微小惩罚）
+          - 其余同 V5（差分距离追踪 + 指数折扣下降奖励 + 终端奖励独立）
         """
         reward = 0.0; done = False; success = False; is_collision = False
         cfg_rwd   = self.config["reward"]
         cfg_logic = self.config["step_logic"]
         cfg_ins   = self.cfg_insertion
 
-        # ── 预计算 ──────────────────────────────────────────────────────
         payload_xy = obs[4:6].copy(); payload_vxy = obs[6:8].copy()
         payload_z  = self.data.body('prefab').xpos[2]
         dof_idx    = self.model.jnt_dofadr[self.prefab_jnt_id]
         payload_vz = self.data.qvel[dof_idx + 2]
-        pl_vel_xyz = np.append(payload_vxy, payload_vz)
-        pl_vel     = float(np.linalg.norm(pl_vel_xyz))
+        pl_vel     = float(np.linalg.norm(np.append(payload_vxy, payload_vz)))
         ee_pos     = self._get_ee_pos()
-        ee_xy = ee_pos[:2]; ee_z = float(ee_pos[2])
+        ee_xy = ee_pos[:2]
+        dtf = float(np.linalg.norm(payload_xy - self.target_pos))
 
+        # 提前计算姿态（供后续使用）
         pl_mat   = self.data.body('prefab').xmat.reshape(3, 3)
         pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
         tilt     = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
         abs_yaw  = abs(float(pl_euler[2]))
-        pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
 
-        swing_xy = float(np.linalg.norm(ee_xy - payload_xy))
-        pl_angvel_xyz = self.data.qvel[dof_idx + 3: dof_idx + 6]
-        pl_angvel_mag = float(np.linalg.norm(pl_angvel_xyz))
-
-        dtf = float(np.linalg.norm(payload_xy - self.target_pos))
-        vel_xy_scalar = float(np.linalg.norm(payload_vxy))
-
-        # 阶段检测
         entry_z = cfg_ins.get("entry_z", 0.16)
         if not self._in_insertion_phase and payload_z <= entry_z:
             self._in_insertion_phase = True
 
-        if self._in_insertion_phase:
-            phase = "INSERTION"
-        elif self.reached_final:
-            phase = "ALIGN"
-        else:
-            phase = "CRUISE"
-
-        # ══════════════════════════════════════════════════════════════
-        # Layer 0: SAFETY
-        # ══════════════════════════════════════════════════════════════
-
-        # 失稳早停
+        # ---------- SAFETY (unchanged) ----------
         instab_grace = cfg_logic.get("instability_grace_steps", 50)
         if cfg_logic.get("instability_check", True) and self.current_step >= instab_grace:
             unstable = False; reason_detail = []
+            swing_xy = float(np.linalg.norm(ee_xy - payload_xy))
             if swing_xy  > cfg_logic.get("swing_xy_max", 0.25):
                 unstable = True; reason_detail.append(f"swing={swing_xy:.3f}")
             if pl_vel    > cfg_logic.get("payload_vel_max", 2.0):
@@ -818,10 +800,9 @@ class CableRobotEnvWithObstacles:
                 self._termination_reason = "instability:" + ",".join(reason_detail)
                 return reward, True, False, False
 
-        # 碰撞检测
         use_mjc_contact = cfg_rwd.get("use_mujoco_contact", True)
         if use_mjc_contact:
-            hit_obs, hit_rebar = self._check_prefab_collision_with_obstacles()
+            hit_obs, _ = self._check_prefab_collision_with_obstacles()
             if hit_obs:
                 reward = float(cfg_rwd.get("collision_penalty", -10.0))
                 self._termination_reason = "collision_obstacle"
@@ -839,142 +820,57 @@ class CableRobotEnvWithObstacles:
             self._termination_reason = "collision_base"
             return reward, True, False, True
 
-        # ══════════════════════════════════════════════════════════════
-        # Layer 1: PROGRESS — 对数势能差分
-        # ══════════════════════════════════════════════════════════════
+        # ---------- PROGRESS REWARD ----------
+        reward += -0.003   # step penalty
 
-        # 时间步惩罚
-        if phase == "INSERTION":
-            reward += cfg_rwd.get("step_penalty_insertion", -0.001)
+        # 差分距离奖励
+        if self._planned_path is not None and not self.reached_final:
+            max_look = min(3, len(self._planned_path) - self.current_wp_idx - 1)
+            best_dist = float('inf')
+            for i in range(max_look + 1):
+                wp = self._planned_path[self.current_wp_idx + i]
+                d = np.linalg.norm(payload_xy - wp[:2]) + 0.5 * abs(payload_z - wp[2])
+                if d < best_dist:
+                    best_dist = d
+            ref_dist = best_dist
         else:
-            reward += cfg_rwd.get("step_penalty", -0.003)
+            target_pz = cfg_ins.get("target_payload_z", 0.10)
+            ref_dist = dtf + 0.5 * abs(payload_z - target_pz)
 
-        # 1a. 对数势能: XY目标吸引
-        log_eps = cfg_rwd.get("goal_log_eps", 0.002)
-        k_xy = cfg_rwd.get("goal_log_coef_xy", 3.0)
-        phi_xy = self._log_potential(dtf, k_xy, log_eps)
+        prev_ref = getattr(self, '_prev_ref_dist', None)
+        if prev_ref is not None:
+            progress = prev_ref - ref_dist
+            reward += 4.0 * progress
+        self._prev_ref_dist = ref_dist
 
-        if self._prev_goal_potential is not None:
-            r_pot_xy = self._prev_goal_potential - phi_xy
-            r_pot_xy = float(np.clip(r_pot_xy, -2.0, 2.0))
-            reward += r_pot_xy
-        self._prev_goal_potential = phi_xy
-
-        # 1b. 对数势能: Z轴（仅对准/插入阶段）
-        target_pz = cfg_ins.get("target_payload_z", 0.10)
-        if phase in ("ALIGN", "INSERTION"):
-            k_z = cfg_rwd.get("goal_log_coef_z", 2.0)
-            dz = abs(payload_z - target_pz)
-            phi_z = self._log_potential(dz, k_z, log_eps)
-            prev_phi_z = getattr(self, '_prev_phi_z', None)
-            if prev_phi_z is not None:
-                r_pot_z = prev_phi_z - phi_z
-                r_pot_z = float(np.clip(r_pot_z, -1.5, 1.5))
-                reward += r_pot_z
-            self._prev_phi_z = phi_z
-
-        # 1c. 航点进展
         if getattr(self, '_wp_just_advanced', False):
-            reward += cfg_rwd.get("waypoint_bonus", 1.0)
+            reward += 1.0
             self._wp_just_advanced = False
 
-        # 1d. Per-rebar对准奖励（近距离）
-        rebar_act_dist = cfg_rwd.get("rebar_activate_dist", 0.03)
-        if phase in ("ALIGN", "INSERTION") and dtf < rebar_act_dist:
-            _, worst_err, avg_err = self._compute_rebar_errors(
-                payload_xy.astype(np.float64), pl_mat)
-            w_worst = cfg_rwd.get("rebar_worst_weight", 0.7)
-            combined_err = w_worst * worst_err + (1.0 - w_worst) * avg_err
-            rebar_coef = cfg_rwd.get("rebar_align_coef", 5.0)
-            r_rebar = rebar_coef * max(0, 1.0 - combined_err / rebar_act_dist)
-            reward += r_rebar
+        # 姿态软约束（新增，防止剧烈摆动）
+        reward -= 0.02 * tilt
+        reward -= 0.02 * abs_yaw
 
-        # 1e. 条件门控下降奖励（插入阶段）
-        if phase == "INSERTION":
-            descent_depth = max(0.0, entry_z - payload_z)
-            if payload_z < self._best_insertion_z:
-                self._best_insertion_z = float(payload_z)
-
-            xy_aligned = dtf < cfg_rwd.get("descent_align_thresh_xy", 0.008)
-            pose_aligned = pose_err < cfg_rwd.get("descent_align_thresh_pose", 0.06)
+        # 插入阶段下降奖励（指数折扣）
+        if self._in_insertion_phase:
+            target_pz = cfg_ins.get("target_payload_z", 0.10)
+            cur_depth = max(0.0, entry_z - payload_z)
             prev_depth = getattr(self, '_prev_descent_depth', 0.0)
-            depth_delta = descent_depth - prev_depth
+            depth_delta = cur_depth - prev_depth
+            discount = np.exp(-dtf / 0.02)
+            reward += 6.0 * depth_delta * discount
+            self._prev_descent_depth = cur_depth
 
-            if depth_delta > 0:
-                if xy_aligned and pose_aligned:
-                    reward += cfg_rwd.get("descent_reward_coef", 3.0) * depth_delta
-                else:
-                    reward -= cfg_rwd.get("descent_penalty_coef", 2.0) * depth_delta
-            self._prev_descent_depth = descent_depth
-
-        # 1f. 障碍物排斥APF
-        rho_0    = cfg_rwd.get("obstacle_rho_0", 0.10)
-        d_min    = cfg_rwd.get("obstacle_d_min", 0.005)
-        apf_coef = cfg_rwd.get("obstacle_apf_coef", 3.0e-4)
-        apf_max  = cfg_rwd.get("obstacle_apf_max", 1.0)
-        bg_coef  = cfg_rwd.get("obstacle_penalty_coef", 0.02)
-        bg_scale = cfg_rwd.get("obstacle_penalty_scale", 0.05)
-
-        for (ox, oy, orad) in self._obstacles:
-            dist_center = float(np.linalg.norm(payload_xy - np.array([ox, oy])))
-            dist_edge   = dist_center - orad - self.payload_radius
-            if dist_edge < rho_0:
-                d_eff = max(dist_edge, d_min)
-                apf_pen = apf_coef * (1.0 / d_eff - 1.0 / rho_0) ** 2
-                apf_pen = min(apf_pen, apf_max)
-                reward -= apf_pen
-            if dist_edge > 0.0:
-                reward -= bg_coef * np.exp(-dist_edge / max(bg_scale, 1e-8))
-
-        # ══════════════════════════════════════════════════════════════
-        # Layer 2: QUALITY — 阶段自适应软约束
-        # ══════════════════════════════════════════════════════════════
-
-        # 2a. 姿态惩罚
-        if phase == "INSERTION":
-            reward -= cfg_rwd.get("tilt_penalty_coef_insertion", 0.5) * tilt
-            reward -= cfg_rwd.get("yaw_penalty_coef_insertion", 0.6) * abs_yaw
-        else:
-            reward -= cfg_rwd.get("tilt_penalty_coef_cruise", 0.15) * tilt
-            reward -= cfg_rwd.get("yaw_penalty_coef_cruise", 0.2) * abs_yaw
-
-        # 2b. 防摆（主要在巡航段生效）
-        if phase == "CRUISE":
-            reward -= self._neg_exp(swing_xy,
-                cfg_rwd.get("swing_penalty_coef", 0.05),
-                cfg_rwd.get("swing_penalty_scale", 0.05))
-            reward -= self._neg_exp(pl_angvel_mag,
-                cfg_rwd.get("angvel_penalty_coef", 0.02),
-                cfg_rwd.get("angvel_penalty_scale", 0.5))
-
-        # 2c. 控制平滑
-        if phase == "INSERTION":
-            ar_coef = cfg_rwd.get("action_rate_coef_insertion", 0.5)
-        else:
-            ar_coef = cfg_rwd.get("action_rate_coef_cruise", 0.1)
-
-        prev_dq = getattr(self, '_prev_delta_q', None)
-        if prev_dq is not None and prev_dq.shape == np.asarray(action).shape:
-            dq_rate = float(np.linalg.norm(np.asarray(action) - prev_dq))
-            reward -= ar_coef * dq_rate
-
-        dq_change = float(np.linalg.norm(current_q - prev_q))
-        reward -= cfg_rwd.get("joint_smooth_coef", 0.01) * dq_change
-
-        # ══════════════════════════════════════════════════════════════
-        # 成功判定
-        # ══════════════════════════════════════════════════════════════
+        # ---------- SUCCESS / SOFT SUCCESS / CRASH ----------
         z_tol    = cfg_ins.get("success_z_tolerance", 0.020)
         xy_tol   = cfg_ins.get("xy_tolerance",  0.005)
         tilt_tol = cfg_ins.get("tilt_tolerance", 0.08)
         yaw_tol  = cfg_ins.get("yaw_tolerance",  0.06)
         hold_steps = int(cfg_ins.get("hold_steps", 3))
 
-        z_err   = abs(payload_z - target_pz)
-        z_ok    = (z_err < z_tol)
-        xy_ok   = (dtf < xy_tol)
-        pose_ok = (tilt < tilt_tol) and (abs_yaw < yaw_tol)
-        on_target = z_ok and xy_ok and pose_ok
+        on_target = (abs(payload_z - target_pz) < z_tol and
+                     dtf < xy_tol and
+                     tilt < tilt_tol and abs_yaw < yaw_tol)
 
         if on_target:
             self._insertion_hold_counter += 1
@@ -989,17 +885,17 @@ class CableRobotEnvWithObstacles:
                 f"tilt={tilt:.3f},yaw={abs_yaw:.3f}")
             return reward, done, success, is_collision
 
-        # Soft success (timeout附近)
         max_steps = self.config["sim"]["max_steps"]
         near_timeout = (self.current_step >= max_steps - 10)
         if self.reached_final and near_timeout:
             dist_frac  = max(0.0, 1.0 - dtf / 0.05)
+            best_z = getattr(self, '_best_insertion_z', 0.10)
             depth_frac = max(0.0, min(1.0,
-                (entry_z - self._best_insertion_z) / max(entry_z - target_pz, 1e-6)))
+                (entry_z - best_z) / max(entry_z - target_pz, 1e-6)))
+            pose_err = float(np.sqrt(tilt**2 + abs_yaw**2))
             pose_frac = max(0.0, 1.0 - pose_err / 0.3)
-            # Per-rebar bonus
             rebar_frac = 0.0
-            if dtf < rebar_act_dist:
+            if dtf < 0.05:
                 _, worst_err, _ = self._compute_rebar_errors(
                     payload_xy.astype(np.float64), pl_mat)
                 rebar_frac = max(0.0, 1.0 - worst_err / 0.01)
@@ -1007,11 +903,10 @@ class CableRobotEnvWithObstacles:
             reward += cfg_rwd.get("soft_success_bonus", 20.0) * combined
             self._termination_reason = (
                 f"soft_success:score={combined:.2f},dtf={dtf*1000:.1f}mm,"
-                f"best_z={self._best_insertion_z*1000:.0f}mm")
+                f"best_z={best_z*1000:.0f}mm")
             done = True
             return reward, done, success, is_collision
 
-        # Crash检测
         grace_steps = cfg_logic.get("crash_grace_steps", 30)
         if self.current_step >= grace_steps:
             if payload_z < cfg_logic["crash_z_threshold"] and \
@@ -1020,11 +915,10 @@ class CableRobotEnvWithObstacles:
                 self._termination_reason = f"crash:z={payload_z:.3f},vz={payload_vz:.2f}"
                 return reward, True, False, False
 
-        # 裁剪
+        # ---------- 普通步骤裁剪 ----------
         r_min = cfg_logic.get("reward_clip_min", -5.0)
         r_max = cfg_logic.get("reward_clip_max",  5.0)
         reward = float(np.clip(reward, r_min, r_max))
-
         return reward, done, success, is_collision
 
     # ── _get_obs ───────────────────────────────────────────────────────────────

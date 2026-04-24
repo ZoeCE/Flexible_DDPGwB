@@ -426,7 +426,7 @@ if __name__ == "__main__":
     # 自动推断 checkpoint 路径
     ckpt_path = args.ckpt
     if ckpt_path is None and args.mode in ["ppo", "td3"]:
-        ckpt_path = os.path.join(args.log_dir, "ckpt_latest.pt")
+        ckpt_path = os.path.join(args.log_dir, "ckpt_bc_pretrained.pt")
         if not os.path.exists(ckpt_path):
             ckpt_path = os.path.join(args.log_dir, "ckpt_best.pt")
         if not os.path.exists(ckpt_path):

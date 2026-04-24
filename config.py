@@ -292,37 +292,31 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     # 14. PPO Agent 超参数 — V3 微调
     # ==========================================================================
-    "ppo_agent": {
-        "hidden_dim":            256,
-        "n_layers":              2,
-
-        "lr_actor":              1e-4,
-        "lr_critic":             3e-4,
+        "ppo_agent": {
+        "hidden_dim":            512,        # 256 → 512
+        "n_layers":              3,          # 2 → 3
+        "lr_actor":              2e-5,       # 稍降，大网络防振荡
+        "lr_critic":             2e-4,
         "gamma":                 0.99,
-        "gae_lambda":            0.95,
-        "clip_eps":              0.15,
+        "gae_lambda":            0.98,       # 0.95→0.98 提高远期信用
+        "clip_eps":              0.1,        # 0.15→0.1 更保守
         "value_loss_coef":       0.5,
-        "entropy_coef":          0.01,      # [V3] 0.005→0.01 鼓励探索
+        "entropy_coef":          0.005,      # 0.01→0.005 降低探索强度
         "max_grad_norm":         0.5,
-
         "n_steps":               2048,
         "n_epochs":              4,
         "batch_size":            256,
         "normalize_advantages":  True,
-
         "behavior_clone":        True,
-        "bc_coef_init":          5.0,       # [V3] 10.0→5.0 BC不可靠
-        "bc_coef_final":         0.1,       # [V3] 0.3→0.1
+        "bc_coef_init":          0.8,        # 5.0→0.8，避免过分束缚
+        "bc_coef_final":         0.01,       # 0.1→0.01，最终近乎消失
         "bc_anneal_steps":       1_500_000,
         "bc_loss_type":          "mse",
-
         "use_obs_norm":          True,
         "obs_norm_clip":         10.0,
-
-        "log_std_init":         -1.5,       # [V3] -2.5→-1.5 更多探索
-        "log_std_min":          -3.0,       # [V3] -4.0→-3.0
-        "log_std_max":          -0.5,       # [V3] -1.5→-0.5
-
+        "log_std_init":         -4.5,
+        "log_std_min":          -5.0,
+        "log_std_max":          -2.0,
         "target_kl":             0.03,
     },
 
@@ -405,8 +399,8 @@ DEFAULT_CONFIG = {
     "test": {
         "n_episodes":         20,
         "render":             False,
-        "n_obstacles":        3,
-        "obstacle_seed":      6,
+        "n_obstacles":        0,
+        "obstacle_seed":      21,
         "save_paths":         False,
         "save_paths_dir":     "test_paths",
         "ckpt_path":          None,

@@ -404,10 +404,15 @@ class PPOAgent:
         self.buffer      = RolloutBuffer(self.n_steps, state_dim, action_dim, self.device)
         self.total_steps = 0
         self._last_result = PPO_ZERO
+        self._freeze_obs_norm = True
+        self._freeze_actor = False          # 冻结 Actor 标志
+        self.policy_loss_coef = 1.0          # PPO策略损失系数，可动态调整
 
     # ──────────────────────────────────────────────────────────────────────────
 
     def normalize_obs(self, obs, update=True):
+        if self._freeze_obs_norm:
+            update = False
         if self.use_obs_norm:
             if update:
                 self.obs_norm.update(obs)
@@ -489,13 +494,18 @@ class PPOAgent:
                 else:
                     bc_loss2 = torch.zeros(1, device=self.device)
 
-                actor_total = (policy_loss2
+                
+                actor_total = (self.policy_loss_coef * policy_loss2
                                + self.entropy_coef * entropy_loss2
                                + self.bc_coef * bc_loss2)
-                self.opt_actor.zero_grad()
-                actor_total.backward()
-                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.opt_actor.step()
+
+                # ═══ 关键修改 ═══
+                if not self._freeze_actor:
+                    self.opt_actor.zero_grad()
+                    actor_total.backward()
+                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    self.opt_actor.step()
+                # ═══════════════
 
                 with torch.no_grad():
                     approx_kl = (old_lp_b - new_lp2_eval).mean().abs().item()
