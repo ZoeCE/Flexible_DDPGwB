@@ -30,6 +30,15 @@ from config import DEFAULT_CONFIG
 from mujoco_env_new import CableRobotEnvWithObstacles
 from controller import JointSpaceExpert
 from agent import PPOAgent, TD3Agent
+
+# [RESIDUAL] 分层架构测试支持
+try:
+    from swing_controller import (
+        SwingControllerAgent, build_swing_obs, SWING_OBS_DIM,
+    )
+    _HAS_SWING = True
+except ImportError:
+    _HAS_SWING = False
  
  
 # ==============================================================================
@@ -112,10 +121,11 @@ def print_summary(mode: str, n_episodes: int, success_count: int,
  
 def run_test(mode: str, config: dict, n_episodes: int,
              ckpt_path: str = None, gpu_id: int = 0,
-             save_paths_dir: str = None):
+             save_paths_dir: str = None,
+             swing_ckpt_path: str = None):
     """
     统一测试主循环。
-    mode: "ppo" | "td3" | "nmpc"
+    mode: "ppo" | "td3" | "nmpc" | "swing-only" | "layered"
     """
     env = CableRobotEnvWithObstacles(config=config)
 
@@ -131,11 +141,50 @@ def run_test(mode: str, config: dict, n_episodes: int,
     ACT_LOW    = -dq_max
     ACT_HIGH   =  dq_max
  
-    # ── Agent / 专家初始化 ────────────────────────────────────────────────────
+    # ── Agent / 专家 / 底层控制器初始化 ─────────────────────────────────────
     agent  = None
     expert = None
- 
-    if mode == "ppo":
+    swing_controller = None
+
+    if mode == "swing-only":
+        assert _HAS_SWING, "swing_controller.py 未找到"
+        print(f"[Test] 加载底层控制器: {swing_ckpt_path}")
+        swing_controller = SwingControllerAgent(config=config)
+        if swing_ckpt_path and os.path.exists(swing_ckpt_path):
+            swing_controller.load(swing_ckpt_path, map_location=get_device(gpu_id))
+            swing_controller.eval_mode()
+            print("  ✅ 底层控制器加载成功")
+        else:
+            print(f"  ⚠️  找不到底层控制器 checkpoint: {swing_ckpt_path}")
+        expert = JointSpaceExpert(config, env.ik_solver)
+
+    elif mode == "layered":
+        assert _HAS_SWING, "swing_controller.py 未找到"
+        # 加载底层
+        print(f"[Test] 加载底层控制器: {swing_ckpt_path}")
+        swing_controller = SwingControllerAgent(config=config)
+        if swing_ckpt_path and os.path.exists(swing_ckpt_path):
+            swing_controller.load(swing_ckpt_path, map_location=get_device(gpu_id))
+            swing_controller.eval_mode()
+        # 加载高层
+        PLANNER_DIM = STATE_DIM + ACTION_DIM
+        print(f"[Test] 加载高层 Planner (obs_dim={PLANNER_DIM}): {ckpt_path}")
+        agent = PPOAgent(None, PLANNER_DIM, ACTION_DIM, config=config)
+        if ckpt_path and os.path.exists(ckpt_path):
+            try:
+                agent.load(ckpt_path, map_location=get_device(gpu_id))
+                print("  ✅ 高层 Planner 加载成功")
+            except RuntimeError as e:
+                if "size mismatch" in str(e):
+                    print(f"  ❌ Checkpoint 维度不匹配！")
+                    print(f"     当前模型期望 obs_dim={PLANNER_DIM} (54+7 分层模式)")
+                    print(f"     但 checkpoint 可能是旧的 54 维端到端模型。")
+                    print(f"     请使用分层模式训练的 checkpoint，或用 --mode ppo 测试端到端模型。")
+                    raise
+                raise
+        expert = JointSpaceExpert(config, env.ik_solver)
+
+    elif mode == "ppo":
         print(f"[Test] 加载 PPO checkpoint: {ckpt_path}")
         agent = PPOAgent(None, STATE_DIM, ACTION_DIM, config=config)
         if ckpt_path and os.path.exists(ckpt_path):
@@ -143,8 +192,6 @@ def run_test(mode: str, config: dict, n_episodes: int,
             print("  ✅ 模型加载成功")
         else:
             print(f"  ⚠️  找不到 checkpoint，使用随机初始化策略: {ckpt_path}")
-        # 专家仅用于 nmpc 基准对比，ppo 模式不需要
-        # 但保留 expert 以便 rollout 时记录 BC 差距（可选）
         expert = JointSpaceExpert(config, env.ik_solver)
  
     elif mode == "td3":
@@ -166,6 +213,14 @@ def run_test(mode: str, config: dict, n_episodes: int,
  
     if save_paths_dir:
         os.makedirs(save_paths_dir, exist_ok=True)
+
+    # ── 防摆指标记录（swing-only / layered 模式） ──
+    record_swing_metrics = mode in ("swing-only", "layered")
+    all_tilt_rms = []
+    all_max_tilt = []
+    all_swing_vel = []
+    all_path_err = []
+    all_swing_offset = []
  
     # ── 测试循环 ──────────────────────────────────────────────────────────────
     success_count        = 0
@@ -209,13 +264,48 @@ def run_test(mode: str, config: dict, n_episodes: int,
 
         ep_reward = 0.0; step = 0
         ep_success = False; ep_collision = False
+
+        # 防摆指标
+        ep_tilts = []
+        ep_swing_vels = []
+        ep_path_errs = []
+        ep_swing_offsets = []
  
         # 保存路径（可选）
         trajectory = []
+
+        # 分层模式状态
+        swing_last_action = np.zeros(ACTION_DIM, dtype=np.float32)
+        swing_prev_tilt = 0.0
+        swing_prev_yaw  = 0.0
  
         while True:
             # ── 选择动作 ────────────────────────────────────────────────────
-            if mode == "nmpc":
+            if mode == "swing-only":
+                # 纯底层控制器
+                swing_obs, swing_prev_tilt, swing_prev_yaw = build_swing_obs(
+                    obs, env, swing_last_action, swing_prev_tilt, swing_prev_yaw)
+                norm_obs = swing_controller.normalize_obs(swing_obs, update=False)
+                action, _, _ = swing_controller.act(norm_obs, deterministic=True)
+                swing_last_action = action.copy()
+
+            elif mode == "layered":
+                # 底层 + 高层残差
+                swing_obs, swing_prev_tilt, swing_prev_yaw = build_swing_obs(
+                    obs, env, swing_last_action, swing_prev_tilt, swing_prev_yaw)
+                swing_norm = swing_controller.normalize_obs(swing_obs, update=False)
+                delta_q_base, _, _ = swing_controller.act(swing_norm, deterministic=True)
+
+                planner_obs = np.concatenate([obs, delta_q_base])
+                planner_norm = agent.normalize_obs(planner_obs, update=False)
+                delta_q_res, _, _ = agent.act(planner_norm, deterministic=True)
+
+                res_cfg = config.get("residual", {})
+                alpha = float(res_cfg.get("residual_scale_final", 0.3))
+                action = np.clip(delta_q_base + alpha * delta_q_res, ACT_LOW, ACT_HIGH)
+                swing_last_action = action.copy()
+
+            elif mode == "nmpc":
                 # 纯专家：NMPC → IK → 绝对关节角 → 转 delta_q
                 current_q = env.data.qpos[:7].copy().astype(np.float32)
                 q_target = expert.compute_joint_target(obs, current_q)
@@ -249,6 +339,22 @@ def run_test(mode: str, config: dict, n_episodes: int,
  
             if save_paths_dir:
                 trajectory.append(env.data.body("prefab").xpos.copy())
+
+            # [SWING] 记录防摆指标
+            if record_swing_metrics:
+                _tilt = float(next_obs[29]) if len(next_obs) > 29 else 0
+                _pl_vx = float(next_obs[6]); _pl_vy = float(next_obs[7])
+                _ee_x = float(next_obs[0]); _ee_y = float(next_obs[1])
+                _pl_x = float(next_obs[4]); _pl_y = float(next_obs[5])
+                ep_tilts.append(_tilt)
+                ep_swing_vels.append(np.sqrt(_pl_vx**2 + _pl_vy**2))
+                ep_swing_offsets.append(np.sqrt((_ee_x-_pl_x)**2 + (_ee_y-_pl_y)**2))
+                if (env._planned_path is not None and
+                        env.current_wp_idx < len(env._planned_path)):
+                    _pl_z = float(next_obs[21]) if len(next_obs) > 21 else 0
+                    wp = env._planned_path[env.current_wp_idx]
+                    ep_path_errs.append(float(np.linalg.norm(
+                        np.array([_pl_x, _pl_y, _pl_z]) - wp)))
  
             if config["sim"]["render"]:
                 time.sleep(0.01)
@@ -259,6 +365,19 @@ def run_test(mode: str, config: dict, n_episodes: int,
         # ── 回合结算 ─────────────────────────────────────────────────────────
         if ep_success:    success_count += 1;   total_steps_success += step
         if ep_collision:  collision_count += 1
+
+        # 防摆指标聚合
+        if record_swing_metrics and ep_tilts:
+            _tr = float(np.sqrt(np.mean(np.array(ep_tilts)**2)))
+            _mt = float(np.max(ep_tilts))
+            _sv = float(np.mean(ep_swing_vels))
+            _so = float(np.mean(ep_swing_offsets))
+            all_tilt_rms.append(_tr)
+            all_max_tilt.append(_mt)
+            all_swing_vel.append(_sv)
+            all_swing_offset.append(_so)
+            if ep_path_errs:
+                all_path_err.append(float(np.sqrt(np.mean(np.array(ep_path_errs)**2))))
  
         status  = "✅ 成功" if ep_success   else "❌ 失败"
         col_str = " (碰撞!)" if ep_collision else ""
@@ -282,6 +401,53 @@ def run_test(mode: str, config: dict, n_episodes: int,
               f"有效回合 {ep_count}/{n_episodes}，总尝试 {attempt_count}")
     print_summary(mode, ep_count, success_count, collision_count,
                   total_steps_success, elapsed)
+
+    # ── 防摆指标汇总（swing-only / layered 模式） ──
+    if record_swing_metrics and all_tilt_rms:
+        print("="*55)
+        print("  防摆控制指标汇总")
+        print("-"*55)
+        print(f"  Tilt RMS (平均):       {np.mean(all_tilt_rms):.4f} rad")
+        print(f"  Max Tilt (平均):       {np.mean(all_max_tilt):.4f} rad")
+        print(f"  Swing Vel (平均):      {np.mean(all_swing_vel):.4f} m/s")
+        print(f"  Swing Offset (平均):   {np.mean(all_swing_offset):.4f} m")
+        if all_path_err:
+            print(f"  Path Error RMS (平均): {np.mean(all_path_err):.4f} m")
+        print("="*55)
+
+        # 与 NMPC 专家对比（如果可用）
+        if expert is not None and mode == "swing-only":
+            print("\n  [对比] 正在运行 NMPC 专家基准...")
+            nmpc_tilts = []; nmpc_offsets = []; nmpc_errs = []
+            _ec2 = 0; _ac2 = 0
+            while _ec2 < min(n_episodes, 10) and _ac2 < 30:
+                _ac2 += 1
+                _obs2 = env.reset()
+                if env.get_planned_path() is None:
+                    continue
+                _cq2 = env.data.qpos[:7].copy()
+                expert.reset(_obs2, _cq2, env=env)
+                expert.set_path(env.get_planned_path())
+                _ec2 += 1
+                _et = []; _eo = []; _ep = []
+                while True:
+                    _cq2 = env.data.qpos[:7].copy().astype(np.float32)
+                    qt = expert.compute_joint_target(_obs2, _cq2)
+                    act2 = np.clip(qt - _cq2, ACT_LOW, ACT_HIGH)
+                    _obs2, _, t2, tr2, _ = env.step(act2)
+                    _et.append(float(_obs2[29]) if len(_obs2) > 29 else 0)
+                    _eo.append(float(np.sqrt(
+                        (_obs2[0]-_obs2[4])**2 + (_obs2[1]-_obs2[5])**2)))
+                    if t2 or tr2: break
+                if _et:
+                    nmpc_tilts.append(float(np.sqrt(np.mean(np.array(_et)**2))))
+                    nmpc_offsets.append(float(np.mean(_eo)))
+
+            if nmpc_tilts:
+                print(f"  NMPC Tilt RMS:    {np.mean(nmpc_tilts):.4f}")
+                print(f"  NMPC Swing Off:   {np.mean(nmpc_offsets):.4f}")
+                print(f"  RL/NMPC Tilt 比:  {np.mean(all_tilt_rms)/np.mean(nmpc_tilts):.2f}x")
+                print("="*55)
  
     env.close()
     return {
@@ -395,10 +561,13 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="索驱动机器人测试脚本")
  
     parser.add_argument("--mode",     type=str, default="ppo",
-                        choices=["ppo", "td3", "nmpc", "manual"],
+                        choices=["ppo", "td3", "nmpc", "manual",
+                                 "swing-only", "layered"],
                         help="测试模式")
     parser.add_argument("--ckpt",     type=str, default=None,
-                        help="checkpoint 路径（ppo/td3 模式必填）")
+                        help="checkpoint 路径（ppo/td3/layered 模式）")
+    parser.add_argument("--swing-ckpt", type=str, default=None,
+                        help="底层控制器 checkpoint（swing-only/layered 模式）")
     parser.add_argument("--log-dir",  type=str, default="saves/ppo_run",
                         help="若 --ckpt 未指定，从此目录自动找 ckpt_latest.pt")
     parser.add_argument("--episodes", type=int, default=20)
@@ -406,33 +575,56 @@ if __name__ == "__main__":
     parser.add_argument("--gpu",      type=int, default=0)
  
     # 场景参数
-    # [FIX] default=None：不指定 --obstacles 时，从 config["test"]["n_obstacles"] 读取
-    # 显式指定 --obstacles N 时才覆盖，且会 clip 到 scene.n_obstacles 上限
     parser.add_argument("--obstacles",  type=int, default=None,
-                        help="实际生成的障碍物数量（默认从 config['test']['n_obstacles'] 读取，"
-                             "必须 ≤ config['scene']['n_obstacles']）")
+                        help="实际生成的障碍物数量")
     parser.add_argument("--seed",       type=int, default=42)
-    parser.add_argument("--start-xy",   type=str, default=None, dest="start_xy",
-                        help="起始 XY，例如 '0.3,0.15'")
-    parser.add_argument("--target-xy",  type=str, default=None, dest="target_xy",
-                        help="目标 XY，例如 '-0.3,0.2'")
-    parser.add_argument("--save-paths", type=str, default=None, dest="save_paths_dir",
-                        help="保存轨迹 CSV 的目录")
+    parser.add_argument("--start-xy",   type=str, default=None, dest="start_xy")
+    parser.add_argument("--target-xy",  type=str, default=None, dest="target_xy")
+    parser.add_argument("--save-paths", type=str, default=None, dest="save_paths_dir")
+
+    # 风力参数
+    parser.add_argument("--wind-fmax",      type=float, default=None,
+                        help="覆盖风力最大值 (N)")
+    parser.add_argument("--wind-theta-std", type=float, default=None,
+                        help="覆盖风向随机游走速率")
+    parser.add_argument("--alpha",          type=float, default=None,
+                        help="覆盖残差缩放因子 (layered 模式)")
  
     args = parser.parse_args()
  
     config = build_config(args)
+
+    # 风力参数覆盖
+    if args.wind_fmax is not None:
+        config.setdefault("wind", {})["F_max"] = args.wind_fmax
+    if args.wind_theta_std is not None:
+        config.setdefault("wind", {})["theta_rate_std"] = args.wind_theta_std
+    # 残差缩放覆盖
+    if args.alpha is not None:
+        config.setdefault("residual", {})["residual_scale_final"] = args.alpha
  
     # 自动推断 checkpoint 路径
     ckpt_path = args.ckpt
-    if ckpt_path is None and args.mode in ["ppo", "td3"]:
-        ckpt_path = os.path.join(args.log_dir, "ckpt_bc_pretrained.pt")
+    if ckpt_path is None and args.mode in ["ppo", "td3", "layered"]:
+        ckpt_path = os.path.join(args.log_dir, "ckpt_latest.pt")
         if not os.path.exists(ckpt_path):
             ckpt_path = os.path.join(args.log_dir, "ckpt_best.pt")
         if not os.path.exists(ckpt_path):
             print(f"[Warn] 未找到 checkpoint，将使用随机初始化策略。"
                   f"（搜索路径：{args.log_dir}）")
             ckpt_path = None
+
+    # 底层控制器 checkpoint
+    swing_ckpt = args.swing_ckpt
+    if swing_ckpt is None and args.mode in ["swing-only", "layered"]:
+        # 尝试从 saves/swing_ctrl 目录自动查找
+        for candidate in ["saves/swing_ctrl/ckpt_best.pt",
+                          "saves/swing_ctrl/ckpt_final.pt"]:
+            if os.path.exists(candidate):
+                swing_ckpt = candidate
+                break
+        if swing_ckpt is None:
+            print("[Warn] 未找到底层控制器 checkpoint")
  
     if args.mode == "manual":
         run_manual(config)
@@ -444,4 +636,5 @@ if __name__ == "__main__":
             ckpt_path=ckpt_path,
             gpu_id=args.gpu,
             save_paths_dir=args.save_paths_dir,
+            swing_ckpt_path=swing_ckpt,
         )

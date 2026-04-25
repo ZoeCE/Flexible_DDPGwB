@@ -5,7 +5,7 @@ import os
 from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn
  
 from agent import PureRLAgent
-from mujoco_env import CableRobotEnvWithObstacles
+from old.mujoco_env import CableRobotEnvWithObstacles
  
  
 # ===========================================================================

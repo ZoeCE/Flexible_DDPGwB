@@ -156,6 +156,14 @@ class CableRobotEnvWithObstacles:
         self._ee_euler_vel_cache = np.zeros(3)
         self._termination_reason = None     # [v3-DIAG]
 
+        # ── [WIND] 风力扰动初始化 ─────────────────────────────────────────────
+        self.cfg_wind = self.config.get("wind", {})
+        wind_seed = self.cfg_wind.get("seed", 123)
+        self.wind_rng   = np.random.default_rng(wind_seed)
+        self.wind_theta = 0.0          # 风向角 (rad)
+        self.wind_F     = 0.0          # 风力大小 (N)
+        self._wind_curriculum_frac = 1.0  # 训练时的风力倍率（0→1）
+
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
         if self.render_mode:
@@ -210,6 +218,39 @@ class CableRobotEnvWithObstacles:
 
     def get_planned_path(self):
         return self._planned_path
+
+    # ── [WIND] 风力扰动方法 ──────────────────────────────────────────────────
+
+    def _update_wind(self):
+        """缓慢随机游走更新风向和风力大小（每个物理子步调用）。"""
+        if not self.cfg_wind.get("enabled", False):
+            return
+        dt = self.physics_dt
+        theta_std = self.cfg_wind.get("theta_rate_std", 0.15)
+        force_std = self.cfg_wind.get("force_rate_std", 0.1)
+        F_max     = self.cfg_wind.get("F_max", 1.0)
+
+        self.wind_theta += dt * self.wind_rng.normal(0, theta_std)
+        self.wind_F     += dt * self.wind_rng.normal(0, force_std)
+        self.wind_F      = float(np.clip(self.wind_F, 0, F_max))
+
+    def _apply_wind_force(self):
+        """将风力作为外力施加到 payload body 上（每个物理子步调用）。"""
+        if not self.cfg_wind.get("enabled", False):
+            return
+        effective_F = self.wind_F * self._wind_curriculum_frac
+        fx = effective_F * np.cos(self.wind_theta)
+        fy = effective_F * np.sin(self.wind_theta)
+        self.data.xfrc_applied[self.prefab_body_id, :3] = [fx, fy, 0.0]
+
+    def set_wind_curriculum(self, frac: float):
+        """设置风力课程学习倍率，0.0=无风，1.0=全风力。"""
+        self._wind_curriculum_frac = float(np.clip(frac, 0.0, 1.0))
+
+    def get_wind_state(self):
+        """返回当前风力状态 (wind_F, wind_theta)，供观测构建使用。"""
+        effective_F = self.wind_F * self._wind_curriculum_frac
+        return float(effective_F), float(self.wind_theta)
 
     # ── [v3-CURRICULUM] 运行时动态设置障碍物数 ────────────────────────────────
     def set_curriculum_n_obstacles(self, n: int):
@@ -534,6 +575,11 @@ class CableRobotEnvWithObstacles:
         for _ in range(max(1, self.latency_steps+1)):
             self.action_queue.append(init_q.copy().astype(np.float32))
 
+        # ── [WIND] 风力状态重置 ──────────────────────────────────────────────
+        self.wind_theta = float(self.wind_rng.uniform(0, 2 * np.pi))
+        F_max = self.cfg_wind.get("F_max", 1.0)
+        self.wind_F = 0.2 * F_max
+
         if self.render_mode:
             if self.viewer is not None:
                 try: self.viewer.close()
@@ -582,6 +628,8 @@ class CableRobotEnvWithObstacles:
         self.data.ctrl[:7] = effective_q
 
         for _ in range(self.sim_steps):
+            self._update_wind()
+            self._apply_wind_force()
             mujoco.mj_step(self.model, self.data)
 
         if np.any(np.isnan(self.data.qpos)) or np.any(np.isnan(self.data.qvel)):

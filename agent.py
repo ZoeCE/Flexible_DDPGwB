@@ -370,6 +370,10 @@ class PPOAgent:
         self.bc_anneal_steps = int(cfg["bc_anneal_steps"])
         self.bc_loss_type    = str(cfg.get("bc_loss_type", "mse"))
 
+        # [RESIDUAL] BC target zero 模式：残差高层训练时 BC 目标为零向量
+        res_cfg = config.get("residual", {})
+        self.bc_target_zero = bool(res_cfg.get("bc_target_zero", False))
+
         # 观测归一化
         self.use_obs_norm = bool(cfg["use_obs_norm"])
         self.obs_norm     = RunningMeanStd(shape=(state_dim,),
@@ -489,8 +493,16 @@ class PPOAgent:
                 entropy_loss2 = -entropy2_eval.mean()
 
                 if self.behavior_clone and self.bc_coef > 0:
-                    bc_loss_u, bc_loss_dq, _ = self.actor.bc_forward(obs_b, bc_b)
-                    bc_loss2 = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
+                    if self.bc_target_zero:
+                        # [RESIDUAL] 残差模式：BC 目标为零向量
+                        # 鼓励高层残差"不需要修正就不修正"
+                        zero_target = torch.zeros_like(bc_b)
+                        bc_loss_u, bc_loss_dq, _ = self.actor.bc_forward(
+                            obs_b, zero_target)
+                        bc_loss2 = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
+                    else:
+                        bc_loss_u, bc_loss_dq, _ = self.actor.bc_forward(obs_b, bc_b)
+                        bc_loss2 = 0.7 * bc_loss_u + 0.3 * bc_loss_dq
                 else:
                     bc_loss2 = torch.zeros(1, device=self.device)
 

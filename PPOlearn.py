@@ -30,6 +30,16 @@ from agent import PPOAgent, TD3Agent
 from mujoco_env_new import CableRobotEnvWithObstacles
 from controller import JointSpaceExpert
 
+# [RESIDUAL] 分层架构支持
+try:
+    from swing_controller import (
+        SwingControllerAgent, build_swing_obs,
+        SWING_OBS_DIM,
+    )
+    _HAS_SWING = True
+except ImportError:
+    _HAS_SWING = False
+
 
 # ==============================================================================
 # 工具函数
@@ -439,8 +449,9 @@ def pretrain_bc(agent, config: dict, n_episodes: int = 300,
 # Phase 2: 纯 PPO 训练（v5 性能触发课程）
 # ==============================================================================
 
-def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
-    """纯 PPO 训练（可跳过BC预训练，支持课程学习衔接）。"""
+def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None,
+              swing_controller_ckpt: str = None):
+    """纯 PPO 训练（可跳过BC预训练，支持课程学习衔接，支持分层残差模式）。"""
     cfg_train  = config["train"]
     cfg_ppo    = config["ppo_agent"]
 
@@ -457,25 +468,71 @@ def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
     STATE_DIM  = env.state_dim
     print(f"  state_dim={STATE_DIM}, action_dim={ACTION_DIM}")
 
+    # ── [RESIDUAL] 分层残差模式：加载底层控制器 ──
+    swing_controller = None
+    use_layered = False
+    res_cfg = config.get("residual", {})
+    dq_max_arr = np.array(config["space"].get("dq_max", [0.12]*7), dtype=np.float32)
+
+    if swing_controller_ckpt is not None and _HAS_SWING:
+        if os.path.exists(swing_controller_ckpt):
+            print(f"[Train-PPO] 加载底层控制器: {swing_controller_ckpt}")
+            swing_controller = SwingControllerAgent(config=config)
+            swing_controller.load(swing_controller_ckpt)
+            swing_controller.eval_mode()
+            use_layered = True
+
+            # 残差模式下，高层输入维度 = 原始 + 底层动作
+            PLANNER_STATE_DIM = STATE_DIM + ACTION_DIM
+            print(f"  [RESIDUAL] 分层模式激活，高层 obs_dim={PLANNER_STATE_DIM}")
+        else:
+            print(f"  ⚠ 底层控制器文件不存在: {swing_controller_ckpt}")
+            PLANNER_STATE_DIM = STATE_DIM
+    else:
+        PLANNER_STATE_DIM = STATE_DIM
+
+    def compute_residual_scale(step: int) -> float:
+        """计算残差缩放系数 alpha（从 init 线性退火到 final）。"""
+        alpha_init  = float(res_cfg.get("residual_scale_init", 0.1))
+        alpha_final = float(res_cfg.get("residual_scale_final", 0.3))
+        alpha_steps = int(res_cfg.get("residual_scale_steps", 600_000))
+        frac = min(step / max(alpha_steps, 1), 1.0)
+        return alpha_init + frac * (alpha_final - alpha_init)
+
     print("[Train-PPO] 初始化 Agent...")
-    agent = PPOAgent(log_dir, STATE_DIM, ACTION_DIM, config=config)
+    agent = PPOAgent(log_dir, PLANNER_STATE_DIM, ACTION_DIM, config=config)
 
     # ── 分支：是否跳过 BC 预训练 ──
     if bc_ckpt_path is not None and os.path.exists(bc_ckpt_path):
         print(f"[Train-PPO] 跳过 BC 预训练，直接加载检查点: {bc_ckpt_path}")
-        agent.load(bc_ckpt_path)
+        try:
+            agent.load(bc_ckpt_path)
+        except RuntimeError as e:
+            if "size mismatch" in str(e) and use_layered:
+                print(f"  ❌ Checkpoint 维度不匹配！")
+                print(f"     分层模式需要 obs_dim={PLANNER_STATE_DIM} 的 checkpoint，")
+                print(f"     但加载的文件可能是旧的 54 维端到端模型。")
+                print(f"     分层模式下请勿加载端到端 BC checkpoint，将从头训练。")
+                print(f"  → 跳过加载，使用随机初始化")
+            else:
+                raise
         save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
     else:
-        bc_cfg = config.get("bc_pretrain", {})
-        bc_episodes = int(bc_cfg.get("n_episodes", 200))
-        bc_epochs   = int(bc_cfg.get("n_epochs", 50))
-        bc_lr       = float(bc_cfg.get("lr", 1e-3))
-        bc_batch    = int(bc_cfg.get("batch_size", 256))
+        if use_layered:
+            # 分层模式下，BC 预训练无意义（高层输入维度不同），跳过
+            print(f"[Train-PPO] 分层残差模式：跳过 BC 预训练（高层从零开始）")
+            save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+        else:
+            bc_cfg = config.get("bc_pretrain", {})
+            bc_episodes = int(bc_cfg.get("n_episodes", 200))
+            bc_epochs   = int(bc_cfg.get("n_epochs", 50))
+            bc_lr       = float(bc_cfg.get("lr", 1e-3))
+            bc_batch    = int(bc_cfg.get("batch_size", 256))
 
-        pretrain_bc(agent, config,
-                    n_episodes=bc_episodes, n_epochs=bc_epochs,
-                    batch_size=bc_batch, lr=bc_lr, algo="ppo")
-        save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
+            pretrain_bc(agent, config,
+                        n_episodes=bc_episodes, n_epochs=bc_epochs,
+                        batch_size=bc_batch, lr=bc_lr, algo="ppo")
+            save_checkpoint(agent, log_dir, 0, tag="bc_pretrained")
 
     # ── BC 后稳定化设置 ──
     with torch.no_grad():
@@ -493,10 +550,22 @@ def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
 
     agent.entropy_coef = 0.0
     agent.behavior_clone = True
-    agent.bc_coef = 10.0
-    agent.bc_coef_init = 10.0
-    agent.bc_coef_final = 0.5
-    agent.bc_anneal_steps = 2_000_000
+
+    if use_layered:
+        # [RESIDUAL] 残差模式：使用较小的 BC 系数，避免抑制残差探索
+        # BC target 为零向量，鼓励"无需修正就不要修正"
+        agent.bc_target_zero = True
+        agent.bc_coef      = float(res_cfg.get("bc_coef_init_residual", 0.3))
+        agent.bc_coef_init = float(res_cfg.get("bc_coef_init_residual", 0.3))
+        agent.bc_coef_final = float(res_cfg.get("bc_coef_final_residual", 0.01))
+        agent.bc_anneal_steps = int(res_cfg.get("bc_anneal_steps_residual", 500_000))
+        print(f"[Train-PPO] 残差模式 BC: {agent.bc_coef_init} → {agent.bc_coef_final} "
+              f"over {agent.bc_anneal_steps} steps (target=zero)")
+    else:
+        agent.bc_coef = 10.0
+        agent.bc_coef_init = 10.0
+        agent.bc_coef_final = 0.5
+        agent.bc_anneal_steps = 2_000_000
 
     print(f"[Train-PPO] Critic预热{CRITIC_WARMUP_STEPS}步，"
           f"PPO权重在{POLICY_RAMP_START}步后恢复，噪声在权重恢复后释放")
@@ -682,22 +751,78 @@ def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         rollout_done = False
 
-        while not rollout_done:
-            norm_obs = agent.normalize_obs(obs, update=True)
+        # [RESIDUAL] 分层模式的状态变量
+        swing_last_action = np.zeros(ACTION_DIM, np.float32)
+        swing_prev_tilt = 0.0
+        swing_prev_yaw  = 0.0
 
+        while not rollout_done:
             current_q = env.data.qpos[:7].copy().astype(np.float32)
-            try:
-                bc_delta_q = expert.compute_delta_q_target(obs, current_q)
-                if np.any(np.isnan(bc_delta_q)):
-                    bc_delta_q = np.zeros(ACTION_DIM, np.float32)
-            except Exception:
+
+            if use_layered and swing_controller is not None:
+                # ══════════════════════════════════════════════════════
+                # [RESIDUAL] 分层残差 rollout
+                # ══════════════════════════════════════════════════════
+
+                # 1. 底层观测 & 动作
+                swing_obs, swing_prev_tilt, swing_prev_yaw = build_swing_obs(
+                    obs, env, swing_last_action,
+                    swing_prev_tilt, swing_prev_yaw)
+                swing_norm = swing_controller.normalize_obs(swing_obs, update=False)
+                delta_q_base, _, _ = swing_controller.act(
+                    swing_norm, deterministic=False)
+
+                # 2. 高层观测 = 原始obs + 底层输出
+                planner_obs = np.concatenate([obs, delta_q_base])
+                norm_obs = agent.normalize_obs(planner_obs, update=True)
+
+                # 3. 高层残差动作
+                delta_q_res, log_prob, value = agent.act(
+                    norm_obs, deterministic=deterministic)
+
+                # 4. 合成执行动作
+                alpha = compute_residual_scale(total_steps)
+                delta_q_exec = np.clip(
+                    delta_q_base + alpha * delta_q_res,
+                    -dq_max_arr, dq_max_arr)
+
+                # 5. 环境推进
+                next_obs, reward, terminated, truncated, info = env.step(delta_q_exec)
+                done = terminated or truncated
+
+                # 6. BC target = 零向量（鼓励残差最小化）
                 bc_delta_q = np.zeros(ACTION_DIM, np.float32)
 
-            delta_q, log_prob, value = agent.act(norm_obs, deterministic=deterministic)
+                # 7. Buffer 存残差动作
+                agent.buffer.add(norm_obs, delta_q_res, bc_delta_q,
+                                 reward, float(done), value, log_prob)
 
-            next_obs, reward, terminated, truncated, info = env.step(delta_q)
-            done = terminated or truncated
+                swing_last_action = delta_q_exec.copy()
 
+            else:
+                # ══════════════════════════════════════════════════════
+                # 原始端到端 rollout（无底层控制器）
+                # ══════════════════════════════════════════════════════
+                norm_obs = agent.normalize_obs(obs, update=True)
+
+                try:
+                    bc_delta_q = expert.compute_delta_q_target(obs, current_q)
+                    if np.any(np.isnan(bc_delta_q)):
+                        bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+                except Exception:
+                    bc_delta_q = np.zeros(ACTION_DIM, np.float32)
+
+                delta_q, log_prob, value = agent.act(
+                    norm_obs, deterministic=deterministic)
+
+                next_obs, reward, terminated, truncated, info = env.step(delta_q)
+                done = terminated or truncated
+
+                agent.buffer.add(norm_obs, delta_q, bc_delta_q,
+                                 reward, float(done), value, log_prob)
+                delta_q_exec = delta_q  # 用于日志
+
+            # ── 共通后处理 ──
             if done:
                 last_term_reason = info.get("termination_reason", "unknown")
 
@@ -709,8 +834,6 @@ def train_ppo(log_dir: str, config: dict, bc_ckpt_path: str = None):
             if info.get("is_success"):
                 ep_success = True
 
-            agent.buffer.add(norm_obs, delta_q, bc_delta_q,
-                             reward, float(done), value, log_prob)
             obs = next_obs
 
             if agent.buffer.full:
@@ -986,14 +1109,17 @@ def train_td3(log_dir: str, config: dict):
 # 主入口
 # ==============================================================================
 
-def train(log_dir: str, algo: str = "ppo", custom_config: dict = None, bc_ckpt_path: str = None):
+def train(log_dir: str, algo: str = "ppo", custom_config: dict = None,
+          bc_ckpt_path: str = None, swing_controller_ckpt: str = None):
     """
     统一训练入口。
 
     Args:
-        log_dir:       模型和日志保存目录
-        algo:          "ppo" 或 "td3"
-        custom_config: 局部配置覆盖
+        log_dir:                模型和日志保存目录
+        algo:                   "ppo" 或 "td3"
+        custom_config:          局部配置覆盖
+        bc_ckpt_path:           跳过BC预训练，直接加载检查点
+        swing_controller_ckpt:  底层防摆控制器检查点（启用分层残差模式）
     """
     config = copy.deepcopy(DEFAULT_CONFIG)
     if custom_config:
@@ -1007,9 +1133,12 @@ def train(log_dir: str, algo: str = "ppo", custom_config: dict = None, bc_ckpt_p
     os.makedirs(log_dir, exist_ok=True)
 
     print(f"[Train] 算法: {algo.upper()} | 保存目录: {log_dir}")
+    if swing_controller_ckpt:
+        print(f"[Train] 分层残差模式: {swing_controller_ckpt}")
 
     if algo == "ppo":
-        return train_ppo(log_dir, config, bc_ckpt_path=bc_ckpt_path)
+        return train_ppo(log_dir, config, bc_ckpt_path=bc_ckpt_path,
+                         swing_controller_ckpt=swing_controller_ckpt)
     elif algo == "td3":
         return train_td3(log_dir, config)
     else:
@@ -1031,6 +1160,8 @@ if __name__ == "__main__":
     parser.add_argument("--gpu",      type=int, default=0)
     parser.add_argument("--bc-ckpt", type=str, default=None,
                     help="跳过BC预训练，直接加载指定的BC检查点（.pt）")
+    parser.add_argument("--swing-ckpt", type=str, default=None,
+                    help="底层防摆控制器检查点，启用分层残差模式")
     args = parser.parse_args()
 
     cli_cfg = {}
@@ -1040,4 +1171,4 @@ if __name__ == "__main__":
     if args.timesteps: cli_cfg.setdefault("train", {})["total_timesteps"]  = args.timesteps
 
     train(args.log_dir, algo=args.algo, custom_config=cli_cfg or None,
-      bc_ckpt_path=args.bc_ckpt)
+      bc_ckpt_path=args.bc_ckpt, swing_controller_ckpt=args.swing_ckpt)

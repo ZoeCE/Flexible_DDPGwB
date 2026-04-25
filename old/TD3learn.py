@@ -236,7 +236,7 @@ def train(log_dir: str, custom_config: dict = None):
 
     # ── 3. NMPC 控制器 ────────────────────────────────────────────────────────
     print("[Train] 初始化 NMPC 控制器...")
-    from nmpc_controller_new import NMPCTrajectoryTracker
+    from old.nmpc_controller_new import NMPCTrajectoryTracker
     nmpc = NMPCTrajectoryTracker(
         dt=cfg_ctrl["dt"],
         N=cfg_ctrl["N"],

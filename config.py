@@ -433,4 +433,87 @@ DEFAULT_CONFIG = {
         "require_floor_contact": False,
         "partial_dist_scale":    0.05,
     },
+
+    # ==========================================================================
+    # 20. 风力扰动
+    # ==========================================================================
+    # F_max 修正为 1.0N（原 2.0N 对 1kg payload 加速度达 2m/s²≈0.2g，过大）
+    # theta_rate_std / force_rate_std 在 physics_dt=0.002 下每控制步累计变化很小，合理
+    # 新增 curriculum_start / curriculum_end 支持训练时逐步增强风力
+    "wind": {
+        "enabled":            True,
+        "F_max":              1.0,           # N, 最大风力（≈0.1g for 1kg payload）
+        "theta_rate_std":     0.15,          # rad/s 风向随机游走速率
+        "force_rate_std":     0.1,           # N/s   风力随机游走速率
+        "seed":               123,
+        "curriculum_start":   0,             # 训练步数，开始引入风力
+        "curriculum_end":     200_000,       # 训练步数，风力达到 F_max
+    },
+
+    # ==========================================================================
+    # 21. 底层防摆 RL 控制器
+    # ==========================================================================
+    # 观测维度分析（修正后 35 维）：
+    #   payload_pos(3) + payload_vel(3) + ee_payload_offset(3) + ee_vel(3)
+    #   + tilt(1) + yaw(1) + tilt_rate(1) + yaw_rate(1)
+    #   + joint_q(7) + last_action(7) + waypoint_err(3) + wind_info(2) = 35
+    # 网络 256×3（比原始 256×2 多 1 层，处理风力扰动非线性）
+    "swing_controller": {
+        "obs_dim":            35,
+        "hidden_dim":         256,
+        "n_layers":           3,             # 原 2→3，增强非线性拟合
+        "lr_actor":           3e-4,
+        "lr_critic":          1e-3,
+        "gamma":              0.99,
+        "gae_lambda":         0.95,
+        "clip_eps":           0.2,
+        "entropy_coef":       0.01,
+        "max_grad_norm":      0.5,
+        "n_steps":            2048,
+        "n_epochs":           4,
+        "batch_size":         256,
+        "use_obs_norm":       True,
+        "log_std_init":       -1.0,          # 原 -3.0 → -1.0（初期多探索）
+        "log_std_min":        -4.0,
+        "log_std_max":        0.0,
+        "bc_pretrain_epochs": 10,            # 原 20→10，防止过拟合专家
+        "bc_pretrain_lr":     1e-3,
+        "total_timesteps":    1_000_000,
+        "eval_interval":      20,
+        "save_interval":      50,
+    },
+
+    # ==========================================================================
+    # 22. 底层防摆奖励系数
+    # ==========================================================================
+    # 修正：新增 swing_offset（EE-Payload 摆幅惩罚，防摆核心信号）
+    # 修正：success_bonus 从 20→10（底层任务是跟踪，非最终插入）
+    "swing_controller_reward": {
+        "waypoint_progress_coef":   3.0,
+        "tilt_penalty_coef":        0.5,
+        "swing_vel_penalty_coef":   0.3,
+        "swing_offset_penalty_coef": 1.0,   # 新增：EE-Payload XY偏移惩罚
+        "action_smooth_coef":       0.02,
+        "success_bonus":            10.0,    # 原 20→10
+        "waypoint_reach_bonus":     1.0,     # 新增：到达中间航点的奖励
+        "collision_penalty":        -10.0,
+        "instability_penalty":      -5.0,
+        "step_penalty":             -0.01,
+    },
+
+    # ==========================================================================
+    # 23. 残差高层 Planner 扩展参数
+    # ==========================================================================
+    # 高层输入 = 原始54维 + 底层输出7维 = 61维
+    # alpha 修正：0.1→0.3（原 0.2→0.5 偏大，易破坏底层稳定性）
+    "residual": {
+        "planner_obs_dim":         61,       # 54 + 7 (底层输出)
+        "residual_scale_init":     0.1,      # 原 0.2→0.1
+        "residual_scale_final":    0.3,      # 原 0.5→0.3
+        "residual_scale_steps":    600_000,  # 原 400K→600K
+        "bc_target_zero":          True,
+        "bc_coef_init_residual":   0.3,      # 残差模式 BC 权重较小
+        "bc_coef_final_residual":  0.01,
+        "bc_anneal_steps_residual": 500_000,
+    },
 }

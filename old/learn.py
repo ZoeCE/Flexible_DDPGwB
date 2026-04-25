@@ -4,9 +4,9 @@ import csv
 import os
 from rich.progress import Progress, BarColumn, TimeElapsedColumn, TimeRemainingColumn
 
-from agent_old import WBAgent
+from old.agent_old import WBAgent
 from mujoco_env_new import CableRobotEnvWithObstacles
-from nmpc_controller_new import NMPCTrajectoryTracker
+from old.nmpc_controller_new import NMPCTrajectoryTracker
 
 from ipdb import set_trace as xxxx
 
