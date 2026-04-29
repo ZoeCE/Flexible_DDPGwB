@@ -331,6 +331,8 @@ class SwingControllerAgent:
 
         self.total_steps = 0
 
+        self._freeze_actor = False   # 新增冻结标志
+
     # ── 观测归一化 ──
 
     def normalize_obs(self, obs: np.ndarray, update: bool = True) -> np.ndarray:
@@ -360,8 +362,8 @@ class SwingControllerAgent:
 
     # ── PPO 更新 ──
 
-    def update(self) -> Dict[str, float]:
-        """标准 PPO 更新（无 BC 损失、无 KL 早停简化版）。"""
+    def update(self):
+        """PPO 更新。支持仅训练 Critic（当 Actor 被冻结时）。"""
         if not self.buffer.full:
             return {"policy_loss": 0, "value_loss": 0, "entropy": 0}
 
@@ -372,6 +374,7 @@ class SwingControllerAgent:
             for batch in self.buffer.get_minibatches(self.batch_size):
                 obs_b, act_b, ret_b, adv_b, old_lp_b = batch
 
+                # ---- Critic 更新（始终执行） ----
                 new_lp, entropy = self.actor.evaluate_actions(obs_b, act_b)
                 value = self.critic(obs_b)
 
@@ -388,16 +391,30 @@ class SwingControllerAgent:
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.opt_critic.step()
 
-                # Actor 更新
-                actor_loss = policy_loss + self.entropy_coef * entropy_loss
-                self.opt_actor.zero_grad()
-                actor_loss.backward()
-                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.opt_actor.step()
+                # ---- Actor 更新（仅在未冻结时执行） ----
+                if not self._freeze_actor:
+                    # 重新计算 Actor 相关张量（保证梯度连通）
+                    new_lp_actor, entropy_actor = self.actor.evaluate_actions(obs_b, act_b)
+                    ratio_actor = (new_lp_actor - old_lp_b).exp()
+                    surr1_actor = ratio_actor * adv_b
+                    surr2_actor = ratio_actor.clamp(1 - self.clip_eps, 1 + self.clip_eps) * adv_b
+                    policy_loss_actor = -torch.min(surr1_actor, surr2_actor).mean()
+                    entropy_loss_actor = -entropy_actor.mean()
 
-                total_pl += policy_loss.item()
+                    actor_loss = policy_loss_actor + self.entropy_coef * entropy_loss_actor
+                    self.opt_actor.zero_grad()
+                    actor_loss.backward()
+                    nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
+                    self.opt_actor.step()
+
+                    total_pl += policy_loss_actor.item()
+                    total_el += entropy_loss_actor.item()
+                else:
+                    # 冻结时用第一次计算的值用于日志
+                    total_pl += policy_loss.item()
+                    total_el += entropy_loss.item()
+
                 total_vl += value_loss.item()
-                total_el += entropy_loss.item()
                 n_updates += 1
 
         n = max(n_updates, 1)
@@ -580,25 +597,10 @@ def compute_swing_reward(env,
                          prev_wp_dist: Optional[float],
                          config: dict
                          ) -> Tuple[float, bool, Dict[str, float]]:
-    """
-    计算底层防摆控制器的奖励。
-
-    Args:
-        env: 环境实例
-        env_obs_raw: 环境完整观测
-        action: 本步执行的 Δq
-        last_action: 上一步的 Δq
-        prev_wp_dist: 上一步到航点的距离（用于 progress 计算）
-        config: 配置字典
-
-    Returns:
-        (reward, terminated, info_dict)
-    """
     cfg_rwd = config.get("swing_controller_reward", {})
     cfg_logic = config.get("step_logic", {})
     obs = env_obs_raw
 
-    # 提取状态
     payload_xy = np.array([obs[OBS_PL_X], obs[OBS_PL_Y]])
     payload_z  = float(obs[OBS_PL_Z])
     payload_vel_xy = np.array([obs[OBS_PL_VX], obs[OBS_PL_VY]])
@@ -610,7 +612,7 @@ def compute_swing_reward(env,
     terminated = False
     info = {}
 
-    # ── 航点进度奖励 ──
+    # ── 航点进度（正向引导） ──
     if (env._planned_path is not None and
             env.current_wp_idx < len(env._planned_path)):
         wp = env._planned_path[env.current_wp_idx]
@@ -624,46 +626,46 @@ def compute_swing_reward(env,
 
     if prev_wp_dist is not None:
         progress = prev_wp_dist - current_dist
+        # 正向进度奖励（系数可配置）
         r_progress = cfg_rwd.get("waypoint_progress_coef", 3.0) * progress
         reward += r_progress
         info["r_progress"] = r_progress
 
     info["wp_dist"] = current_dist
 
-    # ── 航点到达奖励 ──
+    # 航点到达额外奖励
     if getattr(env, '_wp_just_advanced', False):
-        bonus = cfg_rwd.get("waypoint_reach_bonus", 1.0)
+        bonus = cfg_rwd.get("waypoint_reach_bonus", 2.0)
         reward += bonus
         info["r_wp_reach"] = bonus
 
-    # ── 倾斜惩罚 ──
-    r_tilt = -cfg_rwd.get("tilt_penalty_coef", 0.5) * tilt
+    # ── 姿态惩罚 ──
+    r_tilt = -cfg_rwd.get("tilt_penalty_coef", 0.3) * tilt
     reward += r_tilt
     info["r_tilt"] = r_tilt
 
-    # ── 水平摆动速度惩罚 ──
+    # ── 摆动速度惩罚 ──
     swing_vel = float(np.linalg.norm(payload_vel_xy))
-    r_swing_vel = -cfg_rwd.get("swing_vel_penalty_coef", 0.3) * swing_vel
+    r_swing_vel = -cfg_rwd.get("swing_vel_penalty_coef", 0.15) * swing_vel
     reward += r_swing_vel
     info["r_swing_vel"] = r_swing_vel
 
-    # ── EE-Payload 摆幅惩罚（★新增，防摆核心） ──
+    # ── EE-Payload 摆动偏移惩罚 ──
     swing_offset = float(np.linalg.norm(ee_xy - payload_xy))
-    r_swing_off = -cfg_rwd.get("swing_offset_penalty_coef", 1.0) * swing_offset
+    r_swing_off = -cfg_rwd.get("swing_offset_penalty_coef", 0.5) * swing_offset
     reward += r_swing_off
     info["r_swing_offset"] = r_swing_off
 
-    # ── 动作平滑惩罚 ──
+    # ── 动作平滑 ──
     r_smooth = -cfg_rwd.get("action_smooth_coef", 0.02) * float(np.linalg.norm(action - last_action))
     reward += r_smooth
     info["r_smooth"] = r_smooth
 
-    # ── 时间步惩罚 ──
-    r_step = cfg_rwd.get("step_penalty", -0.01)
+    # ── 时间步惩罚（极小） ──
+    r_step = cfg_rwd.get("step_penalty", -0.001)
     reward += r_step
 
     # ── 终止条件检查 ──
-    # 碰撞检测
     if hasattr(env, '_check_prefab_collision_with_obstacles'):
         hit_obs, _ = env._check_prefab_collision_with_obstacles()
         if hit_obs:
@@ -672,18 +674,16 @@ def compute_swing_reward(env,
             info["termination"] = "collision"
             return reward, terminated, info
 
-    # 机器人基座碰撞
     if float(np.linalg.norm(payload_xy)) < 0.03:
         reward = cfg_rwd.get("collision_penalty", -10.0)
         terminated = True
         info["termination"] = "base_collision"
         return reward, terminated, info
 
-    # 失稳检查
     instab_grace = cfg_logic.get("instability_grace_steps", 50)
     if env.current_step >= instab_grace:
-        pl_vel = float(np.linalg.norm(np.array([
-            obs[OBS_PL_VX], obs[OBS_PL_VY], obs[OBS_PL_VZ]])))
+        pl_vel = float(np.linalg.norm(np.array(
+            [obs[OBS_PL_VX], obs[OBS_PL_VY], obs[OBS_PL_VZ]])))
         if (swing_offset > cfg_logic.get("swing_xy_max", 0.25) or
                 pl_vel > cfg_logic.get("payload_vel_max", 2.0) or
                 tilt > cfg_logic.get("payload_tilt_max", 1.0)):
@@ -692,18 +692,17 @@ def compute_swing_reward(env,
             info["termination"] = "instability"
             return reward, terminated, info
 
-    # 到达最终航点（成功）
+    # 最终航点成功达成的额外奖励（姿态条件满足时）
     if env.reached_final:
-        # 检查姿态条件
         cfg_ins = config.get("insertion", {})
         if (tilt < cfg_ins.get("tilt_tolerance", 0.08) and
                 abs(yaw) < cfg_ins.get("yaw_tolerance", 0.06)):
-            reward += cfg_rwd.get("success_bonus", 10.0)
+            reward += cfg_rwd.get("success_bonus", 5.0)
             info["success"] = True
 
-    # reward clip
-    r_min = cfg_logic.get("reward_clip_min", -5.0)
-    r_max = cfg_logic.get("reward_clip_max",  5.0)
+    # reward clip 减轻极端值影响
+    r_min = cfg_logic.get("reward_clip_min", -1.0)  # 修改为 -1.0，避免大负值
+    r_max = cfg_logic.get("reward_clip_max",  1.0)
     reward = float(np.clip(reward, r_min, r_max))
 
     return reward, terminated, info

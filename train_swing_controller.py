@@ -1,11 +1,12 @@
 # ==============================================================================
-# train_swing_controller.py — 底层防摆 RL 控制器训练脚本
+# train_swing_controller.py — 底层防摆 RL 控制器训练脚本（优化版）
 #
-# 训练流程：
-#   阶段 1: BC 暖启动（可选） — 用 JointSpaceExpert 收集数据预训练 Actor
-#   阶段 2: PPO 训练 — 在带风力扰动的环境中微调
-#
-# 风力课程学习：训练初期无风 → 逐步增加到 F_max
+# 主要改进：
+#   - 奖励尺度重校准（避免全负信号淹没有效梯度）
+#   - 风力课程延迟引入（前 50k 步无风）
+#   - 保守探索：BC 后冻结 Actor 一段 Critic 预热期
+#   - log_std 初始化更低，并早期锁死
+#   - 日志增加终止原因与“稳定成功”标记（√/×）
 # ==============================================================================
 
 import os
@@ -41,7 +42,7 @@ def set_global_seed(seed: int):
 
 
 # ==============================================================================
-# BC 暖启动
+# BC 暖启动 (基本不变，仅降低学习率)
 # ==============================================================================
 
 def bc_pretrain_swing(agent: SwingControllerAgent,
@@ -50,37 +51,34 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
                       expert: JointSpaceExpert,
                       n_episodes: int = 200,
                       n_epochs: int = 10,
-                      lr: float = 1e-3,
+                      lr: float = 1e-4,   # 更保守
                       batch_size: int = 256):
-    """
-    用专家数据预训练底层 Actor 的 mean_head（冻结 log_std）。
-
-    采集 swing_obs → 专家 Δq 的配对数据，用 MSE 训练。
-    """
+    """BC 预训练底层 Actor 的 mean_head。"""
     print(f"\n{'='*60}")
-    print(f"  底层控制器 BC 暖启动 ({n_episodes} 回合, {n_epochs} epochs)")
+    print(f"  底层控制器 BC 暖启动 ({n_episodes} 回合, {n_epochs} epochs, lr={lr})")
     print(f"{'='*60}")
 
     dq_max = agent.dq_max
 
-    # 收集数据
     all_obs = []
-    all_dq  = []
+    all_dq = []
 
     # 初始化 obs_norm
     print("  初始化观测归一化...")
+    warm_env = CableRobotEnvWithObstacles(config=config)
+    warm_env.set_curriculum_n_obstacles(0)
     for _ in range(5):
-        obs = env.reset()
-        if env.get_planned_path() is None:
+        obs = warm_env.reset()
+        if warm_env.get_planned_path() is None:
             continue
         for _ in range(30):
             action = np.random.uniform(-dq_max, dq_max).astype(np.float32)
-            swing_obs, _, _ = build_swing_obs(obs, env, action)
+            swing_obs, _, _ = build_swing_obs(obs, warm_env, action)
             agent.normalize_obs(swing_obs, update=True)
-            obs, _, term, trunc, _ = env.step(action)
+            obs, _, term, trunc, _ = warm_env.step(action)
             if term or trunc:
                 break
-
+    warm_env.close()
     print(f"  观测归一化统计量就绪 (n={agent.obs_norm.n})")
 
     valid_eps = 0
@@ -88,7 +86,7 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
     max_attempts = n_episodes * 3
     last_action = np.zeros(7, dtype=np.float32)
     prev_tilt = 0.0
-    prev_yaw  = 0.0
+    prev_yaw = 0.0
 
     while valid_eps < n_episodes and attempt_cnt < max_attempts:
         attempt_cnt += 1
@@ -104,7 +102,7 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
 
         last_action = np.zeros(7, dtype=np.float32)
         prev_tilt = 0.0
-        prev_yaw  = 0.0
+        prev_yaw = 0.0
 
         while True:
             current_q = env.data.qpos[:7].copy().astype(np.float32)
@@ -133,15 +131,13 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
         print("  ⚠ 样本不足，跳过 BC 预训练")
         return
 
-    # 训练 mean_head（冻结 log_std）
     obs_t = torch.tensor(np.array(all_obs), device=agent.device)
     dq_t  = torch.tensor(np.array(all_dq),  device=agent.device)
     n_samples = len(all_obs)
 
-    # 只训练 mean_head 和 backbone，冻结 log_std
     bc_params = [p for name, p in agent.actor.named_parameters()
                  if name != 'log_std']
-    bc_optimizer = torch.optim.Adam(bc_params, lr=lr, weight_decay=1e-5)
+    bc_optimizer = torch.optim.AdamW(bc_params, lr=lr, weight_decay=1e-5)
 
     for epoch in range(n_epochs):
         indices = np.random.permutation(n_samples)
@@ -153,7 +149,6 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
             obs_b = obs_t[idx]
             dq_b  = dq_t[idx]
 
-            # 直接 MSE（底层不用 tanh，无需 atanh 映射）
             mean, _ = agent.actor._dist(obs_b)
             loss = F.mse_loss(mean, dq_b)
 
@@ -181,27 +176,40 @@ def bc_pretrain_swing(agent: SwingControllerAgent,
 # ==============================================================================
 
 def train_swing_controller(config: dict, log_dir: str):
-    """底层防摆控制器的完整训练流程。"""
     os.makedirs(log_dir, exist_ok=True)
     set_global_seed(42)
 
     cfg_swing = config.get("swing_controller", {})
     cfg_wind  = config.get("wind", {})
 
-    TOTAL_STEPS  = int(cfg_swing.get("total_timesteps", 1_000_000))
-    N_STEPS      = int(cfg_swing.get("n_steps", 2048))
+    TOTAL_STEPS   = int(cfg_swing.get("total_timesteps", 1_000_000))
+    N_STEPS       = int(cfg_swing.get("n_steps", 2048))
     EVAL_INTERVAL = int(cfg_swing.get("eval_interval", 20))
     SAVE_INTERVAL = int(cfg_swing.get("save_interval", 50))
 
-    # 风力课程
-    wind_cur_start = int(cfg_wind.get("curriculum_start", 0))
-    wind_cur_end   = int(cfg_wind.get("curriculum_end", 200_000))
+    # ========== 改进 1：风力课程延迟 ==========
+    WIND_CUR_START = int(cfg_wind.get("curriculum_start", 50_000))   # 原 0 → 50k
+    WIND_CUR_END   = int(cfg_wind.get("curriculum_end", 300_000))    # 适当延长
+
+    # ========== 改进 2：保守探索与冻结阶段 ==========
+    LOG_STD_INIT   = -2.0    # 更小噪声（之前 -1.0）
+    FREEZE_ACTOR_STEPS = 30_000   # 前 3 万步冻结 Actor（只训练 Critic）
+
+    # ========== 改进 3：奖励系数调整（覆盖配置） ==========
+    rwd_cfg = config.setdefault("swing_controller_reward", {})
+    rwd_cfg["step_penalty"]            = -0.001   # 从 -0.01 大幅降低
+    rwd_cfg["swing_offset_penalty_coef"] = 0.5    # 从 1.0 降低
+    rwd_cfg["swing_vel_penalty_coef"]   = 0.15    # 从 0.3 降低
+    rwd_cfg["waypoint_reach_bonus"]     = 2.0     # 增加正向激励
+    rwd_cfg["tilt_penalty_coef"]        = 0.3      # 从 0.5 降低
 
     print("[SwingTrain] 初始化环境...")
     env = CableRobotEnvWithObstacles(config=config)
-    env.set_curriculum_n_obstacles(0)  # 底层不需要障碍物
+    env.set_curriculum_n_obstacles(0)
 
     print("[SwingTrain] 初始化 Agent...")
+    # 覆盖 log_std_init
+    cfg_swing["log_std_init"] = LOG_STD_INIT
     agent = SwingControllerAgent(config=config)
 
     print("[SwingTrain] 初始化专家...")
@@ -212,20 +220,27 @@ def train_swing_controller(config: dict, log_dir: str):
     if bc_epochs > 0:
         bc_env = CableRobotEnvWithObstacles(config=config)
         bc_env.set_curriculum_n_obstacles(0)
-        bc_env.set_wind_curriculum(0.0)  # BC 阶段无风
+        bc_env.set_wind_curriculum(0.0)
         bc_expert = JointSpaceExpert(config, bc_env.ik_solver)
         bc_pretrain_swing(
             agent, config, bc_env, bc_expert,
             n_episodes=200,
             n_epochs=bc_epochs,
-            lr=float(cfg_swing.get("bc_pretrain_lr", 1e-3)),
+            lr=float(cfg_swing.get("bc_pretrain_lr", 1e-4)),
         )
         bc_env.close()
         agent.save(os.path.join(log_dir, "ckpt_bc.pt"))
 
-    # ── PPO 训练 ──
+    # ── 冻结 Actor（均值头），只训练 Critic ──
+    print(f"\n[SwingTrain] 冻结 Actor 前 {FREEZE_ACTOR_STEPS} 步，仅预热 Critic...")
+    for p in agent.actor.parameters():
+        p.requires_grad = False
+    agent._freeze_actor = True   # 新增
+
+    # ── PPO 训练循环 ──
     print(f"\n[SwingTrain] 开始 PPO 训练，目标步数 {TOTAL_STEPS}")
-    print(f"  风力课程: {wind_cur_start} → {wind_cur_end} 步")
+    print(f"  风力课程: {WIND_CUR_START} → {WIND_CUR_END} 步")
+    print(f"  log_std_init = {LOG_STD_INIT}, 冻结 Actor 前 {FREEZE_ACTOR_STEPS} 步")
 
     log_file = os.path.join(log_dir, "swing_train_log.csv")
     with open(log_file, "w", newline="") as f:
@@ -233,7 +248,7 @@ def train_swing_controller(config: dict, log_dir: str):
             "episode", "total_steps", "ep_reward", "ep_steps",
             "tilt_rms", "swing_vel_avg", "swing_offset_avg",
             "policy_loss", "value_loss", "entropy",
-            "wind_frac",
+            "wind_frac", "termination",
         ])
 
     total_steps = 0
@@ -241,20 +256,29 @@ def train_swing_controller(config: dict, log_dir: str):
     best_metric = -float('inf')
     t_start = time.time()
 
-    # 滑动窗口统计
     recent_rewards = []
     recent_tilt_rms = []
     WINDOW = 20
 
     while total_steps < TOTAL_STEPS:
-        # 风力课程
-        if total_steps < wind_cur_start:
+        # ── 风力课程 ──
+        if total_steps < WIND_CUR_START:
             wind_frac = 0.0
-        elif total_steps >= wind_cur_end:
+        elif total_steps >= WIND_CUR_END:
             wind_frac = 1.0
         else:
-            wind_frac = (total_steps - wind_cur_start) / max(wind_cur_end - wind_cur_start, 1)
+            wind_frac = (total_steps - WIND_CUR_START) / max(WIND_CUR_END - WIND_CUR_START, 1)
         env.set_wind_curriculum(wind_frac)
+
+        # ── 当步数超过 FREEZE_ACTOR_STEPS 后解冻 Actor ──
+        if total_steps >= FREEZE_ACTOR_STEPS and not agent.actor.mean_head.weight.requires_grad:
+            print(f"\n[SwingTrain] 解冻 Actor (step {total_steps})")
+            for p in agent.actor.parameters():
+                p.requires_grad = True
+            # 解冻后保留较小的探索噪声
+            agent._freeze_actor = False   # 新增
+            with torch.no_grad():
+                agent.actor.log_std.data.fill_(LOG_STD_INIT)
 
         obs = env.reset()
         planned_path = env.get_planned_path()
@@ -264,7 +288,6 @@ def train_swing_controller(config: dict, log_dir: str):
         expert.reset(obs, env.data.qpos[:7].copy(), env=env)
         expert.set_path(planned_path)
 
-        # 回合状态
         last_action = np.zeros(7, dtype=np.float32)
         prev_tilt = 0.0
         prev_yaw  = 0.0
@@ -274,28 +297,29 @@ def train_swing_controller(config: dict, log_dir: str):
         ep_tilts  = []
         ep_swing_vels = []
         ep_swing_offsets = []
+        train_info = {"policy_loss": 0.0, "value_loss": 0.0, "entropy": 0.0}
+        termination_reason = "normal"
         rollout_done = False
 
         while not rollout_done:
-            # 构建底层观测
             swing_obs, prev_tilt, prev_yaw = build_swing_obs(
                 obs, env, last_action, prev_tilt, prev_yaw)
             norm_obs = agent.normalize_obs(swing_obs, update=True)
 
-            # 选择动作
+            # 动作选择
             delta_q, log_prob, value = agent.act(norm_obs, deterministic=False)
 
-            # 环境推进
             next_obs, env_reward, terminated, truncated, info = env.step(delta_q)
             done = terminated or truncated
 
-            # 计算底层奖励
+            # 计算底层奖励（使用改进后的 reward 函数）
             reward, swing_term, rwd_info = compute_swing_reward(
                 env, next_obs, delta_q, last_action, prev_wp_dist, config)
 
-            # 使用底层奖励（而非环境原始奖励）
             prev_wp_dist = rwd_info.get("wp_dist", None)
             done = done or swing_term
+            if swing_term:
+                termination_reason = rwd_info.get("termination", "swing")
 
             # 记录指标
             ep_tilts.append(float(next_obs[OBS_TILT]))
@@ -304,18 +328,17 @@ def train_swing_controller(config: dict, log_dir: str):
             ep_swing_offsets.append(float(np.linalg.norm(
                 next_obs[[OBS_EE_X, OBS_EE_Y]] - next_obs[[OBS_PL_X, OBS_PL_Y]])))
 
-            # Buffer
+            # 存入 buffer
             agent.buffer.add(norm_obs, delta_q, reward, float(done),
                              value, log_prob)
 
             ep_reward += reward
-            ep_steps += 1
+            ep_steps  += 1
             total_steps += 1
             agent.total_steps = total_steps
             last_action = delta_q.copy()
             obs = next_obs
 
-            # Buffer 满则更新
             if agent.buffer.full:
                 if done:
                     last_val = 0.0
@@ -339,6 +362,10 @@ def train_swing_controller(config: dict, log_dir: str):
         swing_vel_avg = float(np.mean(ep_swing_vels)) if ep_swing_vels else 0
         swing_off_avg = float(np.mean(ep_swing_offsets)) if ep_swing_offsets else 0
 
+        # 判断是否“稳定成功”：未被强制终止，且 tilt_rms < 0.08（可调）
+        stable = (termination_reason == "normal") and (tilt_rms < 0.08)
+        status_symbol = "√" if stable else "×"
+
         recent_rewards.append(ep_reward)
         recent_tilt_rms.append(tilt_rms)
         if len(recent_rewards) > WINDOW:
@@ -348,19 +375,20 @@ def train_swing_controller(config: dict, log_dir: str):
         avg_r = float(np.mean(recent_rewards))
         avg_tilt = float(np.mean(recent_tilt_rms))
 
-        print(f"Ep {episode:4d} | R:{ep_reward:7.2f}(avg:{avg_r:6.2f}) | "
+        print(f"Ep {episode:4d} {status_symbol} | R:{ep_reward:7.2f}(avg:{avg_r:6.2f}) | "
               f"Steps:{ep_steps:3d} | TiltRMS:{tilt_rms:.4f} | "
               f"SwVel:{swing_vel_avg:.4f} | SwOff:{swing_off_avg:.4f} | "
-              f"Wind:{wind_frac:.2f} | total:{total_steps}")
+              f"Wind:{wind_frac:.2f} | "
+              f"Term:{termination_reason[:6]:6s} | total:{total_steps}")
 
         with open(log_file, "a", newline="") as f:
             csv.writer(f).writerow([
                 episode, total_steps, ep_reward, ep_steps,
                 tilt_rms, swing_vel_avg, swing_off_avg,
-                train_info.get("policy_loss", 0) if isinstance(train_info, dict) else 0,
-                train_info.get("value_loss", 0) if isinstance(train_info, dict) else 0,
-                train_info.get("entropy", 0) if isinstance(train_info, dict) else 0,
-                wind_frac,
+                train_info.get("policy_loss", 0),
+                train_info.get("value_loss", 0),
+                train_info.get("entropy", 0),
+                wind_frac, termination_reason,
             ])
 
         # ── 定期评估 ──
@@ -370,45 +398,39 @@ def train_swing_controller(config: dict, log_dir: str):
                   f"PathErr={eval_metrics['path_error_rms']:.4f} | "
                   f"SwOffset={eval_metrics['swing_offset_avg']:.4f}")
 
-            # 保存最优（基于 tilt_rms 最小）
-            metric = -eval_metrics['tilt_rms']  # 取负使其越大越好
+            metric = -eval_metrics['tilt_rms']
             if metric > best_metric:
                 best_metric = metric
                 agent.save(os.path.join(log_dir, "ckpt_best.pt"))
                 print(f"  ★ 新最佳 TiltRMS={eval_metrics['tilt_rms']:.4f}")
 
-        # ── 定期保存 ──
         if episode > 0 and episode % SAVE_INTERVAL == 0:
             agent.save(os.path.join(log_dir, f"ckpt_ep{episode}.pt"))
 
         episode += 1
 
-    # 最终保存
     agent.save(os.path.join(log_dir, "ckpt_final.pt"))
     elapsed = (time.time() - t_start) / 60
     print(f"\n[SwingTrain] 完成！总步数 {total_steps}，耗时 {elapsed:.1f} 分钟")
-
     return agent
 
 
 # ==============================================================================
-# 评估函数
+# 评估函数（不变）
 # ==============================================================================
 
 def evaluate_swing_controller(agent: SwingControllerAgent,
                                config: dict,
                                n_episodes: int = 10
                                ) -> dict:
-    """
-    评估底层控制器，返回 tilt_rms / path_error / swing_offset 等指标。
-    """
+    """评估底层控制器，返回 tilt_rms / path_error / swing_offset 等指标。"""
     eval_config = copy.deepcopy(config)
     eval_config["scene"]["seed"] = 42
-    eval_config["wind"]["enabled"] = True  # 评估时有风
+    eval_config["wind"]["enabled"] = True
 
     env = CableRobotEnvWithObstacles(config=eval_config)
     env.set_curriculum_n_obstacles(0)
-    env.set_wind_curriculum(1.0)  # 全风力测试
+    env.set_wind_curriculum(1.0)
 
     all_tilt_rms = []
     all_path_err = []
@@ -440,7 +462,6 @@ def evaluate_swing_controller(agent: SwingControllerAgent,
             next_obs, _, terminated, truncated, _ = env.step(delta_q)
             last_action = delta_q.copy()
 
-            # 记录指标
             ep_tilts.append(float(next_obs[OBS_TILT]))
 
             pl_pos = np.array([next_obs[OBS_PL_X], next_obs[OBS_PL_Y],
@@ -477,15 +498,14 @@ def evaluate_swing_controller(agent: SwingControllerAgent,
 
 
 # ==============================================================================
-# 主入口
+# 命令行接口
 # ==============================================================================
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="底层防摆控制器训练")
+    parser = argparse.ArgumentParser(description="底层防摆控制器训练（优化版）")
     parser.add_argument("--log-dir",    type=str, default="saves/swing_ctrl")
     parser.add_argument("--timesteps",  type=int, default=None)
-    parser.add_argument("--no-bc",      action="store_true",
-                        help="跳过 BC 暖启动")
+    parser.add_argument("--no-bc",      action="store_true")
     parser.add_argument("--wind-fmax",  type=float, default=None)
     parser.add_argument("--gpu",        type=int, default=0)
     args = parser.parse_args()
@@ -498,6 +518,8 @@ if __name__ == "__main__":
     if args.no_bc:
         config["swing_controller"]["bc_pretrain_epochs"] = 0
     if args.wind_fmax is not None:
-        config["wind"]["F_max"] = args.wind_fmax
+        config["wind"]["F_max"] = float(args.wind_fmax)
+
+    # 默认奖励调整已在 train_swing_controller 内完成
 
     train_swing_controller(config, args.log_dir)
