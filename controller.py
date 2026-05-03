@@ -243,11 +243,9 @@ class NMPCTrajectoryTracker:
 
         is_current_descent_wp = (wp3[2] < self.z_cruise - 0.01)
 
+        # ── 航点推进（仅单步推进，不跳跃） ──
         if is_current_descent_wp:
-            xy_thresh_desc = 0.025
-            z_thresh_desc  = 0.010
-            advance = (dist_xy < xy_thresh_desc and
-                       dist_z  < z_thresh_desc and
+            advance = (dist_xy < 0.025 and dist_z < 0.010 and
                        self.current_idx < len(self.path) - 1)
         else:
             advance = (dist_xy < self.arrival_threshold_xy and
@@ -258,12 +256,9 @@ class NMPCTrajectoryTracker:
             self.current_idx += 1
             wp  = self.path[self.current_idx]
             wp3 = np.array([wp[0], wp[1], wp[2] if len(wp) >= 3 else 0.3])
-            # 下降段不清空 NMPC 解（保留热启动，避免解跳变）
-            if not is_current_descent_wp:
-                self.mpc.last_sol = None
-                self.mpc.last_az = 0.0
+            # 保留 NMPC 热启动，不清空 last_sol
 
-        # 下降检测
+        # ── 下降检测 ──
         if not self._is_descending:
             in_cruise_height = (pl_z > self.z_cruise - 0.05)
             target_is_desc_wp = (wp3[2] < self.z_cruise - 0.01)
@@ -273,18 +268,56 @@ class NMPCTrajectoryTracker:
             if pl_z > self.z_cruise + 0.03:
                 self._is_descending = False
 
-        # 航点前瞻（仅巡航段）
+        # ══════════════════════════════════════════════════════════════
+        # [FIX-A] 路径切线参考点：沿路径前方固定距离处取参考
+        #
+        # 原问题：单航点跟踪 + 简单前瞻混合，导致：
+        #   1. NMPC 参考点跳跃：航点推进时参考从 wp[i] 跳到 wp[i+1]
+        #   2. 短切路径：前瞻把参考拉向下一航点，payload 走直线抄近路
+        #      撞到路径弯道处的障碍物
+        #   3. 速度不均匀：密集航点区参考点近→NMPC加速小→慢
+        #      稀疏航点区参考点远→NMPC加速大→快
+        #
+        # 修复：沿路径向前取固定弧长距离（cruise_ref_dist）处作为参考
+        # 这样参考点始终在路径上，不会短切，且移动速度一致
+        # ══════════════════════════════════════════════════════════════
         ref_xy = wp3[:2].copy()
         ref_z  = wp3[2]
-        if (not self._is_descending
-                and self.current_idx < len(self.path) - 1
-                and dist_xy < 0.10):
-            next_wp = self.path[self.current_idx + 1]
-            next_wp3 = np.array([next_wp[0], next_wp[1],
-                                 next_wp[2] if len(next_wp) >= 3 else 0.3])
-            blend = max(0.0, 1.0 - dist_xy / 0.10) * 0.4
-            ref_xy = (1 - blend) * ref_xy + blend * next_wp3[:2]
-            ref_z  = (1 - blend) * ref_z  + blend * next_wp3[2]
+
+        if not self._is_descending and self.current_idx < len(self.path) - 1:
+            # 沿路径向前取固定弧长距离处的点作为参考
+            # [OPT] 增大前瞻距离, 让 NMPC 有更长预览窗口, 减少弯道急转
+            cruise_ref_dist = 0.10  # 0.06→0.10, 沿路径前方 10cm 处作为 NMPC 参考
+            accum_dist = 0.0
+            ref_idx = self.current_idx
+            prev_pt = wp3[:2].copy()
+
+            for k in range(self.current_idx + 1, len(self.path)):
+                next_wp = self.path[k]
+                next_pt = np.array([next_wp[0], next_wp[1]])
+                next_z  = next_wp[2] if len(next_wp) >= 3 else 0.3
+
+                # 如果下一个是下降航点，停止向前延伸
+                if next_z < self.z_cruise - 0.01:
+                    break
+
+                seg_len = np.linalg.norm(next_pt - prev_pt)
+                if accum_dist + seg_len >= cruise_ref_dist:
+                    # 在这段上插值
+                    remain = cruise_ref_dist - accum_dist
+                    frac = remain / max(seg_len, 1e-6)
+                    ref_xy = prev_pt + frac * (next_pt - prev_pt)
+                    ref_z  = wp3[2]  # 巡航段 z 保持不变
+                    ref_idx = k
+                    break
+                accum_dist += seg_len
+                prev_pt = next_pt
+                ref_idx = k
+            else:
+                # 路径剩余不足 cruise_ref_dist，用最后一个巡航航点
+                last_cruise = self.path[ref_idx]
+                ref_xy = np.array([last_cruise[0], last_cruise[1]])
+                ref_z  = last_cruise[2] if len(last_cruise) >= 3 else 0.3
 
         state_12d = np.array([
             ee_x, ee_y, ee_z, ee_yaw,
@@ -453,9 +486,10 @@ class JointSpaceExpert:
         self._last_q     = None
 
         # 巡航段参数
-        self._v_max_xy_normal  = 0.3
+        # [OPT] 降低锚定强度减少位置拖拽, 提高速度一致性
+        self._v_max_xy_normal  = 0.15       # 0.18→0.15, 更慢更稳
         self._v_max_z_normal   = 0.2
-        self._anchor_alpha_normal  = 0.3
+        self._anchor_alpha_normal  = 0.10   # 0.15→0.10, 减少积分器与真实位置的拖拽冲突
 
         # =========================================================
         # 下降段：3 项防摇控制 + 稳态误差消除 (终极版)
@@ -471,6 +505,11 @@ class JointSpaceExpert:
         self._v_max_z_descent  = -0.02 
         self._v_max_yaw_descent= 0.2
 
+        # [FIX-C] 下降段入口稳定
+        self._was_descending = False
+        self._descent_settle_counter = 0
+        self._descent_settle_steps   = 8   # ~0.8s 稳定期
+
     def reset(self, env_obs, init_q, env=None):
         if env is not None:
             self._ee_pos = env._get_ee_pos().astype(np.float64)
@@ -485,7 +524,10 @@ class JointSpaceExpert:
         self._ee_yaw_vel = 0.0
         self._last_q     = init_q.copy().astype(np.float64)
         self.tracker.mpc.last_sol = None
-        self.tracker.mpc.last_az  = 0.0 
+        self.tracker.mpc.last_az  = 0.0
+        self._was_descending = False
+        self._descent_settle_counter = 0
+        self._integral_xy[:] = 0.0
         real_pl_z = float(env_obs[OBS_PL_Z])
         self.tracker.estimated_L = float(self._ee_pos[2]) - real_pl_z
 
@@ -510,6 +552,17 @@ class JointSpaceExpert:
             # ==============================================================
             # 下降段：无静差工业防摇控制
             # ==============================================================
+
+            # [FIX-D] 检测巡航→下降转换时刻
+            if not self._was_descending:
+                # 刚进入下降段：同步内部状态，重置积分器
+                self._ee_pos[:] = real_ee
+                self._ee_vel[:] = real_vel * 0.3  # 保留少量速度防止跳变
+                self._integral_xy[:] = 0.0
+                self._descent_settle_counter = 0
+            self._was_descending = True
+            self._descent_settle_counter += 1
+
             ee_xy = self._ee_pos[:2]
             pl_x  = float(env_obs[OBS_PL_X])
             pl_y  = float(env_obs[OBS_PL_Y])
@@ -519,62 +572,60 @@ class JointSpaceExpert:
             pl_xy = np.array([pl_x, pl_y])
             pl_vel_xy = np.array([pl_vx, pl_vy])
             yaw_err   = target_yaw - self._ee_yaw
+
+            in_settling = (self._descent_settle_counter <= self._descent_settle_steps)
             
             # --- 宏观对准 (Targeting) ---
             pl_xy_err = self._target_xy - pl_xy
-            self._integral_xy += pl_xy_err * dt
-            self._integral_xy = np.clip(self._integral_xy, -0.05, 0.05) # 抗积分饱和
+            if not in_settling:
+                self._integral_xy += pl_xy_err * dt
+                self._integral_xy = np.clip(self._integral_xy, -0.05, 0.05)
             
-            # 1. 目标引力：拉动吊载走向终点 (带积分，保证最终误差为 0)
-            v_target = self._descent_K_target * pl_xy_err + self._descent_Ki * self._integral_xy
+            if in_settling:
+                # 稳定期：仅消摆+阻尼，不追目标
+                v_target = np.zeros(2)
+            else:
+                # 1. 目标引力
+                v_target = self._descent_K_target * pl_xy_err + self._descent_Ki * self._integral_xy
             
-            # --- 微观消摆 (Anti-Swing) ---
-            # 2. 虚拟重力：拉动 EE 保持在吊载正上方 (打破画圈极限环)
+            # --- 微观消摆 (Anti-Swing) --- 始终激活
             v_swing  = self._descent_K_swing * (pl_xy - ee_xy)
-            # 3. 主动阻尼：顺着吊载速度移动进行吸能
             v_catch  = self._descent_K_catch * pl_vel_xy
             
-            # 综合速度指令
             target_v_xy = v_target + v_swing + v_catch
             
             v_norm = np.linalg.norm(target_v_xy)
             if v_norm > self._v_max_xy_descent:
                 target_v_xy *= self._v_max_xy_descent / v_norm
                 
-            # 直接下发位置积分，[核心修复] 坚决不再使用 alpha_desc 软锚定！
-            # 让控制器闭环自己处理物理误差
             self._ee_vel[:2] = target_v_xy
             self._ee_pos[:2] += self._ee_vel[:2] * dt
 
-            # 2. Yaw 轴对准
+            # Yaw 轴对准
             target_v_yaw = 1.0 * yaw_err
             target_v_yaw = np.clip(target_v_yaw, -self._v_max_yaw_descent, self._v_max_yaw_descent)
             self._ee_yaw_vel = target_v_yaw
             self._ee_yaw += self._ee_yaw_vel * dt
 
-            # 3. Z 轴门控下降
+            # Z 轴门控下降
             xy_err_norm = np.linalg.norm(pl_xy_err)
-            
-            # 误差要求 < 1.5cm，速度要求 < 1.5cm/s
             is_aligned = (xy_err_norm < 0.015) and (abs(yaw_err) < 0.05) 
-            is_stable  = (np.linalg.norm(pl_vel_xy) < 0.015) 
+            is_stable  = (np.linalg.norm(pl_vel_xy) < 0.015)
 
-            if is_aligned and is_stable:
+            if is_aligned and is_stable and not in_settling:
                 target_v_z = self._v_max_z_descent
             else:
                 target_v_z = 0.0
 
-            # Z轴保留平滑滤波
             self._ee_vel[2] = 0.8 * self._ee_vel[2] + 0.2 * target_v_z
             self._ee_pos[2] += self._ee_vel[2] * dt
-
-            # [核心修复2] 注意：这里彻底移除了对 self._ee_pos 的 real_ee 状态锚定。
-            # 让内部生成的完美轨迹顺畅滑入 IK 求解器，积分器才能有效克服外部阻力！
 
         else:
             # ==============================================================
             # 巡航/上升段：NMPC 逻辑
             # ==============================================================
+            self._was_descending = False  # [FIX-C]
+
             a_xyz = action_4d[:3].astype(np.float64)
             a_yaw = float(action_4d[3])
 
@@ -589,10 +640,11 @@ class JointSpaceExpert:
             self._ee_vel[2] = np.clip(self._ee_vel[2],
                                        -self._v_max_z_normal, self._v_max_z_normal)
 
-            # 巡航段保留软锚定，防止 NMPC 轨迹偏离实际太远
+            # 巡航段软锚定
+            # [OPT] 位置锚定用较低 alpha, 速度锚定独立且更柔和
             alpha = self._anchor_alpha_normal
             self._ee_pos = (1 - alpha) * self._ee_pos + alpha * real_ee
-            vel_alpha = alpha * 0.5
+            vel_alpha = 0.05  # 速度锚定更弱, 避免速度突变
             self._ee_vel = (1 - vel_alpha) * self._ee_vel + vel_alpha * real_vel
             
 

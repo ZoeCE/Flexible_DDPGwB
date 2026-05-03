@@ -827,6 +827,7 @@ class CableRobotEnvWithObstacles:
         abs_yaw  = abs(float(pl_euler[2]))
 
         entry_z = cfg_ins.get("entry_z", 0.16)
+        target_pz = cfg_ins.get("target_payload_z", 0.10)
         if not self._in_insertion_phase and payload_z <= entry_z:
             self._in_insertion_phase = True
 
@@ -901,7 +902,6 @@ class CableRobotEnvWithObstacles:
 
         # 插入阶段下降奖励（指数折扣）
         if self._in_insertion_phase:
-            target_pz = cfg_ins.get("target_payload_z", 0.10)
             cur_depth = max(0.0, entry_z - payload_z)
             prev_depth = getattr(self, '_prev_descent_depth', 0.0)
             depth_delta = cur_depth - prev_depth
