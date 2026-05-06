@@ -188,7 +188,7 @@ elif phase == "cruise":
 python train_phase.py --phase lift --algo ppo --log-dir saves/lift_ppo
 
 # Phase 2: Cruise
-python train_phase.py --phase cruise --algo sac --log-dir saves/cruise_sac
+python train_phase.py --phase cruise --algo ppo --log-dir saves/cruise_ppo
 
 # Phase 3: Descent
 python train_phase.py --phase descent --algo ppo --log-dir saves/descent_ppo

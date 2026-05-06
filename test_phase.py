@@ -43,7 +43,7 @@ from phase_reward import (
     compute_lift_reward, compute_cruise_reward, compute_descent_reward,
     LiftRewardState, CruiseRewardState, DescentRewardState,
 )
-from ee_acc_controller import EEAccController, CruiseZYawPID
+from ee_acc_controller import EEAccController, CruiseZYawPID, SwingDampingController
 from scipy.spatial.transform import Rotation as R
 
 
@@ -95,23 +95,68 @@ def get_phase_state(env, obs):
     }
 
 
+def check_physical_insertion(env, config):
+    """
+    用真实物理容差（由几何推导）独立验证插入是否成功。
+    物理约束:
+      socket_hole = 14mm×14mm, rebar_radius = 3mm
+      → xy_tol = 7-3 = 4mm (中心点)
+      → yaw_tol = arcsin(4 / 49.5) ≈ 0.081 rad
+      → tilt_tol = 0.05 rad (保证4孔对准, 插入深60mm)
+      → z: payload_z 需达到 target_payload_z ± 20mm
+    返回 (is_success: bool, detail: str)
+    """
+    cfg_ins = config.get("insertion", {})
+    target_pz = float(cfg_ins.get("target_payload_z", 0.10))
+    # 物理真实容差 (来自 config 的物理值字段)
+    xy_tol   = float(cfg_ins.get("xy_tolerance",   0.004))
+    z_tol    = float(cfg_ins.get("success_z_tolerance", 0.020))
+    tilt_tol = float(cfg_ins.get("tilt_tolerance", 0.05))
+    yaw_tol  = float(cfg_ins.get("yaw_tolerance",  0.08))
+
+    pl_pos = env.data.body('prefab').xpos.copy()
+    payload_z = float(pl_pos[2])
+    target_xy = env.target_pos.copy()
+    dtf = float(np.linalg.norm(pl_pos[:2] - target_xy))
+
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+    tilt = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
+    abs_yaw = abs(float(pl_euler[2]))
+
+    ok_z    = abs(payload_z - target_pz) < z_tol
+    ok_xy   = dtf < xy_tol
+    ok_tilt = tilt < tilt_tol
+    ok_yaw  = abs_yaw < yaw_tol
+
+    detail = (f"z={payload_z*1000:.1f}mm(±{z_tol*1000:.0f}) "
+              f"dtf={dtf*1000:.1f}mm(<{xy_tol*1000:.0f}) "
+              f"tilt={tilt:.3f}(<{tilt_tol:.3f}) "
+              f"yaw={abs_yaw:.3f}(<{yaw_tol:.3f}) "
+              f"[{'✅' if ok_z else '❌'}z "
+              f"{'✅' if ok_xy else '❌'}xy "
+              f"{'✅' if ok_tilt else '❌'}tilt "
+              f"{'✅' if ok_yaw else '❌'}yaw]")
+    return (ok_z and ok_xy and ok_tilt and ok_yaw), detail
+
+
 def check_phase_transition(phase, state, config):
-    """检查是否应该切换到下一阶段。"""
+    """检查是否满足阶段切换条件 (用于 pipeline 测试)。"""
     pt = config["phase_transition"]
     target_xy = np.array(config["task"]["default_target_xy"])
-    
+
     if phase == "lift":
         return (state["payload_z"] >= pt["lift_to_cruise_z_threshold"] and
                 state["tilt"] < pt["lift_to_cruise_tilt_max"] and
                 state["swing_vel"] < pt["lift_to_cruise_swing_vel_max"])
-    
+
     elif phase == "cruise":
         dtf = float(np.linalg.norm(state["pl_xy"] - target_xy))
         return (dtf < pt["cruise_to_descent_xy_dist"] and
                 state["tilt"] < pt["cruise_to_descent_tilt_max"] and
                 state["swing_vel"] < pt["cruise_to_descent_swing_vel_max"] and
                 state["pl_vel"] < pt["cruise_to_descent_payload_vel_max"])
-    
+
     return False
 
 
@@ -133,8 +178,9 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
     """测试单个阶段。"""
     from train_phase import reset_for_phase, build_phase_obs, REWARD_FNS, REWARD_STATES
     
-    # ★ Cruise 段 PID
-    z_pid = CruiseZYawPID(config) if phase == "cruise" else None
+    # ★ Cruise 段控制器
+    z_pid   = CruiseZYawPID(config)         if phase == "cruise" else None
+    swing_d = SwingDampingController(config) if phase == "cruise" else None
     
     results = []
     ep_count = 0
@@ -146,6 +192,12 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         if obs is None:
             continue
         
+        '''# ★ 在 cruise 阶段且开启渲染时，暂停让用户观察初始状态
+        if phase == "cruise" and getattr(env, 'render_mode', False):
+            print("\n[Cruise Test] Warmup 完成，当前为 cruise 阶段的初始状态。")
+            print("按 Enter 键开始测试...")
+            input()''' # zxy: 取消测试前暂停，直接进入测试
+
         current_q = env.data.qpos[:7].copy()
         expert.reset(obs, current_q, env=env)
         if planned_path is not None:
@@ -166,11 +218,16 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         target_xy = env.target_pos.copy()
         prev_tilt, prev_yaw = 0.0, 0.0
         rstate = REWARD_STATES[phase]()
-        # ★ 测试时注入 total_steps_global = 无穷大, 使渐进容差退火到最终严格值
-        # 训练时容差从宽到严, 测试时应始终用最严格标准衡量真实性能
+        # ★ 测试时注入严格判定参数 (训练容差从宽到严, 测试用最终严格值)
         if hasattr(rstate, 'total_steps_global'):
             rstate.total_steps_global = 10_000_000
-        
+        # ★ 测试时 cruise success_radius = 课程最终最严格值
+        # 默认 0.25m 远大于真实要求, 会导致 agent 还没到终点就判定成功 (测试假阳性)
+        if hasattr(rstate, 'current_success_radius'):
+            _rcfg = config.get("cruise_rl", {}).get("reward", {})
+            _test_sr = float(_rcfg.get("success_radius_test", 0.06))
+            rstate.current_success_radius = _test_sr
+
         ep_reward = 0.0
         ep_steps = 0
         ep_success = False
@@ -221,13 +278,18 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     if _falling:
                         term_reason = f"ground_collision:z={payload_pos[2]:.3f}"
                         break
+                    # ★ 底层防摆控制器 + RL/Expert 残差模式
+                    _pl_vel_full = env.data.qvel[_dof_idx:_dof_idx+3].copy()
+                    _ee_vel = getattr(env, '_ee_vel_cache', np.zeros(3))
+                    _base_acc, _damp_info = swing_d.compute(
+                        payload_pos, real_ee, _pl_vel_full, _ee_vel)
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
                     delta_q = ee_ctrl.compute_delta_q(
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock,
-                        z_pid_correction=_z_corr,
-                        target_yaw=_tgt_yaw)
+                        z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
+                        base_acc_xy=_base_acc[:2], residual_mode=True)
                 elif phase == "cruise":
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
@@ -235,7 +297,10 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock)
                 else:
-                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee)
+                    # [BUGFIX] descent 必须传入 vel_max_z_descent
+                    _vmax_z_d = float(config.get("ee_control", {}).get("vel_max_z_descent", 0.03))
+                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee,
+                                                       vel_max_z=_vmax_z_d)
             
             next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
             
@@ -247,22 +312,64 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             
             if r_success:
                 ep_success = True
+                # ★ 物理插入检验仅对 descent 有意义
+                # cruise 的 r_success 含义是「到达终点上方规定范围」,不是插入成功
+                if phase == "descent":
+                    phys_ok, phys_detail = check_physical_insertion(env, config)
+                    print(f"    [物理检验] {'✅ 满足真实插入要求' if phys_ok else '⚠ 仅满足课程容差, 未满足物理要求'}")
+                    print(f"    {phys_detail}")
+                elif phase == "cruise":
+                    _pl = env.data.body('prefab').xpos
+                    _dtf = float(np.linalg.norm(_pl[:2] - env.target_pos))
+                    _sr  = rstate.current_success_radius
+                    print(f"    [cruise到达] dtf={_dtf*1000:.1f}mm < {_sr*1000:.0f}mm ✅")
             if r_info.get("termination"):
                 term_reason = r_info["termination"]
 
-            # ★ descent 阶段: 每步打印插入进度，方便调试
+            # ★ cruise 阶段: 每30步打印 z 高度 + 摆动能量状态
+            # step > 0: 跳过第0步, 此时防摆控制器缓存尚未更新 (会显示初始零值)
+            if phase == "cruise" and step > 0 and step % 30 == 0:
+                pl_pos_c   = env.data.body('prefab').xpos
+                z_lock_dbg = float(config["cruise_rl"]["z_lock_height"])
+                dtf_c      = float(np.linalg.norm(pl_pos_c[:2] - env.target_pos))
+                dof_idx_c  = env.model.jnt_dofadr[env.prefab_jnt_id]
+                vz_c       = float(env.data.qvel[dof_idx_c + 2])
+                # 摆动能量 (swing_d.compute() 在此步 env.step() 之前已调用, 缓存有效)
+                _e_str = ""
+                if swing_d is not None:
+                    _e_str = (f" | E:{swing_d.last_energy*1000:.1f}mJ"
+                              f" θ:{swing_d.last_angle_deg:.1f}°"
+                              f" gain:{swing_d._gain_scale:.2f}")
+                _sr_str = f" sr={rstate.current_success_radius*1000:.0f}mm" if hasattr(rstate, 'current_success_radius') else ""
+                print(f"    [cruise s{step:3d}] z={pl_pos_c[2]*1000:.1f}mm "
+                      f"(tgt={z_lock_dbg*1000:.0f}mm dev={abs(pl_pos_c[2]-z_lock_dbg)*1000:.1f}mm) "
+                      f"vz={vz_c*1000:.1f}mm/s dtf={dtf_c*1000:.1f}mm{_sr_str}{_e_str}")
+
+            # ★ descent 阶段: 每20步打印插入进度
             if phase == "descent" and step % 20 == 0:
                 pl_pos = env.data.body('prefab').xpos
                 target_xy_dbg = env.target_pos.copy()
-                dtf_dbg = float(np.linalg.norm(pl_pos[:2] - target_xy_dbg))
+                dtf_dbg  = float(np.linalg.norm(pl_pos[:2] - target_xy_dbg))
                 pl_mat_dbg = env.data.body('prefab').xmat.reshape(3, 3)
                 pl_euler_dbg = R.from_matrix(pl_mat_dbg).as_euler('xyz')
                 tilt_dbg = float(np.sqrt(pl_euler_dbg[0]**2 + pl_euler_dbg[1]**2))
-                yaw_dbg = abs(float(pl_euler_dbg[2]))
+                yaw_dbg  = abs(float(pl_euler_dbg[2]))
                 hold_dbg = getattr(rstate, 'insertion_hold_counter', 0)
-                print(f"    [descent s{step:3d}] "
+                _z_reached = getattr(expert, '_z_reached', False)
+                _contact   = getattr(expert, '_contact_detected', False)
+                _integ = getattr(expert, '_integral_xy', None)
+                _int_str = f" int={np.linalg.norm(_integ)*1000:.1f}mm" if _integ is not None else ""
+                if _contact:
+                    _mode = "CONTACT"
+                elif _z_reached:
+                    _mode = "HOLD"
+                elif getattr(expert, '_descent_settle_counter', 0) <= 8:
+                    _mode = "SETTLE"
+                else:
+                    _mode = "DESC"
+                print(f"    [descent s{step:3d}|{_mode}] "
                       f"z={pl_pos[2]*1000:.1f}mm dtf={dtf_dbg*1000:.1f}mm "
-                      f"tilt={tilt_dbg:.3f} yaw={yaw_dbg:.3f} hold={hold_dbg}")
+                      f"tilt={tilt_dbg:.3f} yaw={yaw_dbg:.3f} hold={hold_dbg}{_int_str}")
             
             obs = next_obs
             
@@ -270,10 +377,15 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 break
         
         ep_count += 1
+        # ★ 记录物理成功（只对 descent 阶段有意义）
+        phys_success = False
+        if ep_success and phase == "descent":
+            phys_success, _ = check_physical_insertion(env, config)
         results.append({
             "reward": ep_reward,
             "steps": ep_steps,
             "success": ep_success,
+            "physical_success": phys_success,
             "termination": term_reason or "timeout",
             "trajectory": trajectory,
         })
@@ -295,8 +407,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
     """测试完整 3 阶段流水线。"""
     from train_phase import build_phase_obs, REWARD_FNS, REWARD_STATES
     
-    # ★ Cruise 段 PID
-    z_pid = CruiseZYawPID(config)
+    # ★ Cruise 段控制器
+    z_pid   = CruiseZYawPID(config)
+    swing_d = SwingDampingController(config)
     
     results = []
     ep_count = 0
@@ -329,10 +442,13 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
         phase_steps = {"lift": 0, "cruise": 0, "descent": 0}
         phase_success = {"lift": False, "cruise": False, "descent": False}
         rstate = REWARD_STATES[current_phase]()
-        # ★ 测试时 total_steps_global = 无穷大 → 使用最终严格容差
+        # ★ 测试时严格判定参数
         if hasattr(rstate, 'total_steps_global'):
             rstate.total_steps_global = 10_000_000
-        
+        if hasattr(rstate, 'current_success_radius'):
+            _rcfg_p = config.get("cruise_rl", {}).get("reward", {})
+            rstate.current_success_radius = float(_rcfg_p.get("success_radius_test", 0.06))
+
         ep_reward = 0.0
         ep_steps = 0
         final_success = False
@@ -357,8 +473,11 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 rstate = REWARD_STATES[current_phase]()
                 if hasattr(rstate, 'total_steps_global'):
                     rstate.total_steps_global = 10_000_000
+                if hasattr(rstate, 'current_success_radius'):
+                    _rcfg_p = config.get("cruise_rl", {}).get("reward", {})
+                    rstate.current_success_radius = float(_rcfg_p.get("success_radius_test", 0.06))
                 ee_ctrl.reset(env._get_ee_pos(), current_q)
-                # ★ 切换到 cruise 时重置 PID
+                # ★ 切换到 cruise 时重置控制器
                 _pl_z = float(payload_pos[2])
                 _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
                 _pl_yaw = float(R.from_matrix(_pl_mat).as_euler('xyz')[2])
@@ -390,7 +509,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 
                 real_ee = env._get_ee_pos()
                 if current_phase == "cruise":
-                    # ★ PID 计算
+                    # ★ Z/Yaw PID
                     _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
                     _pl_euler = R.from_matrix(_pl_mat).as_euler('xyz')
                     _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
@@ -402,15 +521,22 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                     if _falling:
                         term_reason = f"ground_collision:z={payload_pos[2]:.3f}"
                         break
+                    # ★ 底层防摆 + RL 残差
+                    _pl_vel_full = env.data.qvel[_dof_idx:_dof_idx+3].copy()
+                    _ee_vel = getattr(env, '_ee_vel_cache', np.zeros(3))
+                    _base_acc, _ = swing_d.compute(payload_pos, real_ee, _pl_vel_full, _ee_vel)
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
                     delta_q = ee_ctrl.compute_delta_q(
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock,
-                        z_pid_correction=_z_corr,
-                        target_yaw=_tgt_yaw)
+                        z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
+                        base_acc_xy=_base_acc[:2], residual_mode=True)
                 else:
-                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee)
+                    # [BUGFIX] descent pipeline 也必须传入 vel_max_z_descent
+                    _vmax_z_d = float(config.get("ee_control", {}).get("vel_max_z_descent", 0.03))
+                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee,
+                                                       vel_max_z=_vmax_z_d)
             
             next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
             
@@ -426,7 +552,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 final_success = True
                 phase_success["descent"] = True
                 term_reason = r_info.get("termination", "insertion_success")
-                # ★ 成功后立即退出 (reward/steps 已在上方累加)
+                # ★ 物理插入检验
+                phys_ok, phys_detail = check_physical_insertion(env, config)
+                print(f"    [物理检验] {'✅ 满足真实插入要求' if phys_ok else '⚠ 仅满足课程容差'}: {phys_detail}")
                 obs = next_obs
                 break
 
@@ -451,10 +579,14 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 break
         
         ep_count += 1
+        phys_success = False
+        if final_success:
+            phys_success, _ = check_physical_insertion(env, config)
         results.append({
             "reward": ep_reward,
             "steps": ep_steps,
             "success": final_success,
+            "physical_success": phys_success,
             "termination": term_reason or "timeout",
             "phase_rewards": phase_rewards.copy(),
             "phase_steps": phase_steps.copy(),
@@ -482,24 +614,26 @@ def print_summary(results, mode_name):
     if not results:
         print(f"[{mode_name}] 无有效结果")
         return
-    
+
     sr = np.mean([r["success"] for r in results])
+    phys_sr = np.mean([r.get("physical_success", r["success"]) for r in results])
     avg_r = np.mean([r["reward"] for r in results])
     avg_s = np.mean([r["steps"] for r in results])
-    
+
     terms = Counter()
     for r in results:
         t = (r["termination"] or "unknown").split(":")[0]
         terms[t] += 1
-    
-    print(f"\n{'='*50}")
+
+    print(f"\n{'='*55}")
     print(f"  [{mode_name}] 结果汇总")
-    print(f"{'='*50}")
-    print(f"  成功率:   {sr*100:.1f}%")
-    print(f"  平均奖励: {avg_r:.2f}")
-    print(f"  平均步数: {avg_s:.1f}")
-    print(f"  终止原因: {dict(terms)}")
-    
+    print(f"{'='*55}")
+    print(f"  课程成功率 (train标准): {sr*100:.1f}%")
+    print(f"  物理成功率 (真实要求): {phys_sr*100:.1f}%  ← 此值才是真实指标")
+    print(f"  平均奖励:  {avg_r:.2f}")
+    print(f"  平均步数:  {avg_s:.1f}")
+    print(f"  终止原因:  {dict(terms)}")
+
     # 流水线模式额外统计
     if "phase_success" in results[0]:
         for p in ["lift", "cruise", "descent"]:
