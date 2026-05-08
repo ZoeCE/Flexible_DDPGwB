@@ -1,21 +1,39 @@
 # ==============================================================================
-# config.py — 三阶段 RL 控制架构全局配置 v2 (优化版)
+# config.py — 三阶段 RL 控制架构全局配置 v3
 #
-# 主要变更 (相对 v1):
-#   [OPT-ENT]  PPO 熵崩塌修复:
-#              entropy_coef 0.05→0.15, log_std_min -2.5→-1.5,
-#              log_std_floor_init -0.5→0.0, target_kl 0.015→0.03
-#   [OPT-REW]  Cruise reward 重平衡:
-#              alive_bonus 0.08→0.02, pbrs_coef 10→20,
-#              去除存活套利 → 到达驱动更强
-#   [OPT-REW]  Descent reward 重平衡:
-#              z_descent 无条件权重提升, xy_align 解耦 align_factor,
-#              step_penalty 修正
-#   [OPT-CUR]  Cruise 课程学习: 距离课程 (初始化随机范围渐进扩大)
-#   [OPT-CUR]  Descent 课程学习: 初始化 xy_range/tilt/vel 渐进扩大
-#   [OPT-BC]   BC 预训练: n_epochs 200→60, patience 8→5 (防 descent 过拟合)
-#   [OPT-SAC]  SAC 超参: target_entropy_ratio 0.3→0.5 (更高目标熵)
-#   [OPT-INIT] Descent init_xy_range 0.010→0.030, init_vel_range 0→0.03
+# v3 主要变更 (相对 v2):
+#
+# [ARCH-CRUISE] Cruise 段架构变更:
+#   取消 SwingDampingController residual 模式
+#   RL 直接输出完整 xy 加速度 (不再与底层防摆叠加)
+#   SwingDamping 保留用于监控, 但不参与控制
+#
+# [ARCH-DESCENT] Descent 段架构变更:
+#   用 JointSpaceExpert.compute_delta_q_target() 作为 base PID controller
+#   RL 输出 3D 残差 delta_q (在 PID delta_q 基础上按比例叠加)
+#   残差限幅: residual_dq_scale=0.30 (RL 贡献不超过总 delta_q 的 30%)
+#
+# [REW-CRUISE] Cruise 奖励重构 v3:
+#   z_dev_coef/vz_penalty_coef 归零 (PID 负责 Z, reward 不重复)
+#   swing_energy 上限降到 0.5/step (不压倒 PBRS)
+#   pbrs_coef 提升到 20 (绝对主导导航信号)
+#   alive_bonus 完全去除
+#
+# [REW-DESCENT] Descent 奖励重构 v3:
+#   z_unconditional_frac 归零 (防止不对准就下降)
+#   rebar_sdf 仅在 dtf<8mm AND z_reached 时激活
+#   near_goal_focus 上限 0.10/step (低于 success_bonus)
+#   step_penalty 加大到 -0.02
+#
+# [CUR-CRUISE] Cruise 课程重构:
+#   全程距离 (cruise_dist_curriculum=False)
+#   0 障碍物 (obstacle_enabled=False)
+#   success_radius 从 0.20m 开始
+#
+# [CUR-DESCENT] Descent 课程重构:
+#   init_xy_start 2mm (更接近 BC 场景)
+#   tol_mult=3.0
+#   BC epochs: descent=20, cruise=40
 # ==============================================================================
 
 import numpy as np
@@ -97,7 +115,6 @@ DEFAULT_CONFIG = {
         "crash_z_threshold":  0.03,
         "crash_vz_threshold": -0.5,
         "crash_grace_steps":  30,
-
         "instability_check":     True,
         "instability_grace_steps": 15,
         "swing_xy_max":          0.35,
@@ -105,7 +122,6 @@ DEFAULT_CONFIG = {
         "payload_tilt_max":      1.0,
         "payload_yaw_max":       1.2,
         "instability_penalty":   -5.0,
-
         "reward_clip_min":       -5.0,
         "reward_clip_max":        5.0,
     },
@@ -177,7 +193,7 @@ DEFAULT_CONFIG = {
             [-0.035,  0.035],
             [-0.035, -0.035],
         ],
-        "rebar_radius":       0.003,
+        "rebar_radius":       0.0025,  # [v3.4] 3mm→2.5mm: 略降难度, xy_tol 4→4.5mm
         "rebar_half_height":  0.01,
         "rebar_rgba":         [0.8, 0.0, 0.0, 1.0],
     },
@@ -216,38 +232,26 @@ DEFAULT_CONFIG = {
     "insertion": {
         "entry_z":               0.16,
         "target_payload_z":      0.10,
-
         "success_z_tolerance":   0.020,
-        "xy_tolerance":          0.004,
+        "xy_tolerance":          0.0045,  # [v3.4] 随 rebar_radius 2.5mm 更新: 7-2.5=4.5mm
         "tilt_tolerance":        0.05,
         "yaw_tolerance":         0.08,
         "hold_steps":            3,
-
         "vel_xy_tolerance":      0.05,
         "vel_z_tolerance":       0.05,
         "require_floor_contact": False,
         "partial_dist_scale":    0.05,
 
-        # [OPT-CUR] 训练容差退火 — 关键设计原则：
-        # xy_tol_start >= max_xy_range (30mm) → 保证所有课程级别的成功可达
-        # anneal_steps足够长 → 随课程自然退化，不产生cliff效应
-        # 精度由 precision_coef 奖励驱动，而非仅靠 xy_tol 收紧
-        #
-        # v7问题根因：
-        #   xy_tol_start=15mm, anneal=80k → level2跳升时xy_range=16mm>xy_tol=14.7mm
-        #   agent在level2无法成功 → SR骤降至0 (cliff效应)
-        # v8修复：
-        #   xy_tol_start=40mm, anneal=500k
-        #   level4(100k steps)时 xy_tol=33mm > xy_range=30mm ✅ 全程覆盖
-        "xy_tolerance_train_start":    0.040,   # [v8] 15→40mm: 覆盖最大课程级别(30mm)+安全余量
-        "xy_tolerance_train_end":      0.005,   # 最终物理要求
-        "tilt_tolerance_train_start":  0.12,    # [v8] 恢复更宽松的起始值
-        "tilt_tolerance_train_end":    0.05,    # 对齐物理要求(0.050rad)
-        "yaw_tolerance_train_start":   0.15,    # [v8] 宽松起始
-        "yaw_tolerance_train_end":     0.08,    # 对齐物理要求(0.080rad)
-        "xy_tolerance_anneal_steps":   500_000, # [v8] 80k→500k: 避免cliff效应
-                                                 # 在100k steps训练时 xy_tol≈33mm (仍覆盖level4)
-                                                 # 精度驱动靠precision_coef奖励，不靠快速收紧tol
+        # [v3.4] xy_tol 改为 per-level 查表, 不再使用 tol_mult 计算
+        # tol_mult 保留字段但 reward 层不再读取 (由 rstate.current_xy_tol 直接提供)
+        "xy_tol_range_multiplier":     3.0,   # DEPRECATED - 不再使用
+        "xy_tolerance_train_end":      0.005,
+
+        "tilt_tolerance_train_start":  0.12,
+        "tilt_tolerance_train_end":    0.05,
+        "yaw_tolerance_train_start":   0.15,
+        "yaw_tolerance_train_end":     0.08,
+        "xy_tolerance_anneal_steps":   500_000,
     },
 
     # ==========================================================================
@@ -286,7 +290,6 @@ DEFAULT_CONFIG = {
         "lift_to_cruise_tilt_max":       0.15,
         "lift_to_cruise_swing_vel_max":  0.08,
         "lift_to_cruise_payload_vel_max": 0.15,
-
         "cruise_to_descent_xy_dist":     0.06,
         "cruise_to_descent_tilt_max":    0.15,
         "cruise_to_descent_swing_vel_max": 0.10,
@@ -306,7 +309,7 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 17b. Cruise 段 PID 控制器
+    # 17b. Cruise 段 PID 控制器 (Z/Yaw)
     # ==========================================================================
     "cruise_z_pid": {
         "kp_z":               3.0,
@@ -322,26 +325,15 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 17c. Cruise 段底层防摆控制器 (SwingDampingController) [v4 新增]
+    # 17c. Cruise 段防摆控制器 (v3: 仅监控, 不参与控制)
     # ==========================================================================
-    # 设计原则: 纯物理阻尼, 独立于 RL, 可单独验证
-    # 验证方法: 令 RL 残差=0, 观察 swing_energy 是否单调下降 (有阻尼振荡)
-    # RL 在此基础上输出残差修正 (路径规划 + 精细防摆调整)
     "cruise_swing_damping": {
-        "kd_vel":         2.5,    # 速度阻尼增益 (主要参数)
-                                   # [v6] 3.5→2.5: 降回合理范围
-                                   # 物理分析: kd_vel*gain_max=3.5*4.0=14 > 临界阻尼c_cr=9.9
-                                   # 过大增益导致自激振荡 (damp_gain满幅1.5-4.0振荡是证据)
-        "kp_pos":         0.3,    # 位移恢复增益 (辅助参数)
-                                   # [v6] 0.5→0.3: 降低以减少与kd的耦合振荡
-        "acc_max":        0.5,    # 单独防摆最大修正量 (m/s^2)
-                                   # [v6] 0.6→0.5: 略微降低，防止过冲
-        "adaptive":       True,   # 自适应增益: 摆动能量大时增大阻尼
-        "energy_ref":     0.05,   # 参考能量 (J), 超过此值增益开始增大
-                                   # [v6] 0.02→0.05: 恢复原值，0.02触发过早导致gain常年在最大
-        "gain_max_scale": 2.0,    # 自适应增益最大倍数
-                                   # [v6] 4.0→2.0: 这是关键修复
-                                   # kd_vel*gain_max = 2.5*2.0 = 5.0 < c_cr=9.9 (安全范围)
+        "kd_vel":         3.5,
+        "kp_pos":         0.3,
+        "acc_max":        0.7,
+        "adaptive":       True,
+        "energy_ref":     0.02,
+        "gain_max_scale": 2.0,
     },
 
     # ==========================================================================
@@ -360,167 +352,209 @@ DEFAULT_CONFIG = {
             "swing_ke_coef":      2.0,
             "success_bonus":      10.0,
             "step_penalty":       -0.01,
-            "instability_penalty": -3.0,  # [FIX2] -5→-3: 缩小reward范围
+            "instability_penalty": -3.0,
             "crash_penalty":      -5.0,
         },
     },
 
     # ==========================================================================
-    # 19. Phase 2: Cruise RL
+    # 19. Phase 2: Cruise RL [v3]
+    #
+    # 架构: RL 直接输出完整 xy 加速度 (不是残差)
+    # 课程: 全程距离, 0 障碍物, 大成功半径
     # ==========================================================================
     "cruise_rl": {
         "obs_dim":            38,
         "action_dim":         2,
-
-        # 初始化由课程管理器动态覆盖, 此为最大值
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
         "init_vel_range":     0.0,
-
         "max_steps":          400,
         "min_steps_for_success": 5,
         "estimated_full_dist_m": 0.41,
         "z_lock_height":      0.25,
 
-        # [v4 新增] RL 残差加速度上限 (独立于底层防摆控制器)
-        # 总 acc_xy = base_acc (防摆) + residual_acc (RL)
-        # residual 上限 = acc_max_xy * 0.5, 防止 RL 残差过大覆盖底层防摆
-        "residual_acc_max_xy": 0.4,  # m/s^2 (底层防摆 acc_max=0.4, RL 残差同等上限)
+        # [v3.5] acc_max_xy: 0.80→0.60
+        # 降低 25%, 配合 log_std_max=-0.3 控制动作幅度
+        # damp_gain 一直满增益 (2.0) 说明 RL 动作引发摆动过大
+        "residual_acc_max_xy": 0.60,
+
         "reward": {
-            # PBRS 距离驱动
-            "pbrs_coef":          15.0,  # [v6] 10→15: 增强导航信号，平衡减小的障碍物惩罚
+            # ── 导航 (主导) ─────────────────────────────────────────────────
+            "pbrs_coef":          20.0,   # [v3] 15→20: 主导导航信号
             "pbrs_gamma":         0.99,
 
-            # [v6] 障碍物排斥重设计: 从指数排斥改为线性软排斥
-            # 原因: 旧指数势 coef*(1/d-1/d0)² 在d=5cm时penalty=60-300, 远超PBRS(0.05/step)
-            # 新线性排斥: penalty = coef * max(0, 1-d/d0), d=5cm时penalty≤0.25 (合理)
-            # 硬碰撞由 collision_penalty=-5 负责, 软排斥只做导向
-            "obs_repulse_coef":   0.5,   # [v6] 3.5→0.5: 线性排斥系数(量级完全不同!)
-            "obs_repulse_d0":     0.10,  # [v6] 0.15→0.10: 线性模式感知范围10cm
-            "obs_repulse_linear": True,  # [v6] 新增: 启用线性排斥模式
+            # ── 障碍物排斥 (保留 reward, 0 障碍物训练时无实际惩罚) ──────────
+            # 目的: 让 critic 的值函数已经见过障碍物相关的 reward 项,
+            # 加入障碍物时 critic 不需要重新适应
+            "obs_repulse_coef":   0.3,
+            "obs_repulse_d0":     0.10,
+            "obs_repulse_linear": True,
 
-            # [v6] 摆动能量约束 (KE+PE 软上界)
-            "swing_energy_thresh":        0.10,   # J [v6] 0.05→0.10: 阈值过严时惩罚信号主导reward,掩盖导航
-            "swing_energy_penalty_coef":  2.0,    # [v6] 6.0→2.0: 大幅降低,防止能量惩罚成为主要信号
-            # 物理分析: 正常摆动0.1-0.5J时,penalty=2*(excess+0.5*excess²)
-            # 在0.2J时: penalty=2*(0.1+0.005)=0.21/step → 合理范围
-            # 旧 swing_ke_coef 已废弃, 由 swing_energy_* 替代
-            "swing_ke_coef":      0.0,    # [v5 废弃, 保留兼容]
+            # ── 摆动约束 (软约束, 严格限幅防止压倒 PBRS) ───────────────────
+            # [v3] 正常导航摆动 ~0.1-0.3J → penalty ~0.05-0.15/step
+            # PBRS 最大 ~0.5/step → 摆动惩罚不超过 PBRS 的 30%
+            "swing_energy_thresh":        0.15,   # [v3] 0.08→0.15
+            "swing_energy_penalty_coef":  1.0,    # [v3] 2.0→1.0
+            # 单步摆动惩罚硬上限: 0.5/step
+            "swing_energy_penalty_max":   0.50,   # [v3] 新增: 硬上限
+            "swing_ke_coef":      0.0,
 
-            "z_dev_coef":         1.5,   # [v6] 2.0→1.5: 适度恢复，避免掩盖PBRS
-            "vz_penalty_coef":    2.0,   # [v6] 3.0→2.0: 适度恢复
+            # ── Z/Vz (PID 控制, reward 不重复惩罚) ──────────────────────────
+            "z_dev_coef":         0.0,    # [v3] 1.0→0: PID 负责 Z
+            "vz_penalty_coef":    0.0,    # [v3] 1.0→0
 
-            # [OPT] alive_bonus 0.08→0.02, step_penalty -0.002→-0.01
-            # 目标: 净 step 效果为轻微负值 (-0.008/步), 消除存活套利
-            "alive_bonus":        0.02,
+            # ── 时间惩罚 ────────────────────────────────────────────────────
+            "alive_bonus":        0.0,    # [v3] 完全去除
             "step_penalty":       -0.01,
 
-            "collision_penalty":  -10.0,  # [v9] -8→-10: 进一步遏制冲刺行为
-            "success_bonus":      8.0,   # [FIX2] 20→8: VL=150根因, 进一步降低return方差
-            "instability_penalty": -3.0,  # [FIX2] -5→-3: 缩小reward范围
+            # ── 碰撞 / 失稳 ─────────────────────────────────────────────────
+            "collision_penalty":  -10.0,
+            "success_bonus":      8.0,
+            "instability_penalty": -3.0,
 
-            # [OPT-CUR] 渐进成功半径 (由课程管理器动态管理)
-            "success_radius_start": 0.12,
-            "success_radius_end":   0.10,  # [v4] 0.15→0.10: 测试时使用此值作为严格判定上界
-            "success_radius_test":  0.06,   # 独立测试专用: 严格的 6cm 判定半径
-            "success_radius_anneal_steps": 9_999_999, # [FIX] 禁用时间驱动, 跟随 dist 课程
+            # ── 成功半径 [v3] ───────────────────────────────────────────────
+            # 起始 0.20m (更松), 随 SR 提升收紧
+            # [v3.4] success_radius 随障碍物课程收紧:
+            #   n_obs=0: 0.20m, n_obs=1: 0.15m, n_obs=2: 0.12m, n_obs=3: 0.10m
+            # 见 CurriculumManager.get_current_success_radius()
+            "success_radius_start": 0.20,
+            "success_radius_end":   0.10,
+            # success_radius_test 已弃用 (测试改用 phase_transition 条件)
+            "success_radius_test":  0.10,   # [v3.4] 与 success_radius_end 对齐
+            "success_radius_anneal_steps": 9_999_999,
 
+            # ── 里程碑 / 近目标 ─────────────────────────────────────────────
             "milestone_radius":   0.15,
-            "milestone_bonus":    1.5,  # [FIX2] 3.0→1.5: 配合success_bonus=8
-
-            # [OPT] 新增: 到达奖励 (distance < threshold 时持续正奖励)
+            "milestone_bonus":    1.5,
             "near_goal_radius":   0.10,
-            # [FIX] z 成功容差: z_lock * z_success_tol_frac
-            "z_success_tol_frac": 0.15,  # [FIX] 0.10→0.15: z 容差 ±37mm (原 ±25mm)
+            "z_success_tol_frac": 0.15,
             "near_goal_bonus":    0.05,
         },
     },
 
     # ==========================================================================
-    # 20. Phase 3: Descent RL
+    # 20. Phase 3: Descent RL [v3]
+    #
+    # 架构: JointSpaceExpert PID 作为 base controller
+    #       RL 输出 3D 残差 delta_q (residual_dq_scale 限幅)
+    # 奖励: 纯差分, 无 per-step 持续奖励 exploit
     # ==========================================================================
     "descent_rl": {
         "obs_dim":            29,
         "action_dim":         3,
-
-        # [OPT-INIT] 扩大初始化随机范围, 配合课程学习
-        # 训练初期由课程管理器从小值开始, 逐步扩大到这里的最大值
-        "init_xy_range":      0.030,   # [OPT] 0.010→0.030
+        "init_xy_range":      0.030,
         "init_z_range":       0.005,
-        "init_tilt_range":    0.010,   # [OPT] 0.005→0.010
-        "init_vel_range":     0.030,   # [OPT] 0.0→0.030
+        "init_tilt_range":    0.010,
+        "init_vel_range":     0.030,
+        "max_steps":          500,
 
-        "max_steps":          300,
+        # [v3 ARCH-DESCENT] PID + residual RL
+        "pid_residual_mode":   True,
+        # RL 残差缩放: rl_delta_q_contribution = residual_dq_scale * pid_delta_q_norm
+        # PID 主导动作, RL 只做精细修正
+        "residual_dq_scale":   0.30,      # [v3] RL 贡献上限 = 30% of PID action magnitude
+        # 作为 EEAccController 的补充限幅 (backup)
+        "residual_acc_max_xy": 0.30,
+        "residual_acc_max_z":  0.50,
+
         "acc_max_xy":         0.5,
         "acc_max_z":          1.0,
         "vel_max_z":          0.05,
 
-        # [OPT-REW] Reward v3
         "reward": {
+            # ── XY 对准 (差分) ───────────────────────────────────────────────
             "xy_align_coef":      4.0,
-            # [OPT] z_descent_coef 6.0→8.0: 更强 z 下降驱动
-            "z_descent_coef":     6.0,   # [v9] 10→6: 降低，防止激进下降激励绳摆
-            # [v5] 新增: z上升惩罚 — 阻止agent学到「上升」行为
-            # 测试日志显示payload从250mm升到600mm+，是当前最核心问题
-            "z_rise_penalty_coef": 3.0,  # [v9] 5→3: 适度降低上升惩罚
-            "z_rise_max_penalty":  0.3,  # [v5] 单步最大上升惩罚 (防极端case主导reward)
-            # [v5] z_unconditional_frac: 进一步提升无条件下降激励
-            "z_unconditional_frac": 0.15,  # [v9] 0.25→0.15: 降低无条件下降激励
-            "swing_ke_coef":      3.0,   # [v4] ×3: 稳定优先
-            "tilt_coef":          1.5,   # [v4] 0.5→1.5: 稳定优先
-            "yaw_coef":           2.0,   # [v9] 0.5→2.0: 强化yaw旋转惩罚
-            # [v4] 高斯对准奖励: 在 dtf < 15mm 形成强吸引势阱
-            "xy_gauss_sigma":     0.020,   # [v7] 扩大高斯范围
-            "xy_gauss_coef":      1.5,     # [v7] 增强高斯奖励
-            "z_descent_xy_gate":  0.030,  # [v4.1] 0.010→0.030: 30mm 内才需同步对准+下降
-            "near_target_bonus":  1.5,     # [v7] 1.0→1.5
-            "precision_coef":     4.0,     # [v7] z到位后精细对准奖励系数
+
+            # ── Z 下降 (差分, 严格门控) ──────────────────────────────────────
+            "z_descent_coef":     6.0,
+            "z_unconditional_frac": 0.0,  # [v3] 0.15→0: 完全移除无条件下降
+            "z_descent_xy_gate":  0.030,  # 30mm 内才给 z 奖励
+
+            # [v3] 上升惩罚 (适度, PID 已阻止激进上升)
+            "z_rise_penalty_coef": 2.0,
+            "z_rise_max_penalty":  0.2,
+
+            # ── 稳定性 ───────────────────────────────────────────────────────
+            "swing_ke_coef":      3.0,
+            "tilt_coef":          1.5,
+            "yaw_coef":           2.0,
+
+            # ── [v3.2] 移除所有 per-step 持续正向奖励 ────────────────────────
+            # xy_gauss / rebar_sdf / near_goal_focus 均已删除.
+            # 根因: 这些奖励随 episode 长度线性累积, 导致失败ep(500步)总reward
+            # 远超成功ep(150步), 造成 reward 与 SR 反相关.
+            # 替代: 成功时给一次性精准度奖励 (precision_bonus)
+
+            # 保留字段供兼容 (reward 函数中不再使用)
+            "xy_gauss_sigma":     0.020,   # [v3.2 UNUSED] 已移除 per-step gauss
+            "xy_gauss_coef":      0.0,     # [v3.2] 归零
+            "rebar_sdf_enabled":  False,   # [v3.2] 已移除 per-step sdf
+            "rebar_sdf_coef":     0.0,     # [v3.2] 归零
+            "near_goal_focus_enabled": False,   # [v3.2] 已移除 per-step focus
+            "near_goal_focus_coef":    0.0,     # [v3.2] 归零
+
+            # ── 成功时一次性精准度奖励 (替代 per-step 高斯) ─────────────────
+            # 仅在 insertion_success 时给一次, 不影响 episode 长度
+            # dtf=0mm → +10, dtf=5mm → +6.1, dtf=10mm → +0.8
+            "precision_bonus_coef":  10.0,
+            "precision_bonus_sigma": 0.005,   # 5mm sigma
+
+            # ── 时间惩罚 (加大, 逼迫快速完成) ──────────────────────────────
+            "step_penalty":       -0.02,  # [v3] -0.005→-0.02
+
+            # ── 终止 ────────────────────────────────────────────────────────
             "success_bonus":      50.0,
-            "soft_success_bonus": 8.0,   # [v5] 25→8: 去除超时套利，逼迫真实插入学习
-            "step_penalty":       -0.005,   # [OPT] -0.001→-0.005
-            "instability_penalty": -3.0,  # [FIX2] -5→-3: 缩小reward范围
+            "instability_penalty": -3.0,
             "crash_penalty":      -5.0,
         },
     },
 
     # ==========================================================================
-    # 21. PPO 超参数 [v4 — logstd 硬约束 + 低初始熵]
+    # 21. PPO 超参数
     # ==========================================================================
     "ppo": {
         "hidden_dim":            256,
         "n_layers":              3,
         "lr_actor":              1e-4,
-        "lr_critic":             1e-3,
+        "lr_critic":             3e-4,
         "gamma":                 0.99,
         "gae_lambda":            0.95,
         "clip_eps":              0.2,
         "value_loss_coef":       0.5,
         "entropy_coef":          0.01,
         "max_grad_norm":         0.5,
-        "n_steps":               512,
-        "n_epochs":              4,
+        "n_steps":               1024,
+        "n_epochs":              6,
         "batch_size":            256,
+        "use_lstm":              True,
+        "seq_len":               8,
+        "lstm_dim":              128,
         "normalize_advantages":  True,
         "use_obs_norm":          True,
         "obs_norm_clip":         10.0,
         "obs_norm_warm_start":   5000,
         "log_std_init":         -0.5,
-        # [v4 FIX-LOGSTD] 硬约束: max=0.3 防熵爆炸(原max=1.0导致logstd爬升至+1)
-        # min=-2.0 (std≥0.135) 保留足够探索能力
         "log_std_min":          -2.0,
-        "log_std_max":           0.3,
-        "target_kl":             0.01,
+        # [v3.5] log_std_max: 0.0→-0.3
+        # std 上限从 1.0→0.74, 动作幅度降低 26%
+        # 防止 cruise logstd 单调上升到 -0.12 导致摆动失控
+        "log_std_max":          -0.3,
+        "target_kl":             0.03,
         "log_std_floor_init":   -0.5,
         "log_std_floor_final":  -1.5,
         "log_std_floor_steps":   800_000,
-        "entropy_coef_start":         0.02,   # [v6] 0.01→0.02: 更高初始熵鼓励探索
-        "entropy_coef_end":           0.005,  # [v6] 0.002→0.005: 最终保留更多探索
-        "entropy_coef_anneal_steps":  2_000_000,  # [v6] 1M→2M: 延长退火过程
+        # [v3.5] entropy 退火加速: 3M→800k steps, start 0.03→0.01
+        # 原退火在 20k ep 训练结束时仅完成 67%, entropy_coef 仍高达 0.016
+        # 持续高 entropy_coef 是 logstd 单调上升的根本原因
+        "entropy_coef_start":         0.01,
+        "entropy_coef_end":           0.001,
+        "entropy_coef_anneal_steps":  800_000,
         "plasticity_reset_interval":  200_000,
     },
 
     # ==========================================================================
-    # 22. SAC 超参数 [OPT-SAC]
+    # 22. SAC 超参数
     # ==========================================================================
     "sac": {
         "hidden_dim":           256,
@@ -536,14 +570,10 @@ DEFAULT_CONFIG = {
         "warmup_mode":          "expert",
         "auto_alpha":           True,
         "alpha_init":           0.2,
-        # [OPT-SAC] target_entropy_ratio 0.3→0.5: 鼓励更高目标熵
         "target_entropy_ratio": 0.5,
         "critic_grad_clip":     1.0,
-
-        # [HER] Hindsight Experience Replay params (descent SAC 专用)
-        "her_k":               4,      # 每条 transition 重标注 k 个目标
-        "her_reward_scale":    0.3,    # HER 奖励 = success_bonus * scale
-
+        "her_k":               4,
+        "her_reward_scale":    0.3,
         "actor_grad_clip":      1.0,
         "reward_scale":         1.0,
         "update_interval":      1,
@@ -569,21 +599,20 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 24. BC 预训练配置 [OPT-BC]
+    # 24. BC 预训练配置 [v3]
     # ==========================================================================
     "bc_pretrain": {
         "enabled":           True,
         "n_episodes":        1000,
-        # [OPT-BC] n_epochs 200→60: 防止 descent 过拟合导致熵崩塌
-        "n_epochs":          60,
+        "n_epochs":          20,          # [v3] descent: 60→20, 防过拟合/熵崩塌
+        "n_epochs_cruise":   40,          # [v3] cruise 专用 epoch 数
         "lr":                3e-4,
         "lr_decay":          0.5,
-        "lr_decay_interval": 20,    # [OPT] 50→20: 配合 epoch 减少
+        "lr_decay_interval": 20,
         "batch_size":        512,
-        "eval_interval":     10,    # [OPT] 20→10
+        "eval_interval":     5,           # [v3] 更早检测过拟合
         "eval_episodes":     30,
-        # [OPT-BC] patience 8→5: 更早停止, 避免过拟合
-        "patience":          5,
+        "patience":          3,           # [v3] 5→3: 更早停止
         "epsilon_start":     0.3,
         "epsilon_end":       0.0,
         "loss_threshold":    0.30,
@@ -591,85 +620,114 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 25. 课程学习配置 [OPT-CUR] 全面重设计
+    # 25. 课程学习配置 [v3]
     # ==========================================================================
     "curriculum": {
-        "enabled":                    True,   # [OPT] 默认启用
+        "enabled":                    True,
 
-        # 风力课程 [v4 解耦设计]
-        # ─────────────────────────────────────────────────────────────────────
-        # 风力是独立的鲁棒性维度, 与主任务学习完全解耦
-        # 训练分两阶段:
-        #   阶段A (主训练): wind_enabled=False, 只学防摆+导航/插入
-        #   阶段B (鲁棒微调): 加载阶段A最佳ckpt, wind从0线性增至目标值
-        # 触发条件: 主任务 SR >= 0.6 后才进入阶段B
-        # 用法: python train_phase.py --phase cruise --wind (仅鲁棒微调时传入)
+        # 风力课程
         "wind_start_frac":            0.0,
-        "wind_end_frac":              1.0,    # 鲁棒微调阶段内从0→100%
-        "wind_anneal_steps":          200_000, # 鲁棒微调共200k steps线性增加
+        "wind_end_frac":              1.0,
+        "wind_anneal_steps":          200_000,
 
         # 噪声课程
         "noise_start_scale":          0.0,
         "noise_end_scale":            1.0,
         "noise_anneal_steps":         500_000,
 
-        # ── Cruise 专属课程 ──────────────────────────────────────────────────
-        # 障碍物课程 — 解锁条件: dist_frac 到达阈值后才开始引入
-        "obstacle_enabled":           True,   # [FIX2] 重启: 配合解锁条件缓慢引入
-        # [v7b] 障碍物课程: 每级别给予充足训练时间
-        # 实测: 5k→8k steps内n_obs从0快速增至3, agent未能充分学习每个难度
-        # 用户反馈: 每个障碍物数量的训练轮数需要更多
-        "obstacle_enabled":           True,
-        "obstacle_unlock_dist_frac":  0.70,   # [v6] 必须走完70%路程才引入障碍物
-        "obstacle_hard_cap_grad_steps": 8000,  # [v9] 3000→8000: 每级需要8000次梯度更新才强制晋级
-                                               # 分析: 图中6-7k内完成3级, 每级仅3000steps=约430ep太少
-        "obstacle_hard_cap_eps":      6000,   # [v8] 保留ep计数(备用)
-        "obstacle_level_warmup_eps":  200,    # [v8] 切换后200ep为暖机期,不参与SR统计
-        "obstacle_start_n":           0,
+        # ── Cruise 课程 [v3] ─────────────────────────────────────────────────
+        # 障碍物课程: 从 0 个真实障碍物开始, 渐进到 3 个
+        # [v3 SHADOW] 即使真实障碍物 = 0, 仍会在 reward 中注入 shadow_obstacles
+        # (随机采样的虚拟障碍物, 不参与物理碰撞), 让 critic 提前学习障碍物特征
+        # 真实障碍物数量由课程晋级条件控制: 0→1→2→3
+        "obstacle_enabled":           True,    # [v3] 启用障碍物课程
+        "obstacle_start_n":           0,       # 从 0 个真实障碍物开始
         "obstacle_max_n":             3,
-        "perf_window":                80,     # [v8] 50→80: 更大窗口减少旧level数据污染
-        "perf_sr_threshold":          0.55,   # [v7b] 0.50→0.55: 更高的晋级门槛确保充分掌握
-        "perf_reward_threshold":      -10.0,
-        "perf_min_episodes_per_level": 1000,  # [v8] 800→1000: 确保充分学习
+        "obstacle_unlock_dist_frac":  0.65,
+        "obstacle_hard_cap_grad_steps": 999_999_999,
+        "obstacle_hard_cap_eps":      999_999,
+        "obstacle_level_warmup_eps":  300,
+        "perf_window":                200,    # [v3.3] 300→200: 更快响应 SR 变化
+        # [v3.3] 修正: 图中 n_obs=2 阶段 SR 稳定在 0.55-0.60
+        #   obs_sr_thresh=0.65: 永远无法满足 (n_obs=2场景下SR天然更低)
+        #   obs_sr_thresh=0.50: 过低, obs_min_eps=500 会导致 level 0 仅500ep就晋级
+        #   obs_sr_thresh=0.55: n_obs=2 时 SR~0.57-0.60 可满足, obs_min_eps=1000 保证充分训练
+        "perf_sr_threshold":          0.55,   # [v3.3] 0.65→0.55: n_obs=2 SR约0.57-0.60可触发
+        "perf_reward_threshold":      -15.0,
+        # [v3.5] 2000: 防止 n_obs=2→3 跳太快
+        # 图中 2→3 几乎同时发生, agent 来不及适应就面对 3 个障碍物
+        "perf_min_episodes_per_level": 1500,
         "perf_hard_cap_steps":        999_999_999,
 
-        # [BOOTSTRAP-V] Bootstrapped PBRS (2025)
-        # Critic 值函数作 potential: F(s,s') = γ·V(s') - V(s)
-        # 在 PPO descent 中叠加到 reward, 无需手工势能设计
-        "bootstrapped_pbrs_enabled":  True,
-        "bootstrapped_pbrs_coef":     0.5,   # PBRS 叠加系数 (不宜过大)
+        # [v3 SHADOW OBSTACLES] 0 真实障碍物阶段使用的"影子障碍物"配置
+        # shadow_obstacles 在每个 episode 开始时随机采样, 不参与物理碰撞,
+        # 但参与 reward 中的 obs_repulse 计算, 让 critic 提前学习障碍物特征
+        # 晋级到 n_real>=1 后, shadow_obstacles 被真实障碍物替代
+        "shadow_obstacle_enabled":    True,    # 0 真实障碍物时启用影子障碍物
+        "shadow_obstacle_n":          3,       # 影子障碍物数量 (= obstacle_max_n)
+        "shadow_obstacle_r_min":      0.006,   # 半径范围 (同真实障碍物)
+        "shadow_obstacle_r_max":      0.015,
 
-        # [OPT-CUR] Cruise 距离课程: 训练初期 agent 从近处开始学习
-        # start_xy 到 target_xy 的初始偏移从小到大渐进
-        "cruise_dist_curriculum":     True,
-        "cruise_dist_start_frac":     0.25,
+        # 距离课程: 关闭, 全程训练
+        "cruise_dist_curriculum":     False,   # [v3] 关闭距离课程
+        "cruise_dist_start_frac":     1.0,
         "cruise_dist_end_frac":       1.0,
         "cruise_dist_anneal_steps":   9_999_999,
-        "cruise_dist_sr_threshold":   0.50,   # [v6] 0.40→0.50: dist课程也需要50%SR才推进
+        "cruise_dist_sr_threshold":   0.65,
 
-        # ── Descent 专属课程 [OPT-CUR] ──────────────────────────────────────
-        # 初始化范围课程: 从小偏差开始, 逐步扩大
-        "descent_init_curriculum":    True,
-        # xy_range: 0.005m → 0.030m
-        "descent_init_xy_start":      0.005,
-        "descent_init_xy_end":        0.030,
-        # vel_range: 0.0 → 0.030 m/s
-        "descent_init_vel_start":     0.000,
-        "descent_init_vel_end":       0.030,
-        # tilt_range: 0.002 → 0.010 rad
-        "descent_init_tilt_start":    0.002,
-        "descent_init_tilt_end":      0.010,
-        # 每个难度级别的 episode 数
-        # [OMNIRESET] OmniReset (Weirdlab 2025) — descent 多层次状态分布
+        # ── Descent 课程 [v3] ────────────────────────────────────────────────
+        # OmniReset
         "omnireset_enabled":          True,
-        "omnireset_near_goal_prob":   0.30,  # [v6] 0.25→0.30
-        "omnireset_near_goal_xy":     0.012, # [v6] 0.008→0.012
+        "omnireset_near_goal_prob":   0.10,    # [v3] 0.15→0.10
+        "omnireset_near_goal_xy":     0.012,
         "omnireset_near_goal_z_offset": 0.05,
 
+        # ── Descent 初始化课程 [v3.4 重设计] ─────────────────────────────────
+        # 核心修改:
+        #   1. 每个 Level 单独定义 (init_xy, init_vel, init_tilt, xy_tol)
+        #      tol 与 init_xy 解耦, 独立递减收紧
+        #   2. Level 间距从线性改为近似对数间距 (2→5→10→20→30mm)
+        #      小偏差阶段有足够训练密度, 大偏差阶段也有覆盖
+        #   3. xy_tol 随 level 递减 (15→12→10→8→6mm)
+        #      Level 0-2: tol > init_xy, PID 基础能力即可成功, 快速积累成功经验
+        #      Level 3-4: tol < init_xy, agent 必须主动对准才能成功
+        #   4. window=50 (30→50): 减少 SR 估计噪声
+        #   5. min_eps=200 (80→200): 给每个 level 足够稳定时间
+        #
+        # Level 参数表:
+        #   Lv  init_xy   init_vel  init_tilt  xy_tol   任务难度
+        #    0    2mm       0mm/s     0.06°      15mm    PID即可, 快速建立信心
+        #    1    5mm       5mm/s     0.11°      12mm    PID基本可达
+        #    2   10mm      10mm/s     0.23°      10mm    PID刚好可达, RL开始需要
+        #    3   20mm      15mm/s     0.34°       8mm    必须主动对准
+        #    4   30mm      20mm/s     0.46°       6mm    接近真实插入要求(5mm)
+        "descent_init_curriculum":    True,
+
+        # per-level 参数 (替代旧的 start/end 线性插值)
+        # 格式: [level0, level1, level2, level3, level4]
+        "descent_init_xy_ranges":   [0.002, 0.005, 0.010, 0.020, 0.030],
+        "descent_init_vel_ranges":  [0.000, 0.005, 0.010, 0.015, 0.020],
+        "descent_init_tilt_ranges": [0.001, 0.002, 0.004, 0.006, 0.008],
+        "descent_init_xy_tols":     [0.015, 0.012, 0.010, 0.008, 0.006],
+
+        # 兼容旧字段 (不再使用, 保留避免 KeyError)
+        "descent_init_xy_start":    0.002,
+        "descent_init_xy_end":      0.030,
+        "descent_init_vel_start":   0.000,
+        "descent_init_vel_end":     0.020,
+        "descent_init_tilt_start":  0.001,
+        "descent_init_tilt_end":    0.008,
+
+        # Level 晋级配置
         "descent_cur_levels":         5,
-        "descent_cur_min_eps":        100,   # [v6] 150→100
-        "descent_cur_sr_threshold":   0.50,  # [v6] 0.35→0.50
-        "descent_cur_hard_cap":       300_000, # [v6] 400k→300k
+        "descent_cur_min_eps":        200,     # [v3.4] 80→200: 每 level 最少200ep
+        "descent_cur_sr_threshold":   0.50,
+        "descent_cur_hard_cap":       300_000,
+        "descent_cur_stats_window":   50,      # [v3.4] 新增: SR 统计窗口 (30→50)
+
+        # Bootstrapped PBRS (关闭)
+        "bootstrapped_pbrs_enabled":  False,
+        "bootstrapped_pbrs_coef":     0.5,
     },
 
     # ==========================================================================

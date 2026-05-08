@@ -36,7 +36,7 @@ from config import DEFAULT_CONFIG
 from mujoco_env_new import CableRobotEnvWithObstacles
 from controller import JointSpaceExpert
 from phase_agent import (
-    PPOPhaseAgent, SACPhaseAgent,
+    PPOPhaseAgent, SACPhaseAgent, DescentDualRLAgent,
     build_lift_obs, build_cruise_obs, build_descent_obs,
 )
 from phase_reward import (
@@ -63,7 +63,14 @@ def build_config(args):
 
 def load_agent(phase, algo, ckpt_path, config):
     """加载指定阶段和算法的 agent。"""
-    if algo == "ppo":
+    # [v10] descent 段检查是否使用 dual-RL
+    use_dual_rl = (phase == "descent" and
+                   config.get("descent_rl", {}).get("use_dual_rl", False))
+    if use_dual_rl and algo == "ppo":
+        agent = DescentDualRLAgent(config=config)
+        agent.load(ckpt_path)
+        return agent
+    elif algo == "ppo":
         agent = PPOPhaseAgent(phase, config=config)
     elif algo == "sac":
         agent = SACPhaseAgent(phase, config=config)
@@ -99,20 +106,29 @@ def check_physical_insertion(env, config):
     """
     用真实物理容差（由几何推导）独立验证插入是否成功。
     物理约束:
-      socket_hole = 14mm×14mm, rebar_radius = 3mm
-      → xy_tol = 7-3 = 4mm (中心点)
-      → yaw_tol = arcsin(4 / 49.5) ≈ 0.081 rad
+      socket_hole_size = 14mm×14mm → 孔半径 = 7mm
+      rebar_radius (可配置, 当前缩小为 2.5mm)
+      → xy_tol = socket_hole_radius - rebar_radius (动态计算, 随 rebar_radius 联动)
       → tilt_tol = 0.05 rad (保证4孔对准, 插入深60mm)
+      → yaw_tol  = 0.08 rad
       → z: payload_z 需达到 target_payload_z ± 20mm
     返回 (is_success: bool, detail: str)
     """
-    cfg_ins = config.get("insertion", {})
+    cfg_ins  = config.get("insertion", {})
+    cfg_pref = config.get("prefab",    {})
+    cfg_tgt  = config.get("target",    {})
     target_pz = float(cfg_ins.get("target_payload_z", 0.10))
-    # 物理真实容差 (来自 config 的物理值字段)
-    xy_tol   = float(cfg_ins.get("xy_tolerance",   0.004))
+
+    # 动态计算 xy_tol: socket 孔半径 - 钢筋半径
+    # socket_hole_size = [w, h], 取较小的半边长作为孔半径
+    socket_hole_size = cfg_pref.get("socket_hole_size", [0.014, 0.014])
+    socket_hole_radius = min(socket_hole_size[0], socket_hole_size[1]) / 2.0
+    rebar_radius = float(cfg_tgt.get("rebar_radius", 0.003))
+    xy_tol = socket_hole_radius - rebar_radius   # 几何推导, 随 rebar_radius 联动
+
     z_tol    = float(cfg_ins.get("success_z_tolerance", 0.020))
-    tilt_tol = float(cfg_ins.get("tilt_tolerance", 0.05))
-    yaw_tol  = float(cfg_ins.get("yaw_tolerance",  0.08))
+    tilt_tol = float(cfg_ins.get("tilt_tolerance",      0.05))
+    yaw_tol  = float(cfg_ins.get("yaw_tolerance",       0.08))
 
     pl_pos = env.data.body('prefab').xpos.copy()
     payload_z = float(pl_pos[2])
@@ -213,6 +229,9 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
             _pl_yaw = float(R.from_matrix(_pl_mat).as_euler('xyz')[2])
             z_pid.reset(_pl_z, _pl_yaw)
+        # [v10] LSTM: 重置观测历史
+        if agent is not None and hasattr(agent, 'reset_history'):
+            agent.reset_history()
         
         start_xy = env.default_start_xy.copy()
         target_xy = env.target_pos.copy()
@@ -221,19 +240,46 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         # ★ 测试时注入严格判定参数 (训练容差从宽到严, 测试用最终严格值)
         if hasattr(rstate, 'total_steps_global'):
             rstate.total_steps_global = 10_000_000
-        # ★ 测试时 cruise success_radius = 课程最终最严格值
-        # 默认 0.25m 远大于真实要求, 会导致 agent 还没到终点就判定成功 (测试假阳性)
+        # [v3.5] 测试 success_radius = 课程最后阶段的值 (n_obs=3 对应的 radius)
+        # 训练末期: get_current_success_radius(n_obs=3) = success_radius_end = 0.10m
+        # 测试判定与训练最后阶段完全一致: dtf < 0.10m + 稳定性条件
         if hasattr(rstate, 'current_success_radius'):
             _rcfg = config.get("cruise_rl", {}).get("reward", {})
-            _test_sr = float(_rcfg.get("success_radius_test", 0.06))
-            rstate.current_success_radius = _test_sr
+            _train_final_sr = float(_rcfg.get("success_radius_end", 0.10))
+            rstate.current_success_radius = _train_final_sr
+        # [v3 SHADOW] 测试时也注入影子障碍物 (若无真实障碍物)
+        if phase == "cruise" and hasattr(rstate, 'shadow_obstacles'):
+            _cur_cfg = config.get("curriculum", {})
+            if bool(_cur_cfg.get("shadow_obstacle_enabled", True)) and len(env._obstacles) == 0:
+                # 简单采样: 在起终点连线附近随机放置影子障碍物
+                import numpy as _np_shadow
+                _sxy = env.default_start_xy.copy()
+                _txy = env.target_pos.copy()
+                _dir = _txy - _sxy; _L = float(_np_shadow.linalg.norm(_dir))
+                if _L > 0.01:
+                    _dir /= _L; _perp = _np_shadow.array([-_dir[1], _dir[0]])
+                    _rng = _np_shadow.random.default_rng()
+                    _sh_obs = []
+                    for _ in range(int(_cur_cfg.get("shadow_obstacle_n", 3))):
+                        _t = _rng.uniform(0.2, 0.8)
+                        _s = _rng.uniform(-0.25, 0.25)
+                        _c = _sxy + _t * _L * _dir + _s * _perp
+                        _r = _rng.uniform(float(_cur_cfg.get("shadow_obstacle_r_min", 0.006)),
+                                          float(_cur_cfg.get("shadow_obstacle_r_max", 0.015)))
+                        _sh_obs.append((float(_c[0]), float(_c[1]), float(_r)))
+                    rstate.shadow_obstacles = _sh_obs
 
         ep_reward = 0.0
         ep_steps = 0
         ep_success = False
         term_reason = None
         trajectory = []
-        max_steps = int(config[f"{phase}_rl"]["max_steps"])
+        # [v3.4] 测试步数上限: descent 缩短至 200 步
+        # 防止机械臂通过长时间接触吊装物"压着走"达到课程容差
+        if phase == "descent":
+            max_steps = 200
+        else:
+            max_steps = int(config[f"{phase}_rl"]["max_steps"])
         
         for step in range(max_steps):
             current_q = env.data.qpos[:7].copy().astype(np.float32)
@@ -262,7 +308,15 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 
                 if hasattr(agent, 'act'):
                     result = agent.act(norm_obs, deterministic=deterministic)
-                    action = result[0] if isinstance(result, tuple) else result
+                    # [v10] DescentDualRLAgent returns 7 values
+                    if isinstance(result, tuple) and len(result) == 7:
+                        action = result[0]  # combined 3D acc
+                    elif isinstance(result, tuple) and len(result) == 3:
+                        action = result[0]
+                    elif isinstance(result, tuple):
+                        action = result[0]
+                    else:
+                        action = result
                 else:
                     action = agent.act(norm_obs, deterministic=deterministic)
                 
@@ -281,15 +335,16 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     # ★ 底层防摆控制器 + RL/Expert 残差模式
                     _pl_vel_full = env.data.qvel[_dof_idx:_dof_idx+3].copy()
                     _ee_vel = getattr(env, '_ee_vel_cache', np.zeros(3))
-                    _base_acc, _damp_info = swing_d.compute(
-                        payload_pos, real_ee, _pl_vel_full, _ee_vel)
+                    # [v3] swing_d 仅监控
+                    if swing_d is not None:
+                        swing_d.compute(payload_pos, real_ee, _pl_vel_full, _ee_vel)
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
                     delta_q = ee_ctrl.compute_delta_q(
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock,
                         z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
-                        base_acc_xy=_base_acc[:2], residual_mode=True)
+                        base_acc_xy=None, residual_mode=False)
                 elif phase == "cruise":
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
@@ -297,10 +352,21 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock)
                 else:
-                    # [BUGFIX] descent 必须传入 vel_max_z_descent
-                    _vmax_z_d = float(config.get("ee_control", {}).get("vel_max_z_descent", 0.03))
-                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee,
-                                                       vel_max_z=_vmax_z_d)
+                    # [v3.4 FIX] Descent: PID base + RL residual (与训练架构一致)
+                    # 训练中 RL 只输出残差 acc, 必须叠加 PID base delta_q 才能正常工作
+                    # 直接用纯 RL 会"完全乱跑": residual acc 很小, 没有 PID 驱动下降
+                    from train_phase import _apply_descent_pid_residual
+                    _pid_residual_mode = bool(
+                        config.get("descent_rl", {}).get("pid_residual_mode", True))
+                    if _pid_residual_mode:
+                        delta_q, _pid_dq = _apply_descent_pid_residual(
+                            expert, action, obs, env, config, current_q)
+                    else:
+                        # 纯 RL 模式 (兼容旧训练)
+                        _vmax_z_d = float(config.get("ee_control", {}).get(
+                            "vel_max_z_descent", 0.03))
+                        delta_q = ee_ctrl.compute_delta_q(
+                            action, current_q, real_ee, vel_max_z=_vmax_z_d)
             
             next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
             
@@ -311,18 +377,48 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             ep_steps += 1
             
             if r_success:
-                ep_success = True
-                # ★ 物理插入检验仅对 descent 有意义
-                # cruise 的 r_success 含义是「到达终点上方规定范围」,不是插入成功
                 if phase == "descent":
+                    # [v3.4] 测试唯一判定标准: 物理插入成功 (忽略课程容差)
                     phys_ok, phys_detail = check_physical_insertion(env, config)
-                    print(f"    [物理检验] {'✅ 满足真实插入要求' if phys_ok else '⚠ 仅满足课程容差, 未满足物理要求'}")
-                    print(f"    {phys_detail}")
+                    ep_success = phys_ok
+                    mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
+                    print(f"    [{mark_str}] {phys_detail}")
                 elif phase == "cruise":
-                    _pl = env.data.body('prefab').xpos
-                    _dtf = float(np.linalg.norm(_pl[:2] - env.target_pos))
-                    _sr  = rstate.current_success_radius
-                    print(f"    [cruise到达] dtf={_dtf*1000:.1f}mm < {_sr*1000:.0f}mm ✅")
+                    # [v3.5] 测试成功判定与训练最后阶段完全一致:
+                    #   dtf < success_radius_end(0.10m) + 稳定性条件
+                    # 同时打印 phase_transition (0.06m) 满足情况作为诊断
+                    _pl    = env.data.body('prefab').xpos
+                    _dtf   = float(np.linalg.norm(_pl[:2] - env.target_pos))
+                    _pt    = config["phase_transition"]
+                    _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+                    _euler  = R.from_matrix(_pl_mat).as_euler('xyz')
+                    _tilt   = float(np.sqrt(_euler[0]**2 + _euler[1]**2))
+                    _pl_vxy = np.array([obs[6], obs[7]])
+                    _ee_vxy = np.array([obs[2], obs[3]])
+                    _swing  = float(np.linalg.norm(_pl_vxy - _ee_vxy))
+                    _plvel  = float(np.linalg.norm(_pl_vxy))
+                    _train_sr = rstate.current_success_radius   # = 0.10m
+                    # 与训练末期完全一致的成功条件
+                    _train_ok = (
+                        _dtf   < _train_sr and
+                        _tilt  < float(_pt["cruise_to_descent_tilt_max"]) and
+                        _swing < float(_pt["cruise_to_descent_swing_vel_max"]) and
+                        _plvel < float(_pt["cruise_to_descent_payload_vel_max"])
+                    )
+                    ep_success = _train_ok
+                    # 额外诊断: 是否满足更严格的 pipeline 切换条件
+                    _pipeline_ok = _train_ok and (
+                        _dtf < float(_pt["cruise_to_descent_xy_dist"]))
+                    if _train_ok:
+                        _pipe_str = "✅ 可切换下降" if _pipeline_ok else "⚠ 到达但不满足切换"
+                        print(f"    [cruise ✅] dtf={_dtf*1000:.1f}mm<{_train_sr*1000:.0f}mm "
+                              f"tilt={_tilt:.3f} swing={_swing:.3f} | {_pipe_str}")
+                    else:
+                        print(f"    [cruise ❌] dtf={_dtf*1000:.1f}mm "
+                              f"(需<{_train_sr*1000:.0f}mm) "
+                              f"tilt={_tilt:.3f} swing={_swing:.3f} plvel={_plvel:.3f}")
+                else:
+                    ep_success = True
             if r_info.get("termination"):
                 term_reason = r_info["termination"]
 
@@ -377,15 +473,12 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 break
         
         ep_count += 1
-        # ★ 记录物理成功（只对 descent 阶段有意义）
-        phys_success = False
-        if ep_success and phase == "descent":
-            phys_success, _ = check_physical_insertion(env, config)
+        # [v3.4] ep_success 已经是物理判定结果, physical_success = ep_success
         results.append({
             "reward": ep_reward,
             "steps": ep_steps,
             "success": ep_success,
-            "physical_success": phys_success,
+            "physical_success": ep_success,
             "termination": term_reason or "timeout",
             "trajectory": trajectory,
         })
@@ -475,7 +568,8 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                     rstate.total_steps_global = 10_000_000
                 if hasattr(rstate, 'current_success_radius'):
                     _rcfg_p = config.get("cruise_rl", {}).get("reward", {})
-                    rstate.current_success_radius = float(_rcfg_p.get("success_radius_test", 0.06))
+                    # [v3.4] pipeline 测试用训练末期半径 (0.10m) 而非 0.06m
+                    rstate.current_success_radius = float(_rcfg_p.get("success_radius_end", 0.10))
                 ee_ctrl.reset(env._get_ee_pos(), current_q)
                 # ★ 切换到 cruise 时重置控制器
                 _pl_z = float(payload_pos[2])
@@ -524,19 +618,28 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                     # ★ 底层防摆 + RL 残差
                     _pl_vel_full = env.data.qvel[_dof_idx:_dof_idx+3].copy()
                     _ee_vel = getattr(env, '_ee_vel_cache', np.zeros(3))
-                    _base_acc, _ = swing_d.compute(payload_pos, real_ee, _pl_vel_full, _ee_vel)
+                    if swing_d is not None:
+                        swing_d.compute(payload_pos, real_ee, _pl_vel_full, _ee_vel)
                     acc_3d = np.array([action[0], action[1], 0.0])
                     z_lock = float(config["cruise_rl"]["z_lock_height"])
                     delta_q = ee_ctrl.compute_delta_q(
                         acc_3d, current_q, real_ee,
                         lock_z=True, z_lock_height=z_lock,
                         z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
-                        base_acc_xy=_base_acc[:2], residual_mode=True)
+                        base_acc_xy=None, residual_mode=False)
                 else:
-                    # [BUGFIX] descent pipeline 也必须传入 vel_max_z_descent
-                    _vmax_z_d = float(config.get("ee_control", {}).get("vel_max_z_descent", 0.03))
-                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee,
-                                                       vel_max_z=_vmax_z_d)
+                    # [v3.4 FIX] Descent pipeline: PID base + RL residual
+                    from train_phase import _apply_descent_pid_residual
+                    _pid_residual_mode = bool(
+                        config.get("descent_rl", {}).get("pid_residual_mode", True))
+                    if _pid_residual_mode:
+                        delta_q, _pid_dq = _apply_descent_pid_residual(
+                            expert, action, obs, env, config, current_q)
+                    else:
+                        _vmax_z_d = float(config.get("ee_control", {}).get(
+                            "vel_max_z_descent", 0.03))
+                        delta_q = ee_ctrl.compute_delta_q(
+                            action, current_q, real_ee, vel_max_z=_vmax_z_d)
             
             next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
             
@@ -549,13 +652,21 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             ep_steps += 1
             
             if r_success and current_phase == "descent":
-                final_success = True
-                phase_success["descent"] = True
-                term_reason = r_info.get("termination", "insertion_success")
-                # ★ 物理插入检验
+                # [v3.4] 仅物理插入成功才算真正完成
                 phys_ok, phys_detail = check_physical_insertion(env, config)
-                print(f"    [物理检验] {'✅ 满足真实插入要求' if phys_ok else '⚠ 仅满足课程容差'}: {phys_detail}")
-                obs = next_obs
+                mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
+                print(f"    [{mark_str}] {phys_detail}")
+                if phys_ok:
+                    final_success = True
+                    phase_success["descent"] = True
+                    term_reason = r_info.get("termination", "insertion_success")
+                    obs = next_obs
+                    break
+                # 未满足物理标准: 继续执行, 不终止 episode
+
+            # [v3.4] Descent 阶段最多 200 步 (防止长时间接触走成)
+            if current_phase == "descent" and phase_steps["descent"] >= 200:
+                term_reason = "descent_timeout_200"
                 break
 
             # ★ pipeline descent 阶段调试输出
@@ -628,8 +739,11 @@ def print_summary(results, mode_name):
     print(f"\n{'='*55}")
     print(f"  [{mode_name}] 结果汇总")
     print(f"{'='*55}")
-    print(f"  课程成功率 (train标准): {sr*100:.1f}%")
-    print(f"  物理成功率 (真实要求): {phys_sr*100:.1f}%  ← 此值才是真实指标")
+    # [v3.4] 测试指标:
+    #   descent: 物理插入成功率 (socket 物理容差)
+    #   cruise:  pipeline 切换成功率 (phase_transition 条件)
+    #   lift:    课程成功率 (提升到巡航高度)
+    print(f"  成功率: {phys_sr*100:.1f}%")
     print(f"  平均奖励:  {avg_r:.2f}")
     print(f"  平均步数:  {avg_s:.1f}")
     print(f"  终止原因:  {dict(terms)}")

@@ -227,8 +227,8 @@ python train_phase.py --phase descent --algo ppo --log-dir saves/descent_ppo
 
 ```bash
 python test_phase.py --phase lift --algo ppo --ckpt saves/lift_ppo/ckpt_best.pt --render
-python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo/ckpt_best.pt --render
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_best.pt --render
+python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo_01/ckpt_latest.pt --render
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_latest.pt --render
 # ── MuJoCo 实时渲染 ──
 python test_phase.py --phase lift    --algo expert  --render
 python test_phase.py --phase cruise  --algo expert  --render --obstacles 3
