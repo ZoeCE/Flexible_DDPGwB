@@ -438,12 +438,20 @@ class PPOPhaseAgent:
                        else torch.device("cpu"))
 
         ee_cfg = config.get("ee_control", {})
+        cr_cfg = config.get("cruise_rl", {})
+        _use_nmpc_base = (phase_name == "cruise" and bool(cr_cfg.get("use_nmpc_base", False)))
+
         if self.action_dim == 3:
-            axy = float(phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 2.0)))
-            az = float(phase_cfg.get("acc_max_z", ee_cfg.get("acc_max_z", 3.0)))
+            axy = float(phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 0.5)))
+            az  = float(phase_cfg.get("acc_max_z",  ee_cfg.get("acc_max_z",  1.0)))
             action_scale = [axy, axy, az]
+        elif _use_nmpc_base:
+            # [v7 KEY] action_scale = residual_acc_max_xy_rl (必须与 clip 范围一致)
+            arl = float(cr_cfg.get("residual_acc_max_xy_rl", 0.25))
+            action_scale = [arl, arl]
         else:
-            axy = float(phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 2.0)))
+            axy = float(phase_cfg.get("residual_acc_max_xy",
+                        ee_cfg.get("acc_max_xy", 0.60)))
             action_scale = [axy, axy]
 
         if self.use_lstm:
@@ -566,14 +574,18 @@ class PPOPhaseAgent:
         self._last_result = result; self.buffer.clear(); return result
 
     def reset_log_std_for_rl(self):
+        """BC→RL: 重置 log_std 到 log_std_max，恢复探索能力。"""
         import math
         with torch.no_grad():
-            raw = float(self._log_std_floor_init)
-            init_val = float(np.clip(raw, self.actor.log_std_min, self.actor.log_std_max))
-            self.actor.log_std.data.fill_(init_val)
-        self.opt_actor = torch.optim.Adam(self.actor.parameters(), lr=self._lr_actor, eps=1e-5)
+            reset_val = max(float(self.actor.log_std_max), -0.3)
+            reset_val = float(np.clip(reset_val, self.actor.log_std_min, self.actor.log_std_max))
+            self.actor.log_std.data.fill_(reset_val)
+        self.opt_actor  = torch.optim.Adam(self.actor.parameters(),  lr=self._lr_actor,  eps=1e-5)
+        self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=self._lr_critic, eps=1e-5)
         self._last_plasticity_reset = self.total_steps
-        print(f"  [PPO] log_std reset → {init_val:.3f} (std={math.exp(init_val):.3f})")
+        self.entropy_coef = self.entropy_coef_start
+        print(f"  [PPO] BC→RL: log_std → {reset_val:.3f} (std={math.exp(reset_val):.3f}), "
+              f"entropy_coef → {self.entropy_coef:.4f}")
 
     def save(self, path):
         torch.save({"actor": self.actor.state_dict(), "critic": self.critic.state_dict(),
@@ -806,12 +818,51 @@ class SACPhaseAgent:
             "total_steps": self.total_steps, "obs_norm": self.obs_norm.state_dict(), "phase_name": self.phase_name}, path)
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
-        self.actor.load_state_dict(ck["actor"]); self.critic.load_state_dict(ck["critic"])
-        self.target_critic.load_state_dict(ck["target_critic"])
-        if "opt_actor" in ck: self.opt_actor.load_state_dict(ck["opt_actor"])
-        if "opt_critic" in ck: self.opt_critic.load_state_dict(ck["opt_critic"])
+        # Handle multiple checkpoint formats:
+        # 1. Plain SAC ckpt:            actor / critic / target_critic
+        # 2. CruiseDualRLAgent ckpt:    planner_actor / planner_critic  (use planner weights)
+        # 3. PPO BC ckpt:               actor / critic  (no target_critic)
+        if "planner_actor" in ck:
+            # CruiseDualRLAgent format → extract planner weights into this SAC agent
+            print("  [SAC.load] Detected CruiseDualRLAgent ckpt – loading planner weights")
+            try:
+                self.actor.load_state_dict(ck["planner_actor"], strict=False)
+            except Exception as e:
+                print(f"  [SAC.load] actor load warning: {e}")
+        elif "actor" in ck:
+            try:
+                self.actor.load_state_dict(ck["actor"])
+            except RuntimeError:
+                self.actor.load_state_dict(ck["actor"], strict=False)
+                print("  [SAC.load] actor loaded with strict=False")
+        if "planner_critic" in ck:
+            try:
+                self.critic.load_state_dict(ck["planner_critic"], strict=False)
+                self.target_critic.load_state_dict(ck["planner_critic"], strict=False)
+            except Exception:
+                pass
+        elif "critic" in ck:
+            try:
+                self.critic.load_state_dict(ck["critic"])
+            except RuntimeError:
+                self.critic.load_state_dict(ck["critic"], strict=False)
+            if "target_critic" in ck:
+                try:
+                    self.target_critic.load_state_dict(ck["target_critic"])
+                except RuntimeError:
+                    self.target_critic.load_state_dict(ck["target_critic"], strict=False)
+            else:
+                self.target_critic.load_state_dict(self.critic.state_dict())
+        if "opt_actor" in ck:
+            try: self.opt_actor.load_state_dict(ck["opt_actor"])
+            except Exception: pass
+        if "opt_critic" in ck:
+            try: self.opt_critic.load_state_dict(ck["opt_critic"])
+            except Exception: pass
         if "log_alpha" in ck: self.log_alpha.data.copy_(ck["log_alpha"].to(self.device))
-        if "opt_alpha" in ck: self.opt_alpha.load_state_dict(ck["opt_alpha"])
+        if "opt_alpha" in ck:
+            try: self.opt_alpha.load_state_dict(ck["opt_alpha"])
+            except Exception: pass
         self.total_steps = ck.get("total_steps", 0)
         if "obs_norm" in ck: self.obs_norm.load_state_dict(ck["obs_norm"])
 
@@ -1003,3 +1054,275 @@ class DescentDualRLAgent:
     def reset_log_std_for_rl(self):
         self.macro_agent.reset_log_std_for_rl()
         self.residual_agent.reset_log_std_for_rl()
+
+# ==============================================================================
+# Cruise 双 RL Agent (planner + swing_rl)
+# ==============================================================================
+
+class CruiseDualRLAgent:
+    """
+    Cruise 段双 RL 架构:
+      planner_agent:  高层 xy 加速度 (路径规划 + 避障), 使用导航 reward
+      swing_agent:    低层残差防摆 (摆动能量最小化), 使用防摆 reward
+
+    组合方式:
+      total_acc_xy = planner_acc + clip(swing_residual_acc, ±swing_acc_max)
+      两个 agent 使用 *不同 reward* 但 *相同 obs*, 独立更新
+
+    设计思路:
+      - planner 学习全局路径规划和避障, 不强调防摆
+      - swing_rl 学习如何在当前速度下减小摆动, 不关心到哪里去
+      - 两者解耦让各自 reward 信号更清晰, 避免多目标冲突
+
+    与 DescentDualRLAgent 的区别:
+      - Cruise 的 swing_rl 是残差叠加 (全局加速度 = planner + swing_res)
+      - Descent 的 macro+residual 是不同维度的叠加
+    """
+
+    def __init__(self, config=None, algo="ppo"):
+        if config is None:
+            config = DEFAULT_CONFIG
+        self.config = config
+        self.algo   = algo
+
+        phase_cfg = config["cruise_rl"]
+        self.obs_dim = int(phase_cfg["obs_dim"])
+
+        # ── planner agent (高层, 完整 xy 加速度) ──────────────────────────────
+        planner_cfg = copy.deepcopy(config)
+        planner_cfg["cruise_rl"] = copy.deepcopy(phase_cfg)
+        planner_cfg["cruise_rl"]["action_dim"] = 2
+
+        if algo == "ppo":
+            self.planner_agent = PPOPhaseAgent("cruise", config=planner_cfg)
+        else:
+            self.planner_agent = SACPhaseAgent("cruise", config=planner_cfg)
+
+        # ── swing_rl agent (低层残差防摆, acc 较小) ───────────────────────────
+        swing_cfg = copy.deepcopy(config)
+        swing_cfg["cruise_rl"] = copy.deepcopy(phase_cfg)
+        swing_cfg["cruise_rl"]["action_dim"] = 2
+        # 残差 acc 限幅更小: 防摆修正量不应超过导航 acc 的 50%
+        swing_acc_max = float(phase_cfg.get("residual_acc_max_xy", 0.60)) * 0.5
+        swing_cfg["cruise_rl"]["residual_acc_max_xy"] = swing_acc_max
+        swing_cfg["ee_control"] = copy.deepcopy(config.get("ee_control", {}))
+        swing_cfg["ee_control"]["acc_max_xy"] = swing_acc_max
+
+        if algo == "ppo":
+            self.swing_agent = PPOPhaseAgent("cruise", config=swing_cfg)
+        else:
+            self.swing_agent = SACPhaseAgent("cruise", config=swing_cfg)
+
+        self.swing_acc_max = swing_acc_max
+
+        # ── 代理属性 ──────────────────────────────────────────────────────────
+        self.device     = self.planner_agent.device
+        self.action_dim = 2
+        self.gamma      = self.planner_agent.gamma
+        self.use_lstm   = getattr(self.planner_agent, 'use_lstm', False)
+        self.seq_len    = getattr(self.planner_agent, 'seq_len', 8)
+        self.bc_coef    = 0.0
+        self.actor      = self.planner_agent.actor
+        self.critic     = self.planner_agent.critic
+        self.buffer     = self.planner_agent.buffer
+
+        if algo == "ppo":
+            self.opt_actor  = self.planner_agent.opt_actor
+            self.opt_critic = self.planner_agent.opt_critic
+            self.gae_lambda = self.planner_agent.gae_lambda
+
+        self._last_result = getattr(self.planner_agent, '_last_result', None)
+        self.total_steps  = 0
+
+        # 观测归一化 (共享)
+        self.obs_norm      = self.planner_agent.obs_norm
+        self.use_obs_norm  = self.planner_agent.use_obs_norm
+        self._freeze_obs_norm = False
+        self.obs_history   = ObsHistoryBuffer(self.obs_dim, self.seq_len)
+
+    def normalize_obs(self, obs, update=True):
+        if self._freeze_obs_norm:
+            update = False
+        if self.use_obs_norm:
+            if update:
+                self.obs_norm.update(obs)
+            return self.obs_norm.normalize(obs)
+        return obs.astype(np.float32)
+
+    def reset_history(self):
+        self.obs_history.reset()
+        if hasattr(self.planner_agent, 'obs_history'):
+            self.planner_agent.obs_history = self.obs_history
+        if hasattr(self.swing_agent, 'obs_history'):
+            self.swing_agent.obs_history = self.obs_history
+
+    @torch.no_grad()
+    def _act_agent(self, agent, norm_obs, deterministic):
+        if self.use_lstm and hasattr(agent, 'obs_history'):
+            obs_seq = self.obs_history.get_sequence()
+            s = np_to_tensor(obs_seq, agent.device).unsqueeze(0)
+            if self.algo == "ppo":
+                action, lp, _, _ = agent.actor.get_action(s, deterministic=deterministic)
+                value = agent.critic(s)
+                return action.detach().cpu().numpy().flatten(), lp.cpu().item(), value.cpu().item()
+            else:
+                action = (agent.actor.deterministic(s) if deterministic
+                          else agent.actor.sample(s)[0])
+                return action.detach().cpu().numpy().flatten(), 0.0, 0.0
+        else:
+            s = np_to_tensor(norm_obs.reshape(1, -1), agent.device)
+            if self.algo == "ppo":
+                action, lp, _ = agent.actor.get_action(s, deterministic=deterministic)
+                value = agent.critic(s)
+                return action.detach().cpu().numpy().flatten(), lp.cpu().item(), value.cpu().item()
+            else:
+                action = (agent.actor.deterministic(s) if deterministic
+                          else agent.actor.sample(s)[0])
+                return action.detach().cpu().numpy().flatten(), 0.0, 0.0
+
+    @torch.no_grad()
+    def act(self, norm_obs, deterministic=False):
+        """
+        Returns:
+            combined_acc (2D):  planner_acc + clipped(swing_res_acc)
+            planner_acc (2D):   导航加速度
+            swing_acc (2D):     防摆残差加速度
+            planner_lp, planner_val: PPO 用
+            swing_lp, swing_val:     PPO 用
+        """
+        self.obs_history.push(norm_obs)
+        if hasattr(self.planner_agent, 'obs_history'):
+            self.planner_agent.obs_history = self.obs_history
+        if hasattr(self.swing_agent, 'obs_history'):
+            self.swing_agent.obs_history = self.obs_history
+
+        planner_acc, planner_lp, planner_val = self._act_agent(
+            self.planner_agent, norm_obs, deterministic)
+        swing_acc, swing_lp, swing_val = self._act_agent(
+            self.swing_agent, norm_obs, deterministic)
+
+        # 残差限幅
+        swing_res = np.clip(swing_acc, -self.swing_acc_max, self.swing_acc_max)
+
+        # 合并加速度
+        combined = planner_acc + swing_res
+        # 合并后的总 acc 仍受全局限幅
+        acc_max = float(self.config["cruise_rl"].get("residual_acc_max_xy", 0.60))
+        norm = float(np.linalg.norm(combined))
+        if norm > acc_max and norm > 1e-8:
+            combined = (combined / norm * acc_max).astype(np.float32)
+
+        return combined, planner_acc, swing_acc, planner_lp, planner_val, swing_lp, swing_val
+
+    @torch.no_grad()
+    def act_simple(self, norm_obs, deterministic=False):
+        """统一接口: 返回 (combined_acc, lp, val)."""
+        combined, _, _, planner_lp, planner_val, _, _ = self.act(
+            norm_obs, deterministic=deterministic)
+        return combined, planner_lp, planner_val
+
+    def add_to_buffers(self, norm_obs, planner_act, swing_act,
+                       bc_planner, bc_swing,
+                       planner_reward, swing_reward,
+                       done, planner_val, planner_lp, swing_val, swing_lp):
+        """
+        向两个 agent 的 buffer 分别添加 (使用不同 reward).
+        """
+        if self.algo == "ppo":
+            if self.use_lstm:
+                obs_seq = self.obs_history.get_sequence()
+                self.planner_agent.buffer.add(
+                    obs_seq, planner_act, bc_planner, planner_reward, done, planner_val, planner_lp)
+                self.swing_agent.buffer.add(
+                    obs_seq, swing_act, bc_swing, swing_reward, done, swing_val, swing_lp)
+            else:
+                self.planner_agent.buffer.add(
+                    norm_obs, planner_act, bc_planner, planner_reward, done, planner_val, planner_lp)
+                self.swing_agent.buffer.add(
+                    norm_obs, swing_act, bc_swing, swing_reward, done, swing_val, swing_lp)
+        else:
+            # SAC: 直接存入各自 buffer
+            pass  # 由 train_phase.py 调用 remember() 分别处理
+
+    def update(self, global_ts=None):
+        """更新两个 agent."""
+        if self.algo == "ppo":
+            r1 = self.planner_agent.update(global_ts=global_ts)
+            r2 = self.swing_agent.update(global_ts=global_ts)
+            self._last_result = r1
+            return r1, r2
+        return None, None
+
+    def get_value_for_state(self, norm_obs):
+        """planner 的 critic value (用于 GAE 计算)."""
+        return self.planner_agent.get_value_for_state(norm_obs)
+
+    def get_log_std_per_dim(self):
+        p = self.planner_agent.actor.get_log_std_per_dim()
+        s = self.swing_agent.actor.get_log_std_per_dim()
+        return np.concatenate([p, s])
+
+    def save(self, path):
+        torch.save({
+            "planner_actor":  self.planner_agent.actor.state_dict(),
+            "planner_critic": self.planner_agent.critic.state_dict(),
+            "swing_actor":    self.swing_agent.actor.state_dict(),
+            "swing_critic":   self.swing_agent.critic.state_dict(),
+            "obs_norm":       self.obs_norm.state_dict(),
+            "total_steps":    self.total_steps,
+            "algo":           self.algo,
+        }, path)
+
+    def load(self, path, map_location=None):
+        dev = self.planner_agent.device
+        ck  = torch.load(path, map_location=map_location or dev, weights_only=False)
+
+        if "planner_actor" in ck:
+            self.planner_agent.actor.load_state_dict(ck["planner_actor"])
+            self.planner_agent.critic.load_state_dict(ck["planner_critic"])
+            self.swing_agent.actor.load_state_dict(ck["swing_actor"])
+            self.swing_agent.critic.load_state_dict(ck["swing_critic"])
+        elif "actor" in ck:
+            # BC checkpoint: 共享加载到两个 agent
+            try:
+                self.planner_agent.actor.load_state_dict(ck["actor"])
+                self.swing_agent.actor.load_state_dict(ck["actor"])
+                print("  [CruiseDual] both agents ← BC actor weights")
+            except Exception as e:
+                self.planner_agent.actor.load_state_dict(ck["actor"], strict=False)
+                self.swing_agent.actor.load_state_dict(ck["actor"], strict=False)
+                print(f"  [CruiseDual] partial load: {e}")
+            try:
+                self.planner_agent.critic.load_state_dict(ck["critic"])
+                self.swing_agent.critic.load_state_dict(ck["critic"])
+            except Exception:
+                pass
+
+        if "obs_norm" in ck:
+            self.obs_norm.load_state_dict(ck["obs_norm"])
+            self.swing_agent.obs_norm = self.obs_norm
+        self.total_steps = ck.get("total_steps", 0)
+
+    def reset_log_std_for_rl(self):
+        if hasattr(self.planner_agent, 'reset_log_std_for_rl'):
+            self.planner_agent.reset_log_std_for_rl()
+        if hasattr(self.swing_agent, 'reset_log_std_for_rl'):
+            self.swing_agent.reset_log_std_for_rl()
+
+    def _update_entropy_coef(self, global_ts=None):
+        """PPO entropy coef 退火 - 两个 sub-agent 同步更新."""
+        self.planner_agent._update_entropy_coef(global_ts=global_ts)
+        self.swing_agent._update_entropy_coef(global_ts=global_ts)
+
+    def remember_dual(self, no, planner_act, swing_act, no2_norm, planner_rw, swing_rw, done):
+        """SAC 双 RL: 分别向两个 buffer 存入不同 reward."""
+        self.planner_agent.buffer.add(no, planner_act, no2_norm, planner_rw, done)
+        self.swing_agent.buffer.add(no, swing_act, no2_norm, swing_rw, done)
+
+    def train_step_dual(self):
+        """SAC 双 RL: 两个 agent 独立训练."""
+        r1 = (self.planner_agent.train_step()
+              if hasattr(self.planner_agent, 'train_step') else None)
+        r2 = (self.swing_agent.train_step()
+              if hasattr(self.swing_agent, 'train_step') else None)
+        return r1, r2

@@ -80,7 +80,7 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     "scene": {
         "n_obstacles":        3,
-        "radius_range":       (0.006, 0.015),
+        "radius_range":       (0.020, 0.045),  # [v5] 25-55mm→20-45mm: 保证3个都能放下
         "obstacle_z_center":  0.15,
         "obstacle_halfheight": 0.15,
         "endpoint_z_offset":  0.025,
@@ -91,11 +91,11 @@ DEFAULT_CONFIG = {
     # 5. A* 寻路与 3D 轨迹规划
     # ==========================================================================
     "planning": {
-        "workspace_radius":  0.50,
+        "workspace_radius":  0.65,   # [v5] 0.50→0.65: 扩大工作空间, 障碍物可分散
         "payload_radius":    0.075,
-        "planning_margin":   0.03,
+        "planning_margin":   0.04,   # [v5] 0.03→0.04: 略扩安全边距
         "planning_grid_res": 0.025,
-        "path_width":        0.6,
+        "path_width":        0.80,   # [v5] 0.6→0.8: 更宽走廊, 障碍物更稀疏
         "corridor_side":          +1,
         "corridor_forbid_margin": 0.05,
         "bounds_margin":     0.5,
@@ -290,10 +290,14 @@ DEFAULT_CONFIG = {
         "lift_to_cruise_tilt_max":       0.15,
         "lift_to_cruise_swing_vel_max":  0.08,
         "lift_to_cruise_payload_vel_max": 0.15,
-        "cruise_to_descent_xy_dist":     0.06,
+        # [v7] 100mm: 与 reward SR 对齐 (NMPC expert 精度 44-95mm)
+        "cruise_to_descent_xy_dist":     0.10,
         "cruise_to_descent_tilt_max":    0.15,
-        "cruise_to_descent_swing_vel_max": 0.10,
-        "cruise_to_descent_payload_vel_max": 0.15,
+        "cruise_to_descent_swing_vel_max": 0.20,
+        "cruise_to_descent_payload_vel_max": 0.25,
+        "cruise_to_descent_fallback_xy_dist":   0.15,
+        "cruise_to_descent_fallback_swing_max": 0.30,
+        "cruise_to_descent_fallback_step_frac": 0.85,
     },
 
     # ==========================================================================
@@ -339,26 +343,71 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     # 18. Phase 1: Lift RL
     # ==========================================================================
+    # 替换 config.py 中 "lift_rl": { ... } 整块
+
     "lift_rl": {
         "obs_dim":            23,
         "action_dim":         3,
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
         "init_vel_range":     0.0,
-        "max_steps":          100,
+        "max_steps":          200,   # [v3.7] 100→200: 摆动稳定需要 20s
         "target_z_cruise":    0.25,
         "reward": {
-            "z_approach_coef":    5.0,
-            "swing_ke_coef":      2.0,
-            "success_bonus":      10.0,
-            "step_penalty":       -0.01,
-            "instability_penalty": -3.0,
-            "crash_penalty":      -5.0,
+            # ── 主导信号 (不变) ───────────────────────────────────────────────
+            "z_approach_coef":            5.0,
+
+            # ── 摆动能量 (v3.7: KE+PE, 替代纯 KE) ───────────────────────────
+            # 50mJ ≈ 5° 摆角 + 5cm/s 相对速度 (允许适量摆动)
+            # 惩罚超出部分, 上限 0.30/step 不压倒 z 主导信号
+            "swing_energy_thresh":        0.05,   # J, 50mJ
+            "swing_energy_penalty_coef":  2.0,
+            "swing_energy_penalty_max":   0.30,   # /step 上限
+            "swing_ke_coef":              0.0,    # DEPRECATED → swing_energy_*
+
+            # ── XY 漂移差分 (v3.7: 替代绝对值惩罚) ──────────────────────────
+            # 差分形式: 靠近 start_xy → 正奖励; 远离 → 负惩罚
+            # 解决 "提升=漂移=惩罚" 局部最优 (SR 归零根因)
+            # coef=5.0 与 z_approach_coef 量级一致
+            "xy_drift_coef":              5.0,
+
+            # ── 成功判定参数 ──────────────────────────────────────────────────
+            # z 双边 ±25mm: 真正稳定在巡航高度 (不是穿越)
+            "success_z_tol":              0.025,  # m
+            # vz < 5cm/s: 不能高速穿越, 要求真正悬停
+            "success_vz_max":             0.05,   # m/s
+            # swing_energy < 50mJ: 摆动稳定 (共享 swing_energy_thresh)
+            # xy_max_dist: payload 距 start_xy < 120mm
+            "xy_max_dist_success":        0.12,   # m
+            # 连续满足成功条件的步数
+            "hold_steps":                 3,
+
+            # ── 终止奖励 ──────────────────────────────────────────────────────
+            "success_bonus":              10.0,
+            "step_penalty":               -0.01,
+            "instability_penalty":        -3.0,
+            "crash_penalty":              -5.0,
         },
     },
 
     # ==========================================================================
-    # 19. Phase 2: Cruise RL [v3]
+    # 19a. ORCA Expert 参数 [v5]
+    #
+    # 与 cruise_rl 分离, 便于独立调参。
+    # CruiseORCAExpert 优先读取此节, 不再复用 planning.workspace_radius。
+    # ==========================================================================
+    "orca": {
+        # 障碍物半径 20-45mm, margin 取 60mm → 总排斥半径约 80-105mm
+        "max_speed":        0.15,   # ORCA 规划目标速度上限 (m/s)
+        "time_horizon":     2.5,    # 速度障碍时间视野 (s)
+        "obstacle_margin":  0.06,   # 障碍物额外安全边距 (m)
+        "k_nav":            2.0,    # [v5] 2.5→2.0: 略降，配合制动逻辑
+        "k_damp":           1.5,    # 防摆阻尼
+        "k_dvel":           1.5,    # [v5] 0.6→1.5: 大幅加强速度阻尼，抑制超速
+    },
+
+    # ==========================================================================
+    # 19. Phase 2: Cruise RL [v5]
     #
     # 架构: RL 直接输出完整 xy 加速度 (不是残差)
     # 课程: 全程距离, 0 障碍物, 大成功半径
@@ -369,67 +418,68 @@ DEFAULT_CONFIG = {
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
         "init_vel_range":     0.0,
-        "max_steps":          400,
+        "max_steps":          500,   # [v5] 400→500: 给 ORCA base 更充裕到达时间
         "min_steps_for_success": 5,
         "estimated_full_dist_m": 0.41,
         "z_lock_height":      0.25,
 
-        # [v3.5] acc_max_xy: 0.80→0.60
-        # 降低 25%, 配合 log_std_max=-0.3 控制动作幅度
-        # damp_gain 一直满增益 (2.0) 说明 RL 动作引发摆动过大
-        "residual_acc_max_xy": 0.60,
+        # [v7] 架构: NMPC base + RL 残差 xy acc
+        "use_dual_rl":           False,
+        "use_residual_orca":     False,   # ORCA 已废弃
+        "use_nmpc_base":         True,    # [v7] NMPC base
+        # [v7 KEY] residual_acc_max_xy_rl = action_scale (必须保持一致)
+        "residual_acc_max_xy_rl": 0.25,  # RL残差上限 = actor action_scale
+        "residual_acc_max_xy": 0.80,     # NMPC+RL合计上限
 
         "reward": {
-            # ── 导航 (主导) ─────────────────────────────────────────────────
-            "pbrs_coef":          20.0,   # [v3] 15→20: 主导导航信号
+            # ── [v7] 防摆差分奖励 (核心) ─────────────────────────────────────
+            # 奖励 RL 相对上步的摆动改善, 让任何有效防摆动作都有正信号
+            # NMPC 正常KE≈4mJ, 每步改善0.001J → reward +0.05
+            "swing_improve_coef":  50.0,
+            "swing_improve_max":    0.30,  # 单步最大改善奖励
+            "swing_worsen_max":     0.20,  # 单步最大恶化惩罚 (非对称)
+
+            # ── [v7] 摆动绝对惩罚: 阈值提高到50mJ (NMPC正常4mJ的12倍余量) ──
+            "swing_energy_thresh":        0.050,   # [v7] 50mJ (原0.15J)
+            "swing_energy_penalty_coef":  2.0,
+            "swing_energy_penalty_max":   0.30,
+            "swing_ke_coef":      0.0,
+
+            # ── [v7] PBRS: 大幅降低 (NMPC保证导航, RL专注防摆) ─────────────
+            "pbrs_coef":          5.0,     # [v7] 20→5
             "pbrs_gamma":         0.99,
 
-            # ── 障碍物排斥 (保留 reward, 0 障碍物训练时无实际惩罚) ──────────
-            # 目的: 让 critic 的值函数已经见过障碍物相关的 reward 项,
-            # 加入障碍物时 critic 不需要重新适应
+            # ── 障碍物排斥 ───────────────────────────────────────────────────
             "obs_repulse_coef":   0.3,
             "obs_repulse_d0":     0.10,
             "obs_repulse_linear": True,
 
-            # ── 摆动约束 (软约束, 严格限幅防止压倒 PBRS) ───────────────────
-            # [v3] 正常导航摆动 ~0.1-0.3J → penalty ~0.05-0.15/step
-            # PBRS 最大 ~0.5/step → 摆动惩罚不超过 PBRS 的 30%
-            "swing_energy_thresh":        0.15,   # [v3] 0.08→0.15
-            "swing_energy_penalty_coef":  1.0,    # [v3] 2.0→1.0
-            # 单步摆动惩罚硬上限: 0.5/step
-            "swing_energy_penalty_max":   0.50,   # [v3] 新增: 硬上限
-            "swing_ke_coef":      0.0,
+            # ── Z/Vz ────────────────────────────────────────────────────────
+            "z_dev_coef":         0.0,
+            "vz_penalty_coef":    0.0,
 
-            # ── Z/Vz (PID 控制, reward 不重复惩罚) ──────────────────────────
-            "z_dev_coef":         0.0,    # [v3] 1.0→0: PID 负责 Z
-            "vz_penalty_coef":    0.0,    # [v3] 1.0→0
+            # ── [v7] 时间惩罚: 降低, 避免RL学"快速结束" ─────────────────────
+            "alive_bonus":        0.0,
+            "step_penalty":       -0.005,  # [v7] -0.01→-0.005
 
-            # ── 时间惩罚 ────────────────────────────────────────────────────
-            "alive_bonus":        0.0,    # [v3] 完全去除
-            "step_penalty":       -0.01,
+            # ── [v7] 近目标平静奖励: 靠近目标+低摆动 双重条件 ───────────────
+            "near_goal_radius":   0.10,
+            "calm_energy_thresh": 0.015,   # 15mJ, 鼓励低于NMPC基线
+            "calm_bonus":         0.05,
+            "near_goal_bonus":    0.0,     # 被 calm_bonus 替代
 
-            # ── 碰撞 / 失稳 ─────────────────────────────────────────────────
+            # ── 成功/碰撞 ────────────────────────────────────────────────────
             "collision_penalty":  -10.0,
             "success_bonus":      8.0,
             "instability_penalty": -3.0,
-
-            # ── 成功半径 [v3] ───────────────────────────────────────────────
-            # 起始 0.20m (更松), 随 SR 提升收紧
-            # [v3.4] success_radius 随障碍物课程收紧:
-            #   n_obs=0: 0.20m, n_obs=1: 0.15m, n_obs=2: 0.12m, n_obs=3: 0.10m
-            # 见 CurriculumManager.get_current_success_radius()
-            "success_radius_start": 0.20,
+            "success_radius_start": 0.25,
             "success_radius_end":   0.10,
-            # success_radius_test 已弃用 (测试改用 phase_transition 条件)
-            "success_radius_test":  0.10,   # [v3.4] 与 success_radius_end 对齐
+            "success_radius_test":  0.10,
             "success_radius_anneal_steps": 9_999_999,
-
-            # ── 里程碑 / 近目标 ─────────────────────────────────────────────
+            "success_hold_steps":   3,
             "milestone_radius":   0.15,
-            "milestone_bonus":    1.5,
-            "near_goal_radius":   0.10,
-            "z_success_tol_frac": 0.15,
-            "near_goal_bonus":    0.05,
+            "milestone_bonus":    1.0,
+            "z_success_tol_frac": 0.20,
         },
     },
 
@@ -535,21 +585,17 @@ DEFAULT_CONFIG = {
         "obs_norm_clip":         10.0,
         "obs_norm_warm_start":   5000,
         "log_std_init":         -0.5,
-        "log_std_min":          -2.0,
-        # [v3.5] log_std_max: 0.0→-0.3
-        # std 上限从 1.0→0.74, 动作幅度降低 26%
-        # 防止 cruise logstd 单调上升到 -0.12 导致摆动失控
-        "log_std_max":          -0.3,
-        "target_kl":             0.03,
+        "log_std_min":          -3.0,
+        # [v7 FIX] log_std_max=0.0: 防止 reset_log_std_for_rl 钉到上界
+        "log_std_max":           0.0,
+        "target_kl":             0.02,
         "log_std_floor_init":   -0.5,
-        "log_std_floor_final":  -1.5,
-        "log_std_floor_steps":   800_000,
-        # [v3.5] entropy 退火加速: 3M→800k steps, start 0.03→0.01
-        # 原退火在 20k ep 训练结束时仅完成 67%, entropy_coef 仍高达 0.016
-        # 持续高 entropy_coef 是 logstd 单调上升的根本原因
-        "entropy_coef_start":         0.01,
-        "entropy_coef_end":           0.001,
-        "entropy_coef_anneal_steps":  800_000,
+        "log_std_floor_final":  -2.0,
+        "log_std_floor_steps":   1_000_000,
+        # [v7 FIX] entropy_coef: 提高初始值, 防止 BC 后低熵
+        "entropy_coef_start":         0.05,
+        "entropy_coef_end":           0.005,
+        "entropy_coef_anneal_steps":  600_000,
         "plasticity_reset_interval":  200_000,
     },
 
@@ -625,7 +671,18 @@ DEFAULT_CONFIG = {
     "curriculum": {
         "enabled":                    True,
 
-        # 风力课程
+        # ── 风力课程 [v5: 随机风力, 非逐步固定增加] ─────────────────────────
+        # 策略: 训练稳定后逐步提升最大风力上限, 每次实际风力在 [0, max] 随机采样
+        # 优点: RL 不会遗忘无风/微风场景, 泛化性更好
+        # 触发条件: 每个 phase 达到 wind_unlock_sr_thresh 成功率 + wind_unlock_min_eps
+        "wind_enabled":               True,   # 全局开关 (--wind 命令行参数覆盖)
+        "wind_unlock_sr_thresh":      0.70,    # 解锁风力训练所需的成功率
+        "wind_unlock_min_eps":        800,     # 解锁风力训练所需的最少 episode 数
+        "wind_max_force_levels":      [0.2, 0.5, 1.0, 2.0],  # N, 分级上限
+        "wind_level_sr_thresh":       0.55,    # 晋级到下一级风力所需的成功率
+        "wind_level_min_eps":         500,     # 每级最少 episode 数
+        "wind_random_dir":            True,    # 随机风向 (True) 或固定风向
+        # 兼容旧字段 (不再使用线性插值模式)
         "wind_start_frac":            0.0,
         "wind_end_frac":              1.0,
         "wind_anneal_steps":          200_000,
@@ -635,29 +692,26 @@ DEFAULT_CONFIG = {
         "noise_end_scale":            1.0,
         "noise_anneal_steps":         500_000,
 
-        # ── Cruise 课程 [v3] ─────────────────────────────────────────────────
-        # 障碍物课程: 从 0 个真实障碍物开始, 渐进到 3 个
-        # [v3 SHADOW] 即使真实障碍物 = 0, 仍会在 reward 中注入 shadow_obstacles
-        # (随机采样的虚拟障碍物, 不参与物理碰撞), 让 critic 提前学习障碍物特征
-        # 真实障碍物数量由课程晋级条件控制: 0→1→2→3
-        "obstacle_enabled":           True,    # [v3] 启用障碍物课程
+        # ── Cruise 课程 [v5] ─────────────────────────────────────────────────
+        # [v5] 取消障碍物课程: 残差RL在3障碍物场景已有足够成功率
+        # 直接用 3 个真实障碍物训练, 无需课程渐进
+        "obstacle_enabled":           False,   # [v5] 关闭障碍物课程
         "obstacle_start_n":           0,       # 从 0 个真实障碍物开始
         "obstacle_max_n":             3,
         "obstacle_unlock_dist_frac":  0.65,
         "obstacle_hard_cap_grad_steps": 999_999_999,
         "obstacle_hard_cap_eps":      999_999,
-        "obstacle_level_warmup_eps":  300,
-        "perf_window":                200,    # [v3.3] 300→200: 更快响应 SR 变化
-        # [v3.3] 修正: 图中 n_obs=2 阶段 SR 稳定在 0.55-0.60
-        #   obs_sr_thresh=0.65: 永远无法满足 (n_obs=2场景下SR天然更低)
-        #   obs_sr_thresh=0.50: 过低, obs_min_eps=500 会导致 level 0 仅500ep就晋级
-        #   obs_sr_thresh=0.55: n_obs=2 时 SR~0.57-0.60 可满足, obs_min_eps=1000 保证充分训练
-        "perf_sr_threshold":          0.55,   # [v3.3] 0.65→0.55: n_obs=2 SR约0.57-0.60可触发
+        "obstacle_level_warmup_eps":  150,    # [v4] 300→150: 更快进入SR评估
+        "perf_window":                150,    # [v4] 200→150: 更快响应SR变化
+        # [v4] 障碍物课程SR阈值:
+        #   实测n_obs=2时SR在35-75%高度震荡, 平均约50%
+        #   0.55阈值在震荡环境中永远无法稳定达到 → 降为0.45
+        #   配合hard_cap_eps=3500确保最终一定晋级, 避免永远卡在n_obs=2
+        "perf_sr_threshold":          0.45,   # [v4] 0.55→0.45: 适应高震荡SR
         "perf_reward_threshold":      -15.0,
-        # [v3.5] 2000: 防止 n_obs=2→3 跳太快
-        # 图中 2→3 几乎同时发生, agent 来不及适应就面对 3 个障碍物
-        "perf_min_episodes_per_level": 1500,
+        "perf_min_episodes_per_level": 600,   # [v4] 1500→600: 减少无效等待
         "perf_hard_cap_steps":        999_999_999,
+        "perf_hard_cap_eps":          3500,   # [v4] NEW: ep硬上限, 强制晋级
 
         # [v3 SHADOW OBSTACLES] 0 真实障碍物阶段使用的"影子障碍物"配置
         # shadow_obstacles 在每个 episode 开始时随机采样, 不参与物理碰撞,
@@ -720,10 +774,15 @@ DEFAULT_CONFIG = {
 
         # Level 晋级配置
         "descent_cur_levels":         5,
-        "descent_cur_min_eps":        200,     # [v3.4] 80→200: 每 level 最少200ep
-        "descent_cur_sr_threshold":   0.50,
-        "descent_cur_hard_cap":       300_000,
-        "descent_cur_stats_window":   50,      # [v3.4] 新增: SR 统计窗口 (30→50)
+        # [v4] Descent课程加速:
+        #   实测SR在85-90%, 但min_eps=200导致至少等200ep才晋级
+        #   提高sr_thresh到0.70: 要求真正掌握再晋级 (SR<70%说明还不稳定)
+        #   减少min_eps到80: 更快发现SR是否满足, 不必死等
+        #   stats_window=30: 更快响应最近表现
+        "descent_cur_min_eps":        80,      # [v4] 200→80: 更快检测SR
+        "descent_cur_sr_threshold":   0.70,    # [v4] 0.50→0.70: 真正掌握再晋级
+        "descent_cur_hard_cap":       150_000, # [v4] 300k→150k: 缩短强制晋级等待
+        "descent_cur_stats_window":   30,      # [v4] 50→30: 更快响应
 
         # Bootstrapped PBRS (关闭)
         "bootstrapped_pbrs_enabled":  False,

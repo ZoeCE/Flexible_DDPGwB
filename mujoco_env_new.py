@@ -247,6 +247,39 @@ class CableRobotEnvWithObstacles:
         """设置风力课程学习倍率，0.0=无风，1.0=全风力。"""
         self._wind_curriculum_frac = float(np.clip(frac, 0.0, 1.0))
 
+    def set_wind_force(self, force_n: float, direction_rad: float = 0.0):
+        """
+        测试专用：直接施加恒定风力，**绕过 cfg_wind["enabled"] 检查**。
+
+        训练时风力走随机游走（_update_wind），且需要 enabled=True 才生效。
+        测试时我们希望施加确定性的固定风力来做系统性对比，不依赖 config。
+
+        原理：
+          - 直接写 data.xfrc_applied[prefab_body_id]
+          - 设置 _test_wind_mode=True，step() 中保持该值不被随机游走覆盖
+
+        参数:
+            force_n:       风力大小 (N)
+            direction_rad: 风向角 (rad)，0=+x 方向，π/2=+y 方向
+        """
+        self.wind_F     = float(force_n)
+        self.wind_theta = float(direction_rad)
+        self._test_wind_mode = True
+        # 立即写入（reset 后 data 已存在）
+        self._apply_test_wind()
+
+    def _apply_test_wind(self):
+        """在 step 中持续施加测试风力（不受随机游走影响）。"""
+        if not getattr(self, '_test_wind_mode', False):
+            return
+        if not (hasattr(self, 'data') and hasattr(self, 'prefab_body_id')):
+            return
+        fx = self.wind_F * np.cos(self.wind_theta)
+        fy = self.wind_F * np.sin(self.wind_theta)
+        self.data.xfrc_applied[self.prefab_body_id, :3] = [fx, fy, 0.0]
+
+
+
     def get_wind_state(self):
         """返回当前风力状态 (wind_F, wind_theta)，供观测构建使用。"""
         effective_F = self.wind_F * self._wind_curriculum_frac
@@ -313,26 +346,55 @@ class CableRobotEnvWithObstacles:
         if L_path > 1e-6:
             direction /= L_path
             perp = np.array([-direction[1], direction[0]])
-            attempts = 0
-            max_attempts = max(500, n_obs * 200)
-            while len(obstacles) < n_obs and attempts < max_attempts:
-                attempts += 1
-                t = rng.uniform(0.15, 0.85)
-                s = rng.uniform(-path_width/2, path_width/2)
-                center = start_xy + t*L_path*direction + s*perp
-                r = rng.uniform(r_min, r_max)
-                # [WS] 障碍物中心 + 半径必须完全在工作空间内
-                if np.linalg.norm(center) + r > workspace_r - 0.02:
-                    continue
-                # [WS] 障碍物必须完全在 y >= y_min_corridor 侧（同路径走廊约束）
-                if center[1] - r < y_min_corridor:
-                    continue
-                if (np.linalg.norm(center-start_xy)<r+min_clr or
-                        np.linalg.norm(center-target_xy)<r+min_clr or
-                        np.linalg.norm(center)<r+base_r2): continue
-                if all(np.linalg.norm(center-np.array([ox,oy]))>=r+or_+0.01
-                       for (ox,oy,or_) in obstacles):
-                    obstacles.append((float(center[0]),float(center[1]),float(r)))
+
+            # [v5] 障碍物间最小净空: payload直径 + 双侧planning_margin
+            # 这是中心距 >= r_a + r_b + min_gap 里的 min_gap
+            min_gap = p_radius * 2 + p_margin * 2   # ≈ 0.23m (不含障碍物半径)
+
+            # [v5] 分段放置: 路径均分为 n_obs 段，每段放1个
+            # 保证障碍物沿路径均匀分布，避免扎堆
+            n_placed = 0
+            for seg_idx in range(n_obs):
+                t_lo = 0.10 + seg_idx * (0.80 / max(n_obs, 1))
+                t_hi = t_lo + (0.80 / max(n_obs, 1)) * 0.85
+                t_hi = min(t_hi, 0.90)
+
+                placed = False
+                for _ in range(300):   # 每段最多尝试300次
+                    t = rng.uniform(t_lo, t_hi)
+                    # [v5] 偏向走廊两侧: 为payload保留中央通道
+                    # 最小侧偏 = payload_radius + planning_margin，确保中央可通行
+                    s_min = p_radius + p_margin + 0.01   # ≈ 0.12m
+                    s_max = path_width / 2
+                    if s_min >= s_max:
+                        s_min = s_max * 0.3
+                    s_side = rng.choice([-1, 1]) * rng.uniform(s_min, s_max)
+                    center = start_xy + t * L_path * direction + s_side * perp
+                    r = rng.uniform(r_min, r_max)
+
+                    # 工作空间约束
+                    if np.linalg.norm(center) + r > workspace_r - 0.02:
+                        continue
+                    # y走廊约束
+                    if center[1] - r < y_min_corridor:
+                        continue
+                    # 起终点 & 底座安全距离
+                    if (np.linalg.norm(center - start_xy) < r + min_clr or
+                            np.linalg.norm(center - target_xy) < r + min_clr or
+                            np.linalg.norm(center) < r + base_r2):
+                        continue
+                    # 与已放置障碍物的净空: 两圆心距 >= r_a + r_b + min_gap
+                    if not all(np.linalg.norm(center - np.array([ox, oy])) >= r + or_ + min_gap
+                               for (ox, oy, or_) in obstacles):
+                        continue
+
+                    obstacles.append((float(center[0]), float(center[1]), float(r)))
+                    placed = True
+                    break
+
+                if not placed:
+                    # 该段放置失败，不强制，继续尝试下一段（保证A*能规划通）
+                    pass
 
         planning_obs = obstacles + [(0.0,0.0,base_r1)]
         grid_res = scene_plan_config["planning_grid_res"]
@@ -544,6 +606,11 @@ class CableRobotEnvWithObstacles:
         self._prev_q=self.data.qpos[:7].copy().astype(np.float32)
         self._termination_reason = None
 
+        # [TEST-WIND] reset 时清除测试风力（不影响训练）
+        # 若测试需要保留风力，应在 reset 后重新调用 set_wind_force
+        if not getattr(self, '_test_wind_mode', False):
+            self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
+
         # [INS-NEW] 插入阶段状态机：
         # hold_counter = 连续满足插入条件的步数，达到 hold_steps 时判定成功
         # in_insertion = payload_z 已进入 entry_z 以下（进入插入阶段）
@@ -630,6 +697,7 @@ class CableRobotEnvWithObstacles:
         for _ in range(self.sim_steps):
             self._update_wind()
             self._apply_wind_force()
+            self._apply_test_wind()   # 测试风力：覆盖随机游走，施加恒定风
             mujoco.mj_step(self.model, self.data)
 
         if np.any(np.isnan(self.data.qpos)) or np.any(np.isnan(self.data.qvel)):
