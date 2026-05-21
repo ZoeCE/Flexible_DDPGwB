@@ -275,7 +275,9 @@ class EEAccController:
         self._ee_pos       = np.zeros(3, np.float64)
         self._ee_vel       = np.zeros(3, np.float64)
         self._last_q       = None
-        self._anchor_alpha = 0.08
+        # [v12 fix] 锚定强度从 config 读取 (与 JointSpaceExpert 同步, 默认 0.10)
+        # 之前硬编码 0.08, 与 expert 的 0.10 不同 → train vs test 行为不一致.
+        self._anchor_alpha = float(ee_cfg.get("anchor_alpha", 0.10))
 
         # [BUGFIX-CRITICAL] 存储绳长, 用于 lock_z 时正确计算 EE 目标高度
         rope_cfg = config.get("rope", {})

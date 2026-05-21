@@ -1,29 +1,14 @@
 # ==============================================================================
-# train_phase.py — 三阶段独立训练框架 v3
+# train_phase.py — 三阶段独立训练框架 v9 (BC 完全移除版)
 #
-# v3 主要变更:
-#
-# [ARCH-CRUISE] Cruise 段架构: RL 直接输出完整 xy 加速度
-#   - 移除 SwingDampingController 的 residual_mode 叠加
-#   - RL acc 直接送入 EEAccController (非残差)
-#   - SwingDampingController 保留仅作监控 (swing_energy 日志)
-#   - CruiseZYawPID 保留 (Z/Yaw 仍由 PID 控制)
-#
-# [ARCH-DESCENT] Descent 段架构: PID base + RL residual delta_q
-#   - JointSpaceExpert.compute_delta_q_target() 生成 base delta_q (PID)
-#   - RL PPOPhaseAgent 生成 residual acc (3D), 转为 residual delta_q
-#   - 最终 delta_q = pid_dq + clip(rl_dq, residual_dq_scale * |pid_dq|)
-#   - 废弃 DescentDualRLAgent (use_dual_rl=False)
-#
-# [CUR] 课程学习:
-#   Cruise: cruise_dist_curriculum=False (全程), obstacle_enabled=False (0 障碍物)
-#   Descent: descent_init_xy_start=2mm, tol_mult=3.0
-#
-# [BC] BC 预训练:
-#   cruise: n_epochs_cruise (默认 40)
-#   descent: n_epochs (默认 20)
-#
-# [REW] 奖励: 使用 phase_reward.py v3 (无变更需要在此处处理)
+# v9 重构核心:
+#   1. [BC 完全移除] cruise 残差 actor 在 PPOPhaseAgent.__init__ 中自动零初始化,
+#      pretrain_bc_cruise / pretrain_bc_descent 函数和相关 CLI 选项全部删除.
+#      来源: Jeon et al. 2025 (Residual MPC), Ankile et al. 2024 (ResiP).
+#   2. 缩小 cruise 残差幅度: 0.25 → 0.08 (base 31% → 13%, 符合文献最佳实践)
+#   3. 缩小课程扰动: wind 2N → 0.5N, 三类噪声 ÷3 (匹配 RL 物理修正能力)
+#   4. Descent 课程 6 级 → 5 级 (跳变 3× 改 2×), 加入倒退机制 (SR < 20% 回退一级)
+#   5. wandb 日志精简: PPO 训练 + 课程 + 训练表现 三类
 # ==============================================================================
 
 import os
@@ -36,28 +21,23 @@ import argparse
 import numpy as np
 import torch
 import torch.nn.functional as F
-from collections import Counter, deque
+from collections import deque
 
 from config import DEFAULT_CONFIG
 from mujoco_env_new import CableRobotEnvWithObstacles
 from controller import JointSpaceExpert
 from phase_agent import (
-    PPOPhaseAgent, SACPhaseAgent, CruiseDualRLAgent,
+    PPOPhaseAgent, SACPhaseAgent,
     build_lift_obs, build_cruise_obs, build_descent_obs,
     PPO_ZERO, SAC_ZERO,
-    OBS_EE_X, OBS_EE_Y, OBS_EE_VX, OBS_EE_VY,
-    OBS_PL_X, OBS_PL_Y, OBS_PL_VX, OBS_PL_VY,
-    OBS_EE_Z, OBS_PL_Z, OBS_PL_VZ,
 )
 from phase_reward import (
     compute_lift_reward, compute_cruise_reward, compute_descent_reward,
-    compute_lift_reward_tracked, compute_cruise_reward_planner,
-    compute_cruise_reward_swing_rl, compute_descent_reward_tracked,
     LiftRewardState, CruiseRewardState, DescentRewardState,
     RewardComponentTracker,
 )
-from ee_acc_controller import EEAccController, CruiseZYawPID, SwingDampingController, compute_swing_energy
-from orca_expert import CruiseORCAExpert, get_cruise_expert_acc
+from ee_acc_controller import EEAccController, CruiseZYawPID, SwingDampingController
+from stability_metrics import StabilityMetrics  # [v12.6] 训练时输出细粒度评估指标
 
 import mujoco
 from scipy.spatial.transform import Rotation as R
@@ -68,125 +48,31 @@ from scipy.spatial.transform import Rotation as R
 # ==============================================================================
 
 def set_global_seed(seed):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
+    random.seed(seed); np.random.seed(seed); torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
 
 class EpisodeStats:
-    def __init__(self, window=20):
+    def __init__(self, window=50):
         self.window = window
         self._data = {}
-
     def update(self, **kwargs):
         for k, v in kwargs.items():
             if k not in self._data:
-                self._data[k] = []
+                self._data[k] = deque(maxlen=self.window)
             self._data[k].append(float(v))
-            if len(self._data[k]) > self.window:
-                self._data[k].pop(0)
-
     def mean(self, key):
-        vals = self._data.get(key, [])
-        return float(np.mean(vals)) if vals else 0.0
-
+        d = self._data.get(key)
+        return float(np.mean(d)) if d else 0.0
     def success_rate(self):
         return self.mean("success")
 
 
-class StabilityMetrics:
-    """
-    全过程稳定性指标追踪器 — 用于定量衡量 RL 相对传统算法的优化效果.
-
-    记录每个 episode 的:
-      - swing_ke_curve: 摆动动能时序 (mJ), 用于绘制曲线
-      - avg_swing_ke: 全过程平均摆动动能 (mJ)
-      - max_swing_ke: 全过程最大摆动动能 (mJ)
-      - avg_swing_angle: 全过程平均摆角 (deg)
-      - max_swing_angle: 全过程最大摆角 (deg)
-      - max_acc: 全过程最大 EE 加速度 (m/s²)
-      - avg_acc: 全过程平均 EE 加速度 (m/s²)
-      - acc_curve: EE 加速度时序
-    """
-    def __init__(self):
-        self.reset_episode()
-
-    def reset_episode(self):
-        self.swing_ke_curve = []   # mJ
-        self.acc_curve = []        # m/s²
-        self.angle_curve = []      # deg
-        self._prev_ee_pos = None
-
-    def update_step(self, env, obs, config, dt=0.1):
-        """每步调用, 提取摆动动能、摆角、加速度。"""
-        try:
-            rope_L = float(config.get("controller", {}).get("L", 0.5))
-            mass   = float(config.get("prefab", {}).get("mass", 1.0))
-            g      = 9.81
-
-            # --- 摆动动能 ---
-            pl_vxy = np.array([obs[6], obs[7]], np.float64)
-            ee_vxy = np.array([obs[2], obs[3]], np.float64)
-            rel_v  = pl_vxy - ee_vxy
-            ke_J   = 0.5 * mass * float(np.dot(rel_v, rel_v))
-
-            # --- 摆角 (via 相对位移) ---
-            pl_xy  = np.array([obs[4], obs[5]], np.float64)
-            ee_xy  = np.array([obs[0], obs[1]], np.float64)
-            delta  = pl_xy - ee_xy
-            sin_th = float(np.linalg.norm(delta)) / max(rope_L, 0.01)
-            angle_deg = np.degrees(np.arcsin(min(sin_th, 1.0)))
-
-            self.swing_ke_curve.append(ke_J * 1000)   # → mJ
-            self.angle_curve.append(angle_deg)
-
-            # --- EE 加速度 (差分估计) ---
-            ee_pos = np.array([obs[0], obs[1]], np.float64)
-            if self._prev_ee_pos is not None:
-                v_now  = (ee_pos - self._prev_ee_pos) / max(dt, 1e-6)
-                # 只取 xy 分量做近似
-                acc_mag = float(np.linalg.norm(v_now))
-                self.acc_curve.append(acc_mag)
-            self._prev_ee_pos = ee_pos.copy()
-
-        except Exception:
-            pass
-
-    def episode_summary(self, phase_prefix=""):
-        """返回本 episode 的稳定性指标字典 (供 wandb 日志)。"""
-        if not self.swing_ke_curve:
-            return {}
-        prefix = f"{phase_prefix}/" if phase_prefix else ""
-        ke_arr  = np.array(self.swing_ke_curve)
-        ang_arr = np.array(self.angle_curve)
-        acc_arr = np.array(self.acc_curve) if self.acc_curve else np.zeros(1)
-        return {
-            f"{prefix}stability/avg_swing_ke_mJ":   float(np.mean(ke_arr)),
-            f"{prefix}stability/max_swing_ke_mJ":   float(np.max(ke_arr)),
-            f"{prefix}stability/avg_swing_angle_deg": float(np.mean(ang_arr)),
-            f"{prefix}stability/max_swing_angle_deg": float(np.max(ang_arr)),
-            f"{prefix}stability/avg_ee_acc_ms2":    float(np.mean(acc_arr)),
-            f"{prefix}stability/max_ee_acc_ms2":    float(np.max(acc_arr)),
-            f"{prefix}stability/p95_swing_ke_mJ":   float(np.percentile(ke_arr, 95)),
-            f"{prefix}stability/p95_swing_angle_deg": float(np.percentile(ang_arr, 95)),
-        }
-
-    def print_summary(self, phase=""):
-        """控制台打印稳定性摘要。"""
-        if not self.swing_ke_curve:
-            return ""
-        ke_arr  = np.array(self.swing_ke_curve)
-        ang_arr = np.array(self.angle_curve)
-        return (f"KE:{np.mean(ke_arr):.1f}/{np.max(ke_arr):.1f}mJ "
-                f"θ:{np.mean(ang_arr):.1f}°/{np.max(ang_arr):.1f}°")
-
-
 class Logger:
+    """轻量 wandb 包装器, 容错: 没装 wandb 也能跑。"""
     def __init__(self, log_dir, project="phase_rl", run_name=None):
-        self._wandb = None
-        self.log_dir = log_dir
+        self._wandb = None; self.log_dir = log_dir
         os.makedirs(log_dir, exist_ok=True)
         try:
             import wandb
@@ -195,27 +81,25 @@ class Logger:
                              dir=log_dir, config={}, resume="allow")
         except Exception:
             pass
-
     def update_config(self, cfg):
         if self._wandb:
             flat = {}
             def _f(d, pre=""):
                 for k, v in d.items():
                     key = f"{pre}{k}"
-                    if isinstance(v, dict):
-                        _f(v, key + "/")
-                    else:
-                        flat[key] = v
+                    if isinstance(v, dict): _f(v, key + "/")
+                    else: flat[key] = v
             _f(cfg)
-            self._wandb.config.update(flat, allow_val_change=True)
-
+            try: self._wandb.config.update(flat, allow_val_change=True)
+            except Exception: pass
     def log(self, step, metrics):
         if self._wandb:
-            self._wandb.log(metrics, step=step)
-
+            try: self._wandb.log(metrics, step=step)
+            except Exception: pass
     def close(self):
         if self._wandb:
-            self._wandb.finish()
+            try: self._wandb.finish()
+            except Exception: pass
 
 
 def save_checkpoint(agent, log_dir, episode, tag=""):
@@ -227,7 +111,7 @@ def save_checkpoint(agent, log_dir, episode, tag=""):
 
 
 # ==============================================================================
-# 观测 / Reward 调度
+# Reward / Obs 调度
 # ==============================================================================
 
 REWARD_FNS = {
@@ -253,7 +137,192 @@ def build_phase_obs(phase, env_obs, env, start_xy, target_xy, prev_tilt, prev_ya
 
 
 # ==============================================================================
-# 三阶段独立物理初始化
+# 课程管理器 [v8] 统一噪声/风力 + descent 初始化精度
+# ==============================================================================
+
+class CurriculumManager:
+    """
+    统一课程管理器, 每个阶段独立 level 计数.
+
+    每个 level 注入 4 类扰动:
+      - obs_noise:   normalize_obs 后的高斯噪声 σ
+      - act_noise:   delta_q 上的高斯噪声 σ (rad/step)
+      - force_noise: payload 上随机方向力 σ (N)
+      - wind_max:    风力上限 (N), 每 episode 从 [0, wind_max] 均匀采样
+
+    descent 额外字段: init_xy / init_vel / init_tilt / xy_tol
+
+    晋级条件:
+      (sr >= sr_threshold) AND (eps_at_level >= min_eps)
+      OR  eps_at_level >= hard_cap_eps (防卡死)
+    """
+    def __init__(self, config, phase):
+        cur = config.get("curriculum", {})
+        self.enabled = bool(cur.get("enabled", True))
+        self.phase   = phase
+
+        self.levels      = list(cur.get(f"{phase}_levels", []))
+        self.sr_thresh   = float(cur.get(f"{phase}_sr_threshold", 0.7))
+        self.min_eps     = int(cur.get(f"{phase}_min_eps",        150))
+        self.hard_cap    = int(cur.get(f"{phase}_hard_cap_eps",   1000))
+        self.stats_win   = int(cur.get(f"{phase}_stats_window",   50))
+
+        # [v9] 倒退机制
+        self.regression_enabled = bool(cur.get(f"{phase}_regression_enabled", False))
+        self.regression_sr_thresh = float(cur.get(f"{phase}_regression_sr_threshold", 0.20))
+        self.regression_min_eps   = int(cur.get(f"{phase}_regression_min_eps",         50))
+        # [v10] 倒退后强制停留时长 (防 ping-pong)
+        self.regression_stay_min_eps = int(cur.get(
+            f"{phase}_regression_stay_min_eps", 0))
+        self._regressed_recently = False   # 标记: 刚刚发生过倒退
+
+        self.level_idx    = 0
+        self.eps_at_level = 0
+        self._sr_window   = deque(maxlen=self.stats_win)
+
+        # 上一 episode 采样的风力 (供日志)
+        self._last_wind_force = 0.0
+        self._last_wind_dir   = 0.0
+
+    # ── 当前 level 信息 ──────────────────────────────────────────────────────
+    @property
+    def n_levels(self):
+        return max(1, len(self.levels))
+    @property
+    def current_level(self):
+        if not self.levels:
+            return {"obs_noise": 0.0, "act_noise": 0.0, "force_noise": 0.0, "wind_max": 0.0}
+        idx = min(self.level_idx, len(self.levels) - 1)
+        return self.levels[idx]
+    @property
+    def is_max_level(self):
+        return self.level_idx >= len(self.levels) - 1
+
+    # ── 每 episode 采样 ──────────────────────────────────────────────────────
+    def sample_episode_perturbations(self):
+        """
+        每个 episode 开始时调用, 返回该 episode 的扰动配置:
+          {obs_noise, act_noise, force_noise, wind_force, wind_dir}
+        """
+        if not self.enabled:
+            return {"obs_noise": 0.0, "act_noise": 0.0,
+                    "force_noise": 0.0, "wind_force": 0.0, "wind_dir": 0.0}
+        lvl = self.current_level
+        wind_max = float(lvl.get("wind_max", 0.0))
+        wf = float(np.random.uniform(0.0, wind_max)) if wind_max > 0 else 0.0
+        wd = float(np.random.uniform(0.0, 2 * np.pi))
+        self._last_wind_force = wf
+        self._last_wind_dir   = wd
+        return {
+            "obs_noise":   float(lvl.get("obs_noise",   0.0)),
+            "act_noise":   float(lvl.get("act_noise",   0.0)),
+            "force_noise": float(lvl.get("force_noise", 0.0)),
+            "wind_force":  wf, "wind_dir":  wd,
+        }
+
+    # ── descent 专属: 初始化精度参数 ────────────────────────────────────────
+    def get_descent_init(self):
+        """返回 descent 当前 level 的 init_xy/init_vel/init_tilt/xy_tol。"""
+        if self.phase != "descent" or not self.levels:
+            return None
+        lvl = self.current_level
+        return {
+            "xy_range":   float(lvl.get("init_xy",   0.030)),
+            "vel_range":  float(lvl.get("init_vel",  0.020)),
+            "tilt_range": float(lvl.get("init_tilt", 0.008)),
+            "xy_tol":     float(lvl.get("xy_tol",    0.005)),
+        }
+
+    # ── 推进逻辑 ─────────────────────────────────────────────────────────────
+    def update(self, success):
+        """每 episode 末调用, 累计统计 & 检查是否晋级/倒退。"""
+        if not self.enabled or self.is_max_level:
+            self.eps_at_level += 1
+            self._sr_window.append(float(success))
+            # 即使 max level, 也允许从 max 倒退 (但不允许从 0 倒退)
+            if (self.regression_enabled and self.level_idx > 0 and
+                    self._check_regression()):
+                return self._regress("max_level_regression")
+            return False
+        self.eps_at_level += 1
+        self._sr_window.append(float(success))
+
+        # [v10] 倒退后停留缓冲: 强制至少 stay_min_eps 后才能再次晋级
+        _can_advance = True
+        if (self._regressed_recently and
+                self.eps_at_level < self.regression_stay_min_eps):
+            _can_advance = False
+        elif self.eps_at_level >= self.regression_stay_min_eps:
+            self._regressed_recently = False  # 缓冲期过, 解锁
+
+        # 仅在窗口足够时考察 SR
+        if (_can_advance and
+            len(self._sr_window) >= self.stats_win and
+            self.eps_at_level >= self.min_eps):
+            sr = float(np.mean(self._sr_window))
+            if sr >= self.sr_thresh:
+                return self._advance(f"SR={sr*100:.0f}%≥{self.sr_thresh*100:.0f}%")
+        # [v9] 倒退检查
+        if (self.regression_enabled and self.level_idx > 0 and
+                self._check_regression()):
+            sr = float(np.mean(self._sr_window))
+            return self._regress(
+                f"SR={sr*100:.0f}%<{self.regression_sr_thresh*100:.0f}%")
+        if _can_advance and self.eps_at_level >= self.hard_cap:
+            return self._advance(f"hard_cap={self.hard_cap}")
+        return False
+
+    def _check_regression(self):
+        """[v9] 检查是否应倒退到上一级。"""
+        if len(self._sr_window) < self.stats_win: return False
+        if self.eps_at_level < self.regression_min_eps: return False
+        sr = float(np.mean(self._sr_window))
+        return sr < self.regression_sr_thresh
+
+    def _advance(self, reason):
+        self.level_idx += 1
+        self.eps_at_level = 0
+        self._sr_window.clear()
+        print(f"  [Curriculum-{self.phase}] L{self.level_idx-1} → L{self.level_idx} "
+              f"({reason})")
+        return True
+
+    def _regress(self, reason):
+        """[v9] 倒退到上一级 (防止课程卡死后无法恢复)。"""
+        self.level_idx = max(0, self.level_idx - 1)
+        self.eps_at_level = 0
+        self._sr_window.clear()
+        self._just_regressed = True   # [v10] 给训练循环用, 触发 Adam reset
+        self._regressed_recently = True  # [v10] 缓冲期标志
+        print(f"  [Curriculum-{self.phase}] L{self.level_idx+1} ↓ L{self.level_idx} "
+              f"(regression: {reason})")
+        return True
+
+    def consume_regression_flag(self):
+        """[v10] 训练循环每 episode 末调用, 如果刚倒退则返回 True。"""
+        flag = getattr(self, '_just_regressed', False)
+        self._just_regressed = False
+        return flag
+
+    # ── 日志辅助 ─────────────────────────────────────────────────────────────
+    def info(self):
+        """返回当前课程信息字典 (供 wandb 日志)。"""
+        lvl = self.current_level
+        sr = float(np.mean(self._sr_window)) if self._sr_window else 0.0
+        return {
+            f"cur/{self.phase}/level":       self.level_idx,
+            f"cur/{self.phase}/eps_at_lvl":  self.eps_at_level,
+            f"cur/{self.phase}/sr_window":   sr,
+            f"cur/{self.phase}/obs_noise":   float(lvl.get("obs_noise",   0.0)),
+            f"cur/{self.phase}/act_noise":   float(lvl.get("act_noise",   0.0)),
+            f"cur/{self.phase}/force_noise": float(lvl.get("force_noise", 0.0)),
+            f"cur/{self.phase}/wind_max":    float(lvl.get("wind_max",    0.0)),
+            f"cur/{self.phase}/last_wind":   self._last_wind_force,
+        }
+
+
+# ==============================================================================
+# 三阶段独立物理初始化 (移除 cruise_dist_curriculum, ORCA 相关)
 # ==============================================================================
 
 def _sync_env_internal_state(env):
@@ -284,12 +353,11 @@ def _sync_env_internal_state(env):
         env.action_queue.append(init_q.copy())
 
 
-def reset_for_phase(env, phase, config, override_init_xy_range=None,
-                    override_init_vel_range=None, override_init_tilt_range=None,
-                    cruise_dist_frac=1.0):
-    # [v3.6] 增加 XML 文件竞争重试机制
-    # WSL/Windows 跨文件系统上 MuJoCo include 文件可能出现竞争写入 → Empty file 错误
-    # 最多重试 5 次
+def reset_for_phase(env, phase, config,
+                    override_init_xy_range=None,
+                    override_init_vel_range=None,
+                    override_init_tilt_range=None):
+    """统一三阶段物理初始化 (移除 cruise_dist_curriculum, ORCA)。"""
     max_xml_retries = 5
     obs = None; planned_path = None
     for _xml_retry in range(max_xml_retries):
@@ -298,23 +366,17 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
         try:
             obs = env.reset()
             planned_path = env.get_planned_path()
-            sys.stdout.close()
-            sys.stdout = old_stdout
-            break   # 成功
+            sys.stdout.close(); sys.stdout = old_stdout
+            break
         except (ValueError, RuntimeError) as _xml_err:
-            sys.stdout.close()
-            sys.stdout = old_stdout
+            sys.stdout.close(); sys.stdout = old_stdout
             _err_str = str(_xml_err)
-            if "Empty file" in _err_str or "XML Error" in _err_str or "xml" in _err_str.lower():
+            if any(s in _err_str.lower() for s in ["empty file", "xml error", "xml"]):
                 if _xml_retry < max_xml_retries - 1:
-                    import time as _time
-                    _time.sleep(0.05 * (_xml_retry + 1))  # 指数退避
-                    continue
-            raise   # 其他错误直接抛出
-        except Exception:
-            sys.stdout.close()
-            sys.stdout = old_stdout
+                    time.sleep(0.05 * (_xml_retry + 1)); continue
             raise
+        except Exception:
+            sys.stdout.close(); sys.stdout = old_stdout; raise
 
     if obs is None or planned_path is None:
         return None, None
@@ -323,97 +385,73 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
     rng = np.random.default_rng()
 
     if phase == "lift":
-        # [v3.6] Lift 专属初始化 — 之前为 pass, agent 始终从固定起点出发, 无法泛化
-        #
-        # 设计:
-        #   1. env.reset() 已将 prefab 放在 default_start_xy + noise 处 (noise=init_position_range)
-        #      但该 noise 由 env 内部随机, 与 config["lift_rl"]["init_xy_range"] 无关
-        #   2. 这里在 env.reset() 结果基础上追加 lift_rl 专属扰动:
-        #      - prefab xy: ± init_xy_range (可叠加到 env 自身的随机)
-        #      - prefab z:  默认 = init_qpos_prefab[2], 加 ± init_z_range
-        #      - prefab vel: 从零开始 (init_vel_range=0.0)
-        #   3. 臂形用 IK 跟随新的 prefab 位置
-        #   4. warmup 60步让物理稳定后再开始训练
-        #
-        _lift_cfg  = config.get("lift_rl", {})
-        _xy_range  = override_init_xy_range  if override_init_xy_range  is not None                      else float(_lift_cfg.get("init_xy_range", 0.01))
-        _z_range   = float(_lift_cfg.get("init_z_range",  0.01))
-        _vel_range = float(_lift_cfg.get("init_vel_range", 0.0))
+        _xy_range  = override_init_xy_range if override_init_xy_range is not None \
+                     else float(phase_cfg.get("init_xy_range", 0.01))
+        _z_range   = float(phase_cfg.get("init_z_range",  0.01))
+        _vel_range = float(phase_cfg.get("init_vel_range", 0.0))
 
-        rope_L    = float(config["controller"].get("L", 0.5))
-        seed_q    = np.array(config["reset"]["init_qpos_arm"], np.float64)
+        rope_L      = float(config["controller"].get("L", 0.5))
+        seed_q      = np.array(config["reset"]["init_qpos_arm"], np.float64)
         init_pref_z = float(config["reset"]["init_qpos_prefab"][2])
 
         pref_jnt  = env.model.body("prefab").jntadr[0]
         qpos_addr = env.model.jnt_qposadr[pref_jnt]
         dof_idx   = env.model.jnt_dofadr[pref_jnt]
 
-        # env.reset() 后的 prefab 位置作为基础起点
         base_xy = env.data.qpos[qpos_addr:qpos_addr+2].copy()
         base_z  = float(env.data.qpos[qpos_addr+2])
-
-        # 在基础起点上叠加 lift 专属扰动
         noise_xy = rng.uniform(-_xy_range, _xy_range, 2)
         noise_z  = rng.uniform(-_z_range,  _z_range)
         new_pref_xy = base_xy + noise_xy
         new_pref_z  = float(np.clip(base_z + noise_z, init_pref_z * 0.5, init_pref_z * 1.5))
-
-        # 臂形: IK 让 EE 悬停在 prefab 正上方 rope_L 处
         ee_z_target = new_pref_z + rope_L
         init_q = env.ik_solver.solve_4d(
-            seed_q, float(new_pref_xy[0]), float(new_pref_xy[1]), ee_z_target, 0.0)
+            seed_q, float(new_pref_xy[0]), float(new_pref_xy[1]),
+            ee_z_target, 0.0)
         if init_q is None or np.any(np.isnan(init_q)):
             init_q = seed_q.copy()
 
-        env.data.qpos[:7]          = init_q
-        env.data.qvel[:7]          = 0.0
-        env.data.ctrl[:7]          = init_q
+        env.data.qpos[:7] = init_q
+        env.data.qvel[:7] = 0.0
+        env.data.ctrl[:7] = init_q
         env.data.qpos[qpos_addr]   = new_pref_xy[0]
         env.data.qpos[qpos_addr+1] = new_pref_xy[1]
         env.data.qpos[qpos_addr+2] = new_pref_z
-        env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]  # 单位四元数
+        env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]
         env.data.qvel[dof_idx:dof_idx+6] = 0.0
 
-        # 物理稳定 (夹持prefab位置)
         has_viewer = (getattr(env, 'render_mode', False)
                       and getattr(env, 'viewer', None) is not None)
         for _ in range(60):
-            env.data.qpos[:7]          = init_q
-            env.data.qvel[:7]          = 0.0
+            env.data.qpos[:7] = init_q
+            env.data.qvel[:7] = 0.0
             env.data.qpos[qpos_addr]   = new_pref_xy[0]
             env.data.qpos[qpos_addr+1] = new_pref_xy[1]
             env.data.qpos[qpos_addr+2] = new_pref_z
             env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]
             env.data.qvel[dof_idx:dof_idx+6] = 0.0
             mujoco.mj_step(env.model, env.data)
-            if has_viewer:
-                env.viewer.sync()
+            if has_viewer: env.viewer.sync()
         mujoco.mj_forward(env.model, env.data)
 
-        # 初始速度扰动 (vel_range 默认 0)
         if _vel_range > 0:
             env.data.qvel[dof_idx:dof_idx+2] += rng.uniform(-_vel_range, _vel_range, 2)
             mujoco.mj_forward(env.model, env.data)
-
         _sync_env_internal_state(env)
         obs = env._get_obs()
 
     elif phase == "cruise":
-        z_cruise = float(config["planning"]["payload_z_cruise"])
-        start_xy = env.default_start_xy.copy()
-        target_xy = env.target_pos.copy()
-
-        # [v3] cruise_dist_curriculum=False 时 cruise_dist_frac=1.0, 全程训练
-        if cruise_dist_frac < 1.0:
-            lerp_start = target_xy + cruise_dist_frac * (start_xy - target_xy)
-            noise_range = float(phase_cfg.get("init_xy_range", 0.01))
-            lerp_start += rng.uniform(-noise_range, noise_range, 2)
-            start_xy = lerp_start
-
+        # [v13.0 合并 lift] cruise 现在从低空 (z ≈ 0.11) 起步, 接管 lift 任务
+        # NMPC 自动处理 lift→cruise 边界 (controller.py tracker 已识别 lift WP)
+        z_cruise   = float(config["planning"]["payload_z_cruise"])
+        init_pref_z = float(config["reset"]["init_qpos_prefab"][2])  # 默认 0.10
+        start_xy   = env.default_start_xy.copy()
         rope_L = float(config["controller"].get("L", 0.5))
-        ee_z = z_cruise + rope_L
+        # EE 起步: 比 payload 高一个 rope_L
+        ee_z   = init_pref_z + rope_L
         seed_q = np.array(config["reset"]["init_qpos_arm"], np.float64)
-        init_q = env.ik_solver.solve_4d(seed_q, float(start_xy[0]), float(start_xy[1]), ee_z, 0.0)
+        init_q = env.ik_solver.solve_4d(seed_q, float(start_xy[0]), float(start_xy[1]),
+                                         ee_z, 0.0)
         if init_q is None or np.any(np.isnan(init_q)):
             init_q = seed_q.copy()
 
@@ -421,16 +459,16 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
         env.data.qvel[:7] = 0.0
         env.data.ctrl[:7] = init_q
 
-        pref_jnt = env.model.body("prefab").jntadr[0]
+        pref_jnt  = env.model.body("prefab").jntadr[0]
         qpos_addr = env.model.jnt_qposadr[pref_jnt]
-        dof_idx = env.model.jnt_dofadr[pref_jnt]
+        dof_idx   = env.model.jnt_dofadr[pref_jnt]
 
         xy_range = override_init_xy_range if override_init_xy_range is not None \
                    else float(phase_cfg.get("init_xy_range", 0.01))
         noise_xy = rng.uniform(-xy_range, xy_range, 2)
         env.data.qpos[qpos_addr]   = start_xy[0] + noise_xy[0]
         env.data.qpos[qpos_addr+1] = start_xy[1] + noise_xy[1]
-        env.data.qpos[qpos_addr+2] = z_cruise
+        env.data.qpos[qpos_addr+2] = init_pref_z   # [v13.0] 低空起步
         env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]
         env.data.qvel[dof_idx:dof_idx+6] = 0.0
 
@@ -442,19 +480,17 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
             env.data.qvel[:7] = 0.0
             env.data.qpos[qpos_addr]   = prefab_hold_xy[0]
             env.data.qpos[qpos_addr+1] = prefab_hold_xy[1]
-            env.data.qpos[qpos_addr+2] = z_cruise
+            env.data.qpos[qpos_addr+2] = init_pref_z   # [v13.0]
             env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]
             env.data.qvel[dof_idx:dof_idx+6] = 0.0
             mujoco.mj_step(env.model, env.data)
-            if has_viewer:
-                env.viewer.sync()
+            if has_viewer: env.viewer.sync()
         mujoco.mj_forward(env.model, env.data)
 
         vel_range = override_init_vel_range if override_init_vel_range is not None \
                     else float(phase_cfg.get("init_vel_range", 0.0))
         if vel_range > 0:
-            noise_vel = rng.uniform(-vel_range, vel_range, 2)
-            env.data.qvel[dof_idx:dof_idx+2] += noise_vel
+            env.data.qvel[dof_idx:dof_idx+2] += rng.uniform(-vel_range, vel_range, 2)
         mujoco.mj_forward(env.model, env.data)
         _sync_env_internal_state(env)
         obs = env._get_obs()
@@ -463,9 +499,10 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
         z_cruise = float(config["planning"]["payload_z_cruise"])
         target_xy = env.target_pos.copy()
         rope_L = float(config["controller"].get("L", 0.5))
-        ee_z = z_cruise + rope_L
+        ee_z   = z_cruise + rope_L
         seed_q = np.array(config["reset"]["init_qpos_arm"], np.float64)
-        init_q = env.ik_solver.solve_4d(seed_q, float(target_xy[0]), float(target_xy[1]), ee_z, 0.0)
+        init_q = env.ik_solver.solve_4d(seed_q,
+            float(target_xy[0]), float(target_xy[1]), ee_z, 0.0)
         if init_q is None or np.any(np.isnan(init_q)):
             init_q = seed_q.copy()
 
@@ -473,9 +510,9 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
         env.data.qvel[:7] = 0.0
         env.data.ctrl[:7] = init_q
 
-        pref_jnt = env.model.body("prefab").jntadr[0]
+        pref_jnt  = env.model.body("prefab").jntadr[0]
         qpos_addr = env.model.jnt_qposadr[pref_jnt]
-        dof_idx = env.model.jnt_dofadr[pref_jnt]
+        dof_idx   = env.model.jnt_dofadr[pref_jnt]
 
         xy_range = override_init_xy_range if override_init_xy_range is not None \
                    else float(phase_cfg.get("init_xy_range", 0.010))
@@ -498,11 +535,9 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
             env.data.qpos[qpos_addr+3:qpos_addr+7] = [1, 0, 0, 0]
             env.data.qvel[dof_idx:dof_idx+6] = 0.0
             mujoco.mj_step(env.model, env.data)
-            if has_viewer:
-                env.viewer.sync()
+            if has_viewer: env.viewer.sync()
         mujoco.mj_forward(env.model, env.data)
 
-        # 加噪声
         vel_range = override_init_vel_range if override_init_vel_range is not None \
                     else float(phase_cfg.get("init_vel_range", 0.0))
         if vel_range > 0:
@@ -525,40 +560,26 @@ def reset_for_phase(env, phase, config, override_init_xy_range=None,
     return obs, planned_path
 
 
-# ==============================================================================
-# OmniReset for Descent
-# ==============================================================================
-
-def reset_for_phase_omnireset(env, phase, config, cur=None, ts=0, ep=0, suc=False):
-    """Descent 段 OmniReset: 有概率从近目标处初始化。"""
-    assert phase == "descent"
+def reset_for_descent_with_cur(env, config, cur):
+    """Descent 段 reset, 含课程注入 + OmniReset 概率。"""
     cur_cfg = config.get("curriculum", {})
     omnireset_enabled = bool(cur_cfg.get("omnireset_enabled", True))
     near_prob = float(cur_cfg.get("omnireset_near_goal_prob", 0.10))
 
-    _desc_init = None
-    if cur is not None and hasattr(cur, 'get_descent_init_params'):
-        _desc_init = cur.get_descent_init_params(ts, ep, suc)
+    desc_init = cur.get_descent_init() if cur is not None else None
 
     if omnireset_enabled and np.random.rand() < near_prob:
-        near_xy = float(cur_cfg.get("omnireset_near_goal_xy", 0.012))
-        near_z_offset = float(cur_cfg.get("omnireset_near_goal_z_offset", 0.05))
-        return reset_for_phase(
-            env, "descent", config,
+        near_xy       = float(cur_cfg.get("omnireset_near_goal_xy", 0.012))
+        return reset_for_phase(env, "descent", config,
             override_init_xy_range=near_xy,
             override_init_vel_range=0.005,
-            override_init_tilt_range=0.001,
-        )
-    else:
-        xy_r = _desc_init["xy_range"]   if _desc_init else None
-        v_r  = _desc_init["vel_range"]  if _desc_init else None
-        t_r  = _desc_init["tilt_range"] if _desc_init else None
-        return reset_for_phase(
-            env, "descent", config,
-            override_init_xy_range=xy_r,
-            override_init_vel_range=v_r,
-            override_init_tilt_range=t_r,
-        )
+            override_init_tilt_range=0.001)
+    if desc_init is not None:
+        return reset_for_phase(env, "descent", config,
+            override_init_xy_range=desc_init["xy_range"],
+            override_init_vel_range=desc_init["vel_range"],
+            override_init_tilt_range=desc_init["tilt_range"])
+    return reset_for_phase(env, "descent", config)
 
 
 # ==============================================================================
@@ -573,45 +594,74 @@ def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos):
     expert.tracker.current_idx = nearest_idx
 
 
-def collect_expert_acc(expert, env, obs, current_q, phase, config, orca_expert=None):
-    """收集专家 EE 加速度 (用于 BC 标签)。"""
+def _truncate_path_for_lift(planned_path, config):
+    """[v12.2] 为 lift phase 截短 path, 只保留垂直上升段.
+
+    问题: full path = [lift wps (xy=start, z 渐升)] + [cruise wps (xy 移动, z=z_cruise)]
+        + [descent wps]. NMPC tracker 有 10cm look-ahead, 会在 lift 段尚未完成时
+        把参考点拉向 cruise xy → expert 提前平移 → lift 不能达到 cruise 高度 → SR=0.
+
+    修复: 训练 lift 时只把 lift 段 + 一个虚拟"悬停"航点喂给 tracker.
+        悬停航点 = (start_xy, z_cruise). NMPC 到达后会在该位置悬停, 不会平移.
+
+    Args:
+        planned_path: (N, 3) ndarray, env 生成的全段 path
+        config: dict, 用于读取 z_cruise
+
+    Returns:
+        truncated_path: (M, 3) ndarray, M ≤ N, 只含 lift waypoints
+    """
+    if planned_path is None or len(planned_path) == 0:
+        return planned_path
+    pp = np.asarray(planned_path, dtype=np.float64)
+    z_cruise = float(config.get("planning", {}).get("payload_z_cruise", 0.25))
+    # lift 段定义: z 上升期 (z < z_cruise) + 第一个 z=z_cruise 的航点 (= lift target).
+    # 之后的 cruise/descent 航点全部丢弃.
+    keep_idx = []
+    reached_cruise_z = False
+    for i, wp in enumerate(pp):
+        wp_z = float(wp[2]) if len(wp) >= 3 else 0.3
+        if wp_z < z_cruise - 0.001:
+            keep_idx.append(i)            # lift 渐升段
+        elif not reached_cruise_z:
+            keep_idx.append(i)            # 首个 cruise 高度航点 = lift target
+            reached_cruise_z = True
+        else:
+            break                         # 后续 cruise 段不要
+    if not keep_idx:
+        # fallback: 至少保留首点
+        return pp[:1].copy()
+    return pp[keep_idx].copy()
+
+
+def collect_expert_acc(expert, env, obs, current_q, phase, config):
+    """收集专家 EE 加速度 (用于 BC 标签 [descent] 或 SAC warmup [cruise/descent])。"""
     if phase == "cruise":
-        # [v4] 优先使用 ORCA expert (更真实的避障导航)
-        if orca_expert is not None:
-            try:
-                txy = env.target_pos.copy()
-                return get_cruise_expert_acc(env, obs, txy, config, orca_expert)
-            except Exception:
-                pass
-        # fallback: 原有 tracker-based expert
         action_4d = expert.tracker.compute_ee_acceleration(obs, target_yaw=0.0)
         acc_max_xy = float(config["ee_control"].get("acc_max_xy", 0.8))
         return np.clip(
             np.array([float(action_4d[0]), float(action_4d[1])], dtype=np.float32),
             -acc_max_xy, acc_max_xy)
     elif phase == "descent":
-        # [v3] descent expert: 返回 3D acc 标签 (用于 BC 预训练)
-        # PID + residual 架构下, BC 标签是残差为 0 时 PID 本身对应的 acc
         target_xy = env.target_pos.copy()
         target_pz = float(config["insertion"]["target_payload_z"])
         pl_pos = env.data.body('prefab').xpos.copy()
-        pl_xy  = pl_pos[:2]
-        pl_z   = float(pl_pos[2])
+        pl_xy  = pl_pos[:2]; pl_z = float(pl_pos[2])
         dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
         pl_vel  = env.data.qvel[dof_idx:dof_idx+3].copy()
         acc_max_xy = float(config["descent_rl"].get("acc_max_xy", 0.5))
-        acc_max_z  = float(config["descent_rl"].get("acc_max_z", 1.0))
+        acc_max_z  = float(config["descent_rl"].get("acc_max_z",  1.0))
         diff_xy = target_xy - pl_xy
         dist_xy = float(np.linalg.norm(diff_xy))
         if dist_xy > 0.002:
-            dir_xy = diff_xy / dist_xy
+            dir_xy   = diff_xy / dist_xy
             vel_proj = float(np.dot(pl_vel[:2], dir_xy))
-            acc_mag = 0.6 * min(dist_xy, 0.05) / 0.05 - 0.8 * vel_proj
-            acc_xy = dir_xy * np.clip(acc_mag, -1.0, 1.0) * acc_max_xy
+            acc_mag  = 0.6 * min(dist_xy, 0.05) / 0.05 - 0.8 * vel_proj
+            acc_xy   = dir_xy * np.clip(acc_mag, -1.0, 1.0) * acc_max_xy
         else:
             acc_xy = -pl_vel[:2] * 1.5
         acc_xy = np.clip(acc_xy, -acc_max_xy, acc_max_xy)
-        align_factor = np.exp(-dist_xy / 0.01)
+        align_factor = float(np.exp(-dist_xy / 0.01))
         z_error = pl_z - target_pz
         if z_error > 0.005 and align_factor > 0.3:
             acc_z = -(0.5 * min(z_error, 0.15) + 0.3 * max(float(pl_vel[2]), 0)) * align_factor
@@ -619,427 +669,125 @@ def collect_expert_acc(expert, env, obs, current_q, phase, config, orca_expert=N
             acc_z = -float(pl_vel[2]) * 1.0
         acc_z = np.clip(acc_z, -acc_max_z, acc_max_z)
         return np.array([acc_xy[0], acc_xy[1], acc_z], dtype=np.float32)
-    else:
-        return np.zeros(config[f"{phase}_rl"]["action_dim"], dtype=np.float32)
+    return np.zeros(config[f"{phase}_rl"]["action_dim"], dtype=np.float32)
 
 
 # ==============================================================================
-# [v3 ARCH-DESCENT] PID base + RL residual delta_q 计算
+# Descent: PID base + RL residual delta_q 合并
 # ==============================================================================
 
 def _apply_descent_pid_residual(expert, rl_act, obs, env, config, current_q):
+    """Descent 段 PID + RL residual 动作合并.
+
+    [v12.3 关键修复] 修复 RL authority 随 PID 收敛而消失的 bug:
+
+    旧逻辑 (有 bug):
+        max_residual_norm = residual_dq_scale * max(|pid_dq|, dq_max_avg * 0.1)
+        # 当 pid_dq 很小 (PID 收敛到稳态时), max_residual_norm 也很小
+        # → RL 残差只有 pid_dq 的 30%, 即 0.3-1mm
+        # 但 descent 最后 1-2mm 的精度修正恰恰需要 RL 介入
+        # → RL 没有"力量"做最后修正 → SR 卡在课程过渡处
+
+    新逻辑 (v12.3):
+        max_residual_norm = residual_dq_scale * dq_max_avg
+        # 让 RL 残差 始终 有充分 authority (默认 30% × 0.12 = 0.036, 约 36mm)
+        # 这样 RL 残差能在任何时候做出 ~5mm 级别的精度修正
+        # 不会因 PID 收敛而 RL "失去能量"
+
+    来源:
+        Ankile et al. 2024 (ResiP, arXiv:2407.16677): residual 应有恒定且
+        足够的 authority, 不能与 base 输出耦合.
+        Alakuijala 2021 (arXiv:2106.08050): residual scale 应独立设定.
     """
-    Descent 段 PID + RL residual 动作合并.
-
-    接收已经采样好的 rl_act (PPO/SAC 主循环中采样一次), 与 PID delta_q 合并.
-
-    Bug fix (v3.1): 原 compute_descent_pid_residual_dq() 内部调用 agent.act()
-    导致每步采样两次, PPO buffer 中存储的 lp/val 与实际执行的 act 不匹配,
-    破坏 on-policy 约束, 引起 SR 大幅振荡. 本函数只做合并, 不做采样.
-
-    Args:
-        rl_act: 已采样的 RL 残差加速度 (shape (3,), 来自主循环的 agent.act())
-        obs:    环境原始 obs (供 expert 使用)
-        current_q: 当前关节角
-
-    Returns:
-        dq_total: 最终关节角增量 (shape (7,))
-        pid_dq:   PID 输出的 delta_q (shape (7,), 供日志使用)
-    """
-    # 1. PID base delta_q
     try:
         pid_dq = expert.compute_delta_q_target(obs, current_q.astype(np.float64))
     except Exception:
         pid_dq = np.zeros(7, dtype=np.float32)
     pid_dq = np.asarray(pid_dq, dtype=np.float32)
 
-    # 2. RL acc → residual delta_q
     residual_dq_scale = float(config["descent_rl"].get("residual_dq_scale", 0.30))
     dq_max     = np.array(config["space"].get("dq_max", [0.12]*7), dtype=np.float32)
-    acc_max_xy = float(config["descent_rl"].get("acc_max_xy", 0.5))
-    acc_max_z  = float(config["descent_rl"].get("acc_max_z",  1.0))
+    acc_max_xy = float(config["descent_rl"].get("acc_max_xy", 0.20))
+    acc_max_z  = float(config["descent_rl"].get("acc_max_z",  0.40))
 
-    # 归一化到 [-1, 1]
-    rl_norm_xy = rl_act[:2] / max(acc_max_xy, 1e-6)
+    # rl_act 来自 actor, 范围 [-acc_max_xy, +acc_max_xy] (xy) 和 [-acc_max_z, +acc_max_z] (z)
+    rl_norm_xy = rl_act[:2] / max(acc_max_xy, 1e-6)   # 归一化到 [-1, 1]
     rl_norm_z  = float(rl_act[2]) / max(acc_max_z, 1e-6) if len(rl_act) > 2 else 0.0
 
-    # 残差量级上限 = residual_dq_scale × max(|pid_dq|, dq_mean*0.1)
-    pid_dq_norm      = float(np.linalg.norm(pid_dq))
-    max_residual_norm = residual_dq_scale * max(pid_dq_norm, float(np.mean(dq_max)) * 0.1)
+    # [v12.3 修复] max_residual_norm 与 PID 输出解耦
+    # 旧: max_residual_norm = residual_dq_scale * max(|pid_dq|, dq_max_avg * 0.1)
+    #     → 当 PID 收敛 (|pid_dq| 小) 时, max_residual_norm 也变小, RL 失去 authority
+    # 新: max_residual_norm = residual_dq_scale * dq_max_avg
+    #     → RL authority 与 PID 输出无关, 始终有足够"力量"做精度修正
+    dq_max_avg = float(np.mean(dq_max))                          # 默认 0.12
+    max_residual_norm = residual_dq_scale * dq_max_avg           # 默认 0.036
 
-    # 映射到前 3 个关节 (xyz 方向), 其余关节残差为 0
-    rl_dq    = np.zeros(7, dtype=np.float32)
+    rl_dq = np.zeros(7, dtype=np.float32)
     rl_dq[0] = rl_norm_xy[0] * max_residual_norm / np.sqrt(3)
     rl_dq[1] = rl_norm_xy[1] * max_residual_norm / np.sqrt(3)
     rl_dq[2] = rl_norm_z      * max_residual_norm / np.sqrt(3)
-    rl_dq    = np.clip(rl_dq, -dq_max * residual_dq_scale, dq_max * residual_dq_scale)
+    rl_dq = np.clip(rl_dq, -dq_max * residual_dq_scale, dq_max * residual_dq_scale)
 
-    # 3. 合并并整体限幅
     dq_total = np.clip(pid_dq + rl_dq, -dq_max, dq_max)
     return dq_total, pid_dq
 
 
 # ==============================================================================
-# 课程管理器 [v3]
+# 噪声注入辅助
 # ==============================================================================
 
-class CurriculumManager:
-    def __init__(self, config, phase):
-        cur = config.get("curriculum", {})
-        self.enabled = bool(cur.get("enabled", True))
-        self.phase   = phase
-        self._rl_started = False
+def _add_obs_noise(norm_obs, sigma):
+    if sigma <= 0: return norm_obs
+    return (norm_obs + np.random.normal(0, sigma, norm_obs.shape).astype(np.float32))
 
-        # ── 随机风力课程 [v5] ────────────────────────────────────────────────
-        self.init_wind_curriculum(config)
-
-        # ── Cruise 课程 [v5] ─────────────────────────────────────────────────
-        # 取消障碍物课程渐进, 直接使用 3 个真实障碍物
-        self.use_obs_cur   = False   # [v5] 关闭课程渐进
-        self.current_n_obs = int(config.get("scene", {}).get("n_obstacles", 3))
-        self.obs_max_n     = int(cur.get("obstacle_max_n", 3))
-        self.obs_warmup    = int(cur.get("obstacle_level_warmup_eps", 500))
-        self.obs_perf_win  = int(cur.get("perf_window", 300))
-        self.obs_sr_thresh = float(cur.get("perf_sr_threshold", 0.65))
-        self.obs_min_eps   = int(cur.get("perf_min_episodes_per_level", 3000))
-        self.obs_hard_cap_eps = int(cur.get("perf_hard_cap_eps", 999_999))  # [v4] ep硬上限
-        self.obs_stats     = EpisodeStats(window=self.obs_perf_win)
-        self._obs_lvl_ep   = 0
-        self._obs_lvl_ts   = 0
-        # Shadow obstacle 配置 (0 真实障碍物时用于 reward)
-        self.shadow_enabled = bool(cur.get("shadow_obstacle_enabled", True))
-        self.shadow_n       = int(cur.get("shadow_obstacle_n", 3))
-        self.shadow_r_min   = float(cur.get("shadow_obstacle_r_min", 0.006))
-        self.shadow_r_max   = float(cur.get("shadow_obstacle_r_max", 0.015))
-
-        # 距离课程: 禁用 (全程训练)
-        self.use_cruise_dist_cur = False   # [v3] 关闭
-        self.current_cruise_dist_frac = 1.0
-
-        # 课程统计 (保留用于日志)
-        self.cruise_dist_stats = EpisodeStats(window=150)
-
-        # ── Descent 课程 [v3] ────────────────────────────────────────────────
-        self.use_descent_init_cur = (phase == "descent" and
-                                     bool(cur.get("descent_init_curriculum", True)) and
-                                     self.enabled)
-
-        if self.use_descent_init_cur:
-            # [v3.4] per-level 查表, 不再用 start/end 线性插值
-            # 优先读取 per-level 列表; 若不存在则退回旧的线性插值
-            _xy_ranges   = cur.get("descent_init_xy_ranges",   None)
-            _vel_ranges  = cur.get("descent_init_vel_ranges",  None)
-            _tilt_ranges = cur.get("descent_init_tilt_ranges", None)
-            _xy_tols     = cur.get("descent_init_xy_tols",     None)
-            n_levels     = int(cur.get("descent_cur_levels", 5))
-
-            if _xy_ranges is not None:
-                # 新格式: per-level 列表
-                assert len(_xy_ranges) == n_levels, "descent_init_xy_ranges 长度须等于 descent_cur_levels"
-                self.descent_levels = []
-                for i in range(n_levels):
-                    self.descent_levels.append({
-                        "xy_range":   float(_xy_ranges[i]),
-                        "vel_range":  float(_vel_ranges[i])  if _vel_ranges  else 0.0,
-                        "tilt_range": float(_tilt_ranges[i]) if _tilt_ranges else 0.001,
-                        "xy_tol":     float(_xy_tols[i])     if _xy_tols     else 0.010,
-                    })
-            else:
-                # 旧格式兼容: 线性插值 (xy_tol 用 tol_mult=3.0)
-                xy_start   = float(cur.get("descent_init_xy_start",  0.002))
-                xy_end     = float(cur.get("descent_init_xy_end",    0.030))
-                vel_start  = float(cur.get("descent_init_vel_start", 0.000))
-                vel_end    = float(cur.get("descent_init_vel_end",   0.020))
-                tilt_start = float(cur.get("descent_init_tilt_start", 0.001))
-                tilt_end   = float(cur.get("descent_init_tilt_end",   0.008))
-                self.descent_levels = []
-                for i in range(n_levels):
-                    t = i / max(n_levels - 1, 1)
-                    xy_r = xy_start + t * (xy_end - xy_start)
-                    self.descent_levels.append({
-                        "xy_range":   xy_r,
-                        "vel_range":  vel_start + t * (vel_end  - vel_start),
-                        "tilt_range": tilt_start + t * (tilt_end - tilt_start),
-                        "xy_tol":     max(xy_r * 3.0, 0.005),  # 旧逻辑
-                    })
-
-            self.current_descent_level = 0
-            self.descent_lvl_ep = 0
-            self.descent_lvl_ts = 0
-            self.descent_cur_min_eps   = int(cur.get("descent_cur_min_eps",    200))
-            self.descent_cur_sr_thresh = float(cur.get("descent_cur_sr_threshold", 0.50))
-            self.descent_cur_hard_cap  = int(cur.get("descent_cur_hard_cap",   300_000))
-            _stats_win = int(cur.get("descent_cur_stats_window", 50))  # [v3.4] 30→50
-            self.descent_stats = EpisodeStats(window=_stats_win)
-
-    def wind_frac(self, ts):
-        """旧接口兼容 — 不再使用线性插值模式, 返回 0.0 (由新接口控制)。"""
-        return 0.0
-
-    # ── 新接口: 随机风力课程 ────────────────────────────────────────────────
-    def init_wind_curriculum(self, config):
-        """初始化随机风力课程状态机。"""
-        cur = config.get("curriculum", {})
-        wind_cfg = config.get("wind", {})
-
-        self.wind_enabled     = bool(cur.get("wind_enabled", False)) or \
-                                bool(wind_cfg.get("enabled", False))
-        self.wind_unlocked    = False
-        self.wind_level       = 0
-        self.wind_force_levels = list(cur.get("wind_max_force_levels", [0.5, 1.0, 2.0, 3.0]))
-        self.wind_unlock_sr   = float(cur.get("wind_unlock_sr_thresh", 0.65))
-        self.wind_unlock_min_eps = int(cur.get("wind_unlock_min_eps", 500))
-        self.wind_level_sr    = float(cur.get("wind_level_sr_thresh", 0.55))
-        self.wind_level_min_eps = int(cur.get("wind_level_min_eps", 300))
-        self.wind_random_dir  = bool(cur.get("wind_random_dir", True))
-        self._wind_level_ep   = 0
-        self._wind_unlock_ep  = 0
-        self._wind_stats      = EpisodeStats(window=100)
-        self._wind_max_now    = 0.0  # 当前最大风力 (N)
-
-    def sample_wind(self, ep, success, stats):
-        """
-        根据课程状态采样本 episode 的风力 (N) 和方向.
-        返回 (force_magnitude, direction_xy) — force=0 表示无风.
-        每 episode 开始时调用一次, 采样结果固定整个 episode.
-        """
-        if not self.wind_enabled:
-            return 0.0, np.zeros(2)
-
-        # 更新解锁统计
-        if not self.wind_unlocked:
-            self._wind_stats.update(success=float(success))
-            eps_since_start = ep - self._wind_unlock_ep
-            if (eps_since_start >= self.wind_unlock_min_eps and
-                    self._wind_stats.success_rate() >= self.wind_unlock_sr):
-                self.wind_unlocked = True
-                self._wind_level_ep = ep
-                self._wind_stats = EpisodeStats(window=100)
-                self._wind_max_now = self.wind_force_levels[0] if self.wind_force_levels else 0.5
-                print(f"  [Wind] ✅ 解锁风力训练! max_force={self._wind_max_now:.1f}N")
-            return 0.0, np.zeros(2)
-
-        # 已解锁: 更新晋级统计
-        self._wind_stats.update(success=float(success))
-        eps_at_level = ep - self._wind_level_ep
-        if (self.wind_level < len(self.wind_force_levels) - 1 and
-                eps_at_level >= self.wind_level_min_eps and
-                self._wind_stats.success_rate() >= self.wind_level_sr):
-            self.wind_level += 1
-            self._wind_level_ep = ep
-            self._wind_stats = EpisodeStats(window=100)
-            self._wind_max_now = self.wind_force_levels[self.wind_level]
-            print(f"  [Wind] ↑ 风力等级 → {self.wind_level} "
-                  f"(max_force={self._wind_max_now:.1f}N)")
-
-        # 随机采样: 均匀分布在 [0, max_force]
-        force = np.random.uniform(0.0, self._wind_max_now)
-        if self.wind_random_dir:
-            angle = np.random.uniform(0, 2 * np.pi)
-            direction = np.array([np.cos(angle), np.sin(angle)])
-        else:
-            direction = np.array([1.0, 0.0])
-        return float(force), direction
-
-    def get_wind_curriculum_info(self):
-        """返回风力课程状态, 用于日志。"""
-        return {
-            "wind/enabled":  float(self.wind_enabled),
-            "wind/unlocked": float(getattr(self, 'wind_unlocked', False)),
-            "wind/level":    float(getattr(self, 'wind_level', 0)),
-            "wind/max_force": float(getattr(self, '_wind_max_now', 0.0)),
-        }
-
-    def update_obs_curriculum(self, env, ep, ts, reward, success):
-        """
-        障碍物课程: 0→1→2→3 个真实障碍物渐进晋级.
-        [v3 SHADOW] 0 真实障碍物阶段: shadow_obstacles 参与 reward (不参与碰撞).
-        晋级到 >=1 后: 真实障碍物接管, shadow_obstacles 不再使用.
-        """
-        if not self.use_obs_cur or not self._rl_started:
-            return False, self.current_n_obs
-
-        if success:
-            self.obs_stats.update(success=1.0)
-        else:
-            self.obs_stats.update(success=0.0)
-
-        changed = False
-        if self.current_n_obs < self.obs_max_n:
-            sr  = self.obs_stats.success_rate()
-            eps = ep - self._obs_lvl_ep
-            # [v4] hard_cap: 超过eps上限强制晋级 (防止永远卡在某个level)
-            hard_capped = (eps >= self.obs_hard_cap_eps)
-            sr_advance  = (eps >= self.obs_min_eps and sr >= self.obs_sr_thresh)
-            advance = sr_advance or hard_capped
-            if advance:
-                reason = "hard_cap" if hard_capped and not sr_advance else f"sr={sr*100:.0f}%"
-                self.current_n_obs = min(self.current_n_obs + 1, self.obs_max_n)
-                env.set_curriculum_n_obstacles(self.current_n_obs)
-                self._obs_lvl_ep = ep
-                self._obs_lvl_ts = ts
-                self.obs_stats = EpisodeStats(window=self.obs_perf_win)
-                changed = True
-                print(f"  [Curriculum] Obstacle level → {self.current_n_obs} 个真实障碍物 ({reason})")
-        return changed, self.current_n_obs
-
-    def sample_shadow_obstacles(self, start_xy, target_xy):
-        """
-        [v3.6 SHADOW] 始终补充 shadow obstacles 到 obs_max_n 个.
-        无论真实障碍物有多少, shadow 补足剩余数量.
-        真实障碍物 + shadow = obs_max_n (始终保持 3 个障碍物的 reward 信号)
-        这样 critic 在任何课程阶段都见过 3 个障碍物, 晋级时无需重新适应.
-        """
-        if not self.shadow_enabled:
-            return []
-        # [v3.6] 补足数量: shadow_n = obs_max_n - current_n_obs
-        n_shadow_needed = max(0, self.obs_max_n - self.current_n_obs)
-        if n_shadow_needed == 0:
-            return []
-
-        rng = np.random.default_rng()
-        obstacles = []
-        direction = np.asarray(target_xy) - np.asarray(start_xy)
-        L = float(np.linalg.norm(direction))
-        if L < 1e-6:
-            return []
-        direction /= L
-        perp = np.array([-direction[1], direction[0]])
-
-        path_width = 0.6
-        workspace_r = 0.50
-        attempts = 0
-        max_attempts = n_shadow_needed * 200
-        base_r2 = 0.10   # 机械臂底座半径 (排除区域)
-        min_clr = 0.075 + 0.03  # payload_radius + planning_margin
-
-        while len(obstacles) < n_shadow_needed and attempts < max_attempts:
-            attempts += 1
-            t = rng.uniform(0.15, 0.85)
-            s = rng.uniform(-path_width / 2, path_width / 2)
-            center = np.asarray(start_xy) + t * L * direction + s * perp
-            r = rng.uniform(self.shadow_r_min, self.shadow_r_max)
-            # 工作空间约束
-            if float(np.linalg.norm(center)) + r > workspace_r - 0.02:
-                continue
-            # 离起终点和底座保持安全距离
-            if (np.linalg.norm(center - np.asarray(start_xy))  < r + min_clr or
-                np.linalg.norm(center - np.asarray(target_xy)) < r + min_clr or
-                np.linalg.norm(center) < r + base_r2):
-                continue
-            # 影子障碍物互相不重叠
-            if all(np.linalg.norm(center - np.array([ox, oy])) >= r + or_ + 0.01
-                   for (ox, oy, or_) in obstacles):
-                obstacles.append((float(center[0]), float(center[1]), float(r)))
-
-        return obstacles
-
-    def get_cruise_dist_frac(self, ts, ep, success):
-        """距离课程已禁用, 始终返回 1.0。"""
-        return 1.0
-
-    def get_descent_init_params(self, ts, ep, success=None):
-        """
-        Get current descent level init params.
-        Pass success=None (or omit) at episode START for read-only access.
-        Pass success=True/False at episode END to update stats and check advance.
-        """
-        if not self.use_descent_init_cur:
-            return None
-
-        # Only update stats and check advance when success is explicitly provided
-        if success is not None:
-            if success:
-                self.descent_stats.update(success=1.0)
-            else:
-                self.descent_stats.update(success=0.0)
-
-            level = self.current_descent_level
-            max_level = len(self.descent_levels) - 1
-
-            if level < max_level and self._rl_started:
-                sr  = self.descent_stats.success_rate()
-                eps = ep - self.descent_lvl_ep
-                t   = ts - self.descent_lvl_ts
-                advance = ((t >= self.descent_cur_hard_cap) or
-                           (eps >= self.descent_cur_min_eps and sr >= self.descent_cur_sr_thresh))
-                if advance:
-                    self.current_descent_level = min(level + 1, max_level)
-                    self.descent_lvl_ep = ep
-                    self.descent_lvl_ts = ts
-                    _stats_win = self.descent_stats.window
-                    self.descent_stats = EpisodeStats(window=_stats_win)
-                    print(f"  [Curriculum] Descent level {level}→{self.current_descent_level} "
-                          f"(xy={self.descent_levels[self.current_descent_level]['xy_range']*1000:.1f}mm, "
-                          f"eps={eps}, sr={sr*100:.0f}%)")
-
-        return self.descent_levels[self.current_descent_level]
-
-    def get_descent_stats_info(self):
-        """Return current descent curriculum stats for logging."""
-        if not self.use_descent_init_cur:
-            return {}
-        sr = self.descent_stats.success_rate()
-        level = self.current_descent_level
-        max_level = len(self.descent_levels) - 1
-        return {
-            "cur/descent_level": level,
-            "cur/descent_sr_tracked": sr,
-            "cur/descent_sr_pct": sr * 100,
-            "cur/descent_sr_thresh": self.descent_cur_sr_thresh,
-            "cur/descent_xy_mm": self.descent_levels[level]["xy_range"] * 1000,
-            "cur/descent_at_max": float(level >= max_level),
-        }
-
-    def mark_rl_start(self):
-        self._rl_started = True
-        self.cruise_dist_stats = EpisodeStats(window=150)
-        if hasattr(self, '_wind_unlock_ep'):
-            self._wind_unlock_ep = 0   # reset from current ep (will be set properly at call time)
-        print(f"  [Curriculum] RL 开始, 课程 SR 统计重置")
-
-    def get_current_success_radius(self, rcfg):
-        """
-        Cruise 成功半径: 随障碍物课程晋级逐步收紧.
-
-        收紧逻辑 (与障碍物 level 联动):
-          n_obs=0: success_radius_start = 0.20m (宽松, 快速建立导航能力)
-          n_obs=1: 插值到 0.15m
-          n_obs=2: 插值到 0.12m
-          n_obs=3: success_radius_end = 0.10m (接近真实 pipeline 切换条件 0.06m)
-
-        这样训练目标随课程逐步向真实需求靠拢,
-        测试时用 success_radius_end (0.10m) 作为最终评判标准.
-        """
-        r_start = float(rcfg.get("success_radius_start", 0.20))
-        r_end   = float(rcfg.get("success_radius_end",   0.10))
-        obs_max = max(self.obs_max_n, 1)
-        # 线性插值: n_obs=0 → r_start, n_obs=obs_max → r_end
-        frac = min(self.current_n_obs / obs_max, 1.0)
-        return r_start + frac * (r_end - r_start)
-
-    def get_curriculum_info(self):
-        info = {}
-        if self.use_obs_cur:
-            info["cur/n_obstacles"] = self.current_n_obs
-            info["cur/shadow_active"] = float(
-                self.shadow_enabled and self.current_n_obs == 0)
-        elif hasattr(self, 'current_n_obs'):
-            info["cur/n_obstacles"] = self.current_n_obs
-        if self.use_descent_init_cur:
-            lvl = self.descent_levels[self.current_descent_level]
-            info["cur/descent_level"]    = self.current_descent_level
-            info["cur/descent_xy_range"] = lvl["xy_range"]
-            info["cur/descent_xy_tol"]   = lvl.get("xy_tol", 0.010)
-        # 风力信息直接用 get_wind_curriculum_info()
-        return info
+def _add_act_noise(dq, sigma):
+    if sigma <= 0: return dq
+    return (dq + np.random.normal(0, sigma, dq.shape).astype(dq.dtype))
 
 
 # ==============================================================================
-# PPO 训练 [v3]
+# PPO 训练
 # ==============================================================================
 
-def train_ppo(phase, log_dir, config, bc_ckpt=None):
+def make_phase_env_and_controllers(phase, config, worker_id=0):
+    """[v11 Path 3] 工厂函数: 构造 env + 所有 base controllers (按 phase).
+
+    供单进程 train_ppo / SubprocVecEnv worker 共用. 每次调用返回独立实例.
+
+    Args:
+        phase:     "lift" / "cruise" / "descent"
+        config:    完整 config dict (deepcopy 后)
+        worker_id: 用于 seed 偏移 (0 = main, >0 = subproc worker)
+    Returns:
+        (env, controllers_dict, config) — controllers 中含 'phase' 键, worker 可读
+    """
+    import copy as _copy
+    cfg = _copy.deepcopy(config) if worker_id > 0 else config
+    if worker_id > 0:
+        cfg["train"]["seed"] = int(cfg["train"].get("seed", 42)) + worker_id * 1000
+        set_global_seed(cfg["train"]["seed"])
+    env = CableRobotEnvWithObstacles(config=cfg)
+    controllers = {
+        "phase":   phase,                       # [v11 fix] worker 读取 phase 用
+        "expert":  JointSpaceExpert(cfg, env.ik_solver),
+        "ee_ctrl": EEAccController(cfg, env.ik_solver),
+        "z_pid":   CruiseZYawPID(cfg)          if phase == "cruise" else None,
+        "swing_d": SwingDampingController(cfg) if phase == "cruise" else None,
+    }
+    return env, controllers, cfg
+
+
+def train_ppo(phase, log_dir, config, resume_ckpt=None):
+    """PPO 训练入口. [v11] n_envs > 1 自动 dispatch 到 train_ppo_vec."""
+    n_envs = int(config["train"].get("n_envs", 1))
+    if n_envs > 1:
+        # [v11 Path 3] 多环境并行
+        return train_ppo_vec(phase, log_dir, config, resume_ckpt=resume_ckpt,
+                             n_envs=n_envs)
+    return _train_ppo_single(phase, log_dir, config, resume_ckpt=resume_ckpt)
+
+
+def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
@@ -1047,102 +795,86 @@ def train_ppo(phase, log_dir, config, bc_ckpt=None):
 
     print(f"\n{'='*60}\n  PPO | {phase.upper()} | {T} steps | {log_dir}\n{'='*60}\n")
 
-    # [v7] NMPC base + RL 残差 (ORCA 已废弃)
-    _cruise_dual = (phase == "cruise" and
-                    config.get("cruise_rl", {}).get("use_dual_rl", False))
-    _cruise_nmpc_base = (phase == "cruise" and
-                         bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)) and
-                         not _cruise_dual)
-    _cruise_residual_orca = False  # ORCA 已废弃
-
     env    = CableRobotEnvWithObstacles(config=config)
-    if _cruise_dual:
-        agent = CruiseDualRLAgent(config=config, algo="ppo")
-        print("  [v4] Cruise 双 RL: planner + swing_rl")
-    else:
-        agent  = PPOPhaseAgent(phase, config=config)
+    agent  = PPOPhaseAgent(phase, config=config)
     expert = JointSpaceExpert(config, env.ik_solver)
     ectl   = EEAccController(config, env.ik_solver)
-    orca_expert = None   # [v7] ORCA 已废弃，保留变量名兼容旧代码
-
-    # Cruise: z_pid 保留, swing_d 仅监控 (不参与控制)
     z_pid   = CruiseZYawPID(config)          if phase == "cruise" else None
     swing_d = SwingDampingController(config) if phase == "cruise" else None
+    _cruise_nmpc_base = (phase == "cruise" and
+        bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)))
+    _descent_pid_residual = (phase == "descent" and
+        bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
+    # [v12] lift 也支持 NMPC base + RL 残差
+    _lift_nmpc_base = (phase == "lift" and
+        bool(config.get("lift_rl", {}).get("use_nmpc_base", False)))
 
     cur = CurriculumManager(config, phase)
-    if cur.use_obs_cur:
-        env.set_curriculum_n_obstacles(cur.current_n_obs)
 
-    if bc_ckpt and os.path.exists(bc_ckpt):
-        agent.load(bc_ckpt)
-        print(f"  Loaded BC ckpt: {bc_ckpt}")
-        if hasattr(agent, 'reset_log_std_for_rl'):
-            agent.reset_log_std_for_rl()
+    # [v9] resume_ckpt 用于断点续训, 不再用于加载 BC 权重
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        agent.load(resume_ckpt); print(f"  Resumed from ckpt: {resume_ckpt}")
 
-    logger = Logger(log_dir, f"{phase}_ppo", f"{phase}_ppo")
+    # [v11 Path 2] HER for PPO descent
+    _ppo_her_enabled = (phase == "descent" and bool(
+        config.get("descent_rl", {}).get("ppo_her_enabled", False)))
+    her_recorder = None
+    if _ppo_her_enabled:
+        from phase_agent import HEREpisodeRecorder
+        max_steps = int(config["descent_rl"].get("max_steps", 500))
+        her_recorder = HEREpisodeRecorder(agent.action_dim, max_steps=max_steps)
+        _her_xy_tol_relabel = float(config["descent_rl"].get(
+            "ppo_her_xy_tol_relabel", 0.015))
+        _her_min_disp = float(config["descent_rl"].get(
+            "ppo_her_min_displacement", 0.005))
+        _her_max_eps = int(config["descent_rl"].get("ppo_her_max_episodes", 5))
+        _her_eps_added = 0
+        _her_xy_align_coef = float(config["descent_rl"]["reward"].get(
+            "xy_align_coef", 4.0))
+        _her_success_bonus = float(config["descent_rl"]["reward"].get(
+            "success_bonus", 50.0))
+        print(f"\n  [v11 Path 2] PPO-HER 启用 (descent): "
+              f"tol={_her_xy_tol_relabel*1000:.0f}mm, max_eps_per_rollout={_her_max_eps}")
+
+    logger = Logger(log_dir, project=f"phase_rl_v9", run_name=f"{phase}_ppo")
     logger.update_config(config)
     stats = EpisodeStats(window=W)
     ep = 0; ts = 0; best = 0.0; t0 = time.time()
     _ppo_update_count = 0
-    _ppo_warmup_updates = 10
-
-    cur.mark_rl_start()
-
-    # ── 随机风力课程初始化 ────────────────────────────────────────────────────
-    _wind_force_ep = 0.0   # 本 episode 风力大小 (N), 0=无风
-    _wind_dir_ep   = np.zeros(2)
-    _prev_suc      = False  # 上一 episode 成功标记 (用于 sample_wind 更新统计)
-
-    # 多 episode 稳定性汇总统计 (滑动窗口)
-    _stability_window = 50
-    _stab_ke_list   = []   # 最近 N ep 的平均摆动动能 (mJ)
-    _stab_ang_list  = []   # 最近 N ep 的平均摆角 (deg)
-    _stab_acc_list  = []   # 最近 N ep 的平均 EE 加速度
 
     lf = os.path.join(log_dir, f"{phase}_ppo_log.csv")
     with open(lf, "w", newline="") as f:
         csv.writer(f).writerow(["episode", "total_steps", "ep_reward", "avg_reward",
-                                 "sr", "steps", "pl", "vl", "kl", "cf", "wind"])
-
-    # 判断 descent pid_residual 模式
-    _descent_pid_residual = (phase == "descent" and
-                              bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
-    if _descent_pid_residual:
-        print(f"  [v3] Descent PID+residual RL 架构 (residual_dq_scale="
-              f"{config['descent_rl'].get('residual_dq_scale', 0.30):.2f})")
+                                "sr", "steps", "pol_loss", "val_loss", "ent",
+                                "lvl", "wind"])
 
     while ts < T:
-        # ── 随机风力采样 [v5] ─────────────────────────────────────────────
-        _wind_force_ep, _wind_dir_ep = cur.sample_wind(ep, _prev_suc, stats)
-        wf = _wind_force_ep   # 兼容旧日志字段
-        if _wind_force_ep > 0 and hasattr(env, 'set_wind_force'):
-            env.set_wind_force(_wind_force_ep, _wind_dir_ep)
+        # ── 每 episode: 采样课程扰动 ───────────────────────────────────────────
+        pert = cur.sample_episode_perturbations()
+        env.set_force_noise(pert["force_noise"])
+        if pert["wind_force"] > 0 and hasattr(env, 'set_wind_force'):
+            env.set_wind_force(pert["wind_force"], pert["wind_dir"])
         else:
-            env.set_wind_curriculum(0.0)
+            try: env.set_wind_curriculum(0.0)
+            except Exception: pass
 
-
-        cruise_dist_frac = 1.0   # [v3] 距离课程已禁用
-        _desc_init = None
+        # ── 物理初始化 ────────────────────────────────────────────────────────
         if phase == "descent":
-            _desc_init = cur.get_descent_init_params(ts, ep, False)
-
-        # ── 初始化 episode ────────────────────────────────────────────────────
-        if phase == "descent":
-            obs, pp = reset_for_phase_omnireset(env, phase, config, cur=cur, ts=ts, ep=ep, suc=False)
+            obs, pp = reset_for_descent_with_cur(env, config, cur)
         else:
-            obs, pp = reset_for_phase(env, phase, config, cruise_dist_frac=cruise_dist_frac)
+            obs, pp = reset_for_phase(env, phase, config)
         if obs is None:
             continue
 
         cq = env.data.qpos[:7].copy()
         expert.reset(obs, cq, env=env)
-        if orca_expert is not None:
-            orca_expert.reset()
         if pp is not None:
-            expert.set_path(pp)
+            # [v12.2] lift 时只把"lift 段"喂给 tracker, 防止 look-ahead 跨段拉走 xy
+            _pp_for_expert = _truncate_path_for_lift(pp, config) if phase == "lift" else pp
+            expert.set_path(_pp_for_expert)
             if phase != "lift":
-                _advance_expert_to_nearest_wp(expert, pp, env.data.body('prefab').xpos.copy())
-
+                plp = env.data.body('prefab').xpos.copy()
+                _advance_expert_to_nearest_wp(expert, pp, plp)
         ectl.reset(env._get_ee_pos(), cq)
 
         if z_pid is not None:
@@ -1154,56 +886,43 @@ def train_ppo(phase, log_dir, config, bc_ckpt=None):
         sxy = env.default_start_xy.copy(); txy = env.target_pos.copy()
         pt, py = 0.0, 0.0
 
-        # Reward states
         rs = REWARD_STATES[phase]()
-        rs_swing = CruiseRewardState() if _cruise_dual else None  # swing RL 独立 reward state
+        if hasattr(rs, 'total_steps_global'):
+            rs.total_steps_global = ts
+        if phase == "lift" and hasattr(rs, 'start_xy'):
+            rs.start_xy = env.data.body('prefab').xpos[:2].copy()
+        if phase == "descent":
+            _di = cur.get_descent_init()
+            if _di is not None:
+                rs.current_xy_range = _di["xy_range"]
+                rs.current_xy_tol   = _di["xy_tol"]
+                rs.current_descent_level = cur.level_idx
+                rs.descent_n_levels      = cur.n_levels
 
         if hasattr(agent, 'reset_history'):
             agent.reset_history()
-        if hasattr(rs, 'total_steps_global'):
-            rs.total_steps_global = ts
 
-        # reward 分项追踪器
         rew_tracker = RewardComponentTracker(phase)
-        swing_rew_tracker = RewardComponentTracker("cruise_swing") if _cruise_dual else None
-
-        if phase == "lift" and hasattr(rs, 'start_xy'):
-            rs.start_xy = env.data.body('prefab').xpos[:2].copy()
-
-        if phase == "descent" and _desc_init is not None:
-            rs.current_xy_range = _desc_init["xy_range"]
-            rs.current_xy_tol   = _desc_init.get("xy_tol", None)
-            rs.current_descent_level = cur.current_descent_level
-            rs.descent_n_levels      = len(cur.descent_levels)
-            rs.steps_at_max_level    = ts - cur.descent_lvl_ts \
-                if cur.current_descent_level >= len(cur.descent_levels) - 1 else 0
-
-        if phase == "cruise" and hasattr(rs, 'current_success_radius'):
-            rs.current_success_radius = cur.get_current_success_radius(
-                config["cruise_rl"]["reward"])
-        if phase == "cruise" and hasattr(rs, 'shadow_obstacles'):
-            rs.shadow_obstacles = cur.sample_shadow_obstacles(sxy, txy)
-            rs.n_real_obstacles  = len(env._obstacles) if hasattr(env, '_obstacles') else 0
-        if rs_swing is not None:
-            rs_swing.current_success_radius = getattr(rs, 'current_success_radius', 0.20)
-            rs_swing.shadow_obstacles = getattr(rs, 'shadow_obstacles', [])
-
-        er = 0.0; es = 0; suc = False; rd = False
-        ep_swing_reward = 0.0  # swing rl episode reward 追踪
-        term_reason = "running"
+        # [v12.6] 细粒度 RL 评估指标 tracker
+        stab = StabilityMetrics()
+        er = 0.0; es = 0; suc = False; term_reason = "running"
         mx = int(config[f"{phase}_rl"]["max_steps"])
-        stab_metrics = StabilityMetrics()   # [v5] 稳定性指标追踪
 
-        # ── Episode 主循环 ────────────────────────────────────────────────────
+        # ── Episode 主循环 ───────────────────────────────────────────────────
+        rd = False
         while not rd:
             cq = env.data.qpos[:7].copy().astype(np.float32)
             po, pt, py = build_phase_obs(phase, obs, env, sxy, txy, pt, py)
             no = agent.normalize_obs(po, update=True)
+            no_noisy = _add_obs_noise(no, pert["obs_noise"])
 
             ree = env._get_ee_pos()
 
-            # ── Cruise: Dual RL (planner + swing_rl) [v4] ─────────────────────
-            if _cruise_dual and z_pid is not None:
+            # ── Cruise [v13.0 合并 lift]: 根据 payload 高度切换两种模式 ──────
+            #   低空 (payload_z < z_cruise - 0.03): lift 模式 — expert.compute_delta_q_target
+            #     (单一积分器路径, 与 test 一致, NMPC 自动垂直上升)
+            #   高空 (payload_z 接近 z_cruise): cruise 模式 — 原 lock_z + xy 残差
+            if phase == "cruise" and z_pid is not None:
                 _pl_pos  = env.data.body('prefab').xpos
                 _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
                 _pl_vz   = float(env.data.qvel[_dof_idx + 2])
@@ -1212,445 +931,260 @@ def train_ppo(phase, log_dir, config, bc_ckpt=None):
                 _pl_yaw  = float(_pl_euler[2])
                 _pl_yaw_rate = float(env.data.qvel[_dof_idx + 5]) \
                     if _dof_idx + 5 < len(env.data.qvel) else 0.0
-                _z_corr, _tgt_yaw, _falling = z_pid.compute(
-                    float(_pl_pos[2]), _pl_vz, _pl_yaw, _pl_yaw_rate)
-                if _falling:
-                    rw = -5.0
-                    # push obs to history first (needed for LSTM buffer seq)
-                    agent.obs_history.push(no)
-                    agent.planner_agent.obs_history = agent.obs_history
-                    agent.swing_agent.obs_history = agent.obs_history
-                    agent.planner_agent.add_to_buffer(
-                        no, np.zeros(2, np.float32), np.zeros(2, np.float32),
-                        rw, 1.0, 0.0, 0.0)
-                    agent.swing_agent.add_to_buffer(
-                        no, np.zeros(2, np.float32), np.zeros(2, np.float32),
-                        rw, 1.0, 0.0, 0.0)
-                    er += rw; es += 1; ts += 1; agent.total_steps = ts
-                    rd = True; break
+                _z_cruise = float(config["cruise_rl"].get("target_z_cruise", 0.25))
+                _is_lift_phase = float(_pl_pos[2]) < _z_cruise - 0.03
 
-                # 监控 swing_d
-                if swing_d is not None:
-                    _pl_vel  = env.data.qvel[_dof_idx:_dof_idx+3].copy()
-                    _ee_vel  = getattr(env, '_ee_vel_cache', np.zeros(3))
-                    swing_d.compute(_pl_pos, ree, _pl_vel, _ee_vel)
-
-                # Dual RL act
-                combined, planner_act, swing_act, planner_lp, planner_val, swing_lp, swing_val = \
-                    agent.act(no)
-
-                a3 = np.array([combined[0], combined[1], 0.0])
-                dq = ectl.compute_delta_q(
-                    a3, cq, ree, lock_z=True,
-                    z_lock_height=float(config["cruise_rl"]["z_lock_height"]),
-                    z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
-                    base_acc_xy=None, residual_mode=False)
-
-                # BC 标签
-                bct_planner = np.zeros(2, np.float32)
-                bct_swing   = np.zeros(2, np.float32)
-                try:
-                    bct_combined = collect_expert_acc(expert, env, obs, cq, phase, config, orca_expert)
-                    bct_planner  = bct_combined
-                    bct_swing    = np.zeros(2, np.float32)
-                except Exception:
-                    pass
-
-                no2, _, _, _, ei = env.step(dq)
-                stab_metrics.update_step(env, no2, config)  # [v5]
-
-                # planner reward (导航为主)
-                rw_plan, dn, sc, ri = compute_cruise_reward_planner(
-                    env, no2, config, rs, tracker=rew_tracker)
-                # swing reward (防摆为主)
-                rw_swing, _ = compute_cruise_reward_swing_rl(
-                    env, no2, config, rs_swing, tracker=swing_rew_tracker)
-
-                done = dn or ei.get("nan_detected", False)
-                if es >= mx - 1:
-                    done = True; ri.setdefault("termination", "timeout")
-                if sc:
-                    suc = True
-                if done and ri.get("termination"):
-                    term_reason = ri["termination"]
-
-                # 分别加入各自 buffer
-                agent.add_to_buffers(
-                    no, planner_act, swing_act, bct_planner, bct_swing,
-                    rw_plan, rw_swing, float(done),
-                    planner_val, planner_lp, swing_val, swing_lp)
-
-                er += rw_plan; ep_swing_reward += rw_swing
-                es += 1; ts += 1; agent.total_steps = ts
-                obs = no2
-
-                # 两个 agent 同步触发 update
-                if agent.planner_agent.buffer.full:
-                    if done:
-                        lv_plan = 0.0; lv_swing = 0.0
-                    else:
-                        ns_ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)[0]
-                        nn_ = agent.normalize_obs(ns_, update=False)
-                        lv_plan  = agent.planner_agent.get_value_for_state(nn_)
-                        lv_swing = agent.swing_agent.get_value_for_state(nn_)
-
-                    agent.planner_agent.buffer.compute_returns_and_advantages(
-                        lv_plan, agent.gamma, agent.gae_lambda)
-                    agent.swing_agent.buffer.compute_returns_and_advantages(
-                        lv_swing, agent.gamma, agent.gae_lambda)
-                    agent.update(global_ts=ts)
-                    _ppo_update_count += 1
-                    rd = True
-                if done:
-                    rd = True
-
-            # ── 非 Cruise Dual 分支 ────────────────────────────────────────────
-            # ── [v5] ORCA base + 残差 RL (cruise, 非双RL分支) ─────────────────
-            elif phase == "cruise" and z_pid is not None:
-                _pl_pos  = env.data.body('prefab').xpos
-                _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
-                _pl_vz   = float(env.data.qvel[_dof_idx + 2])
-                _pl_mat  = env.data.body('prefab').xmat.reshape(3, 3)
-                _pl_euler = R.from_matrix(_pl_mat).as_euler('xyz')
-                _pl_yaw  = float(_pl_euler[2])
-                _pl_yaw_rate = float(env.data.qvel[_dof_idx + 5]) \
-                    if _dof_idx + 5 < len(env.data.qvel) else 0.0
-                _z_corr, _tgt_yaw, _falling = z_pid.compute(
-                    float(_pl_pos[2]), _pl_vz, _pl_yaw, _pl_yaw_rate)
-                if _falling:
-                    rw = -5.0
-                    agent.add_to_buffer(no, np.zeros(2, np.float32),
-                                        np.zeros(2, np.float32), rw, 1.0,
-                                        agent.get_value_for_state(no), 0.0)
-                    er += rw; es += 1; ts += 1; agent.total_steps = ts
-                    rd = True; break
-
-                if swing_d is not None:
-                    _pl_vel  = env.data.qvel[_dof_idx:_dof_idx+3].copy()
-                    _ee_vel  = getattr(env, '_ee_vel_cache', np.zeros(3))
-                    swing_d.compute(_pl_pos, ree, _pl_vel, _ee_vel)
-
-                act, lp, val = agent.act(no)
-
-                # [v7] NMPC base + RL 残差 xy acc
-                if _cruise_nmpc_base:
-                    try:
-                        _a4 = expert.tracker.compute_ee_acceleration(obs, target_yaw=_tgt_yaw)
-                        _base = np.array([float(_a4[0]), float(_a4[1])], np.float32)
-                    except Exception:
-                        _base = np.zeros(2, np.float32)
-                    _res_max = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
-                    bct = np.clip(_base, -_res_max * 0.95, _res_max * 0.95)
-                    _rl_clip = np.clip(act[:2], -_res_max, _res_max)
-                    _comb = _base + _rl_clip
-                    _amax = float(config["cruise_rl"].get("residual_acc_max_xy", 0.80))
-                    _cn = float(np.linalg.norm(_comb))
-                    if _cn > _amax: _comb = _comb / _cn * _amax
-                    a3 = np.array([_comb[0], _comb[1], 0.0])
+                # cruise 模式需要 z_pid 反馈, lift 模式不需要 (NMPC 自处理 z)
+                if not _is_lift_phase:
+                    _z_corr, _tgt_yaw, _falling = z_pid.compute(
+                        float(_pl_pos[2]), _pl_vz, _pl_yaw, _pl_yaw_rate)
+                    if _falling:
+                        rw = -5.0
+                        val = agent.get_value_for_state(no_noisy)
+                        agent.add_to_buffer(no_noisy, np.zeros(agent.action_dim, np.float32),
+                                            rw, 1.0, val, 0.0)
+                        er += rw; es += 1; ts += 1; agent.total_steps = ts
+                        rd = True; break
                 else:
-                    # 旧版 or 无 base
-                    a3  = np.array([act[0], act[1], 0.0])
-                    bct = np.zeros(2, np.float32)
-                    try:
-                        bct = collect_expert_acc(expert, env, obs, cq, phase, config, orca_expert)
-                    except Exception:
-                        pass
+                    _z_corr, _tgt_yaw = 0.0, 0.0
 
-                dq = ectl.compute_delta_q(
-                    a3, cq, ree, lock_z=True,
-                    z_lock_height=float(config["cruise_rl"]["z_lock_height"]),
-                    z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
-                    base_acc_xy=None, residual_mode=False)
+                if swing_d is not None and not _is_lift_phase:
+                    _pl_vel  = env.data.qvel[_dof_idx:_dof_idx+3].copy()
+                    _ee_vel  = getattr(env, '_ee_vel_cache', np.zeros(3))
+                    swing_d.compute(_pl_pos, ree, _pl_vel, _ee_vel)
+
+                act, lp, val = agent.act(no_noisy)
+                _act_arr = np.asarray(act, np.float32)
+
+                if _is_lift_phase:
+                    # ── Lift 模式: 用 expert.compute_delta_q_target + 3D residual_acc
+                    # 与 test_phase / v12.1 lift fix 完全一致路径
+                    _rm_xy = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
+                    _rm_z  = float(config["cruise_rl"].get("residual_acc_max_z_rl",  0.10))
+                    # action_dim=3, 索引 [0,1,2] = xy_residual + z_residual
+                    _res3 = np.array([
+                        float(np.clip(_act_arr[0], -_rm_xy, _rm_xy)),
+                        float(np.clip(_act_arr[1], -_rm_xy, _rm_xy)),
+                        float(np.clip(_act_arr[2], -_rm_z,  _rm_z)) if len(_act_arr) > 2 else 0.0,
+                    ], np.float64)
+                    dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
+                else:
+                    # ── Cruise 模式: NMPC 输出 + xy 残差 + lock_z
+                    if _cruise_nmpc_base:
+                        try:
+                            _a4 = expert.tracker.compute_ee_acceleration(obs, target_yaw=_tgt_yaw)
+                            _base = np.array([float(_a4[0]), float(_a4[1])], np.float32)
+                        except Exception:
+                            _base = np.zeros(2, np.float32)
+                        _res_max = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
+                        _rl_clip = np.clip(_act_arr[:2], -_res_max, _res_max)
+                        _comb = _base + _rl_clip
+                        _amax = float(config["cruise_rl"].get("residual_acc_max_xy", 0.60))
+                        _cn = float(np.linalg.norm(_comb))
+                        if _cn > _amax: _comb = _comb / _cn * _amax
+                        a3 = np.array([_comb[0], _comb[1], 0.0])
+                    else:
+                        a3 = np.array([_act_arr[0], _act_arr[1], 0.0])
+
+                    dq = ectl.compute_delta_q(
+                        a3, cq, ree, lock_z=True,
+                        z_lock_height=float(config["cruise_rl"]["z_lock_height"]),
+                        z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
+                        base_acc_xy=None, residual_mode=False)
+
+                dq = _add_act_noise(dq, pert["act_noise"])
 
                 no2, _, _, _, ei = env.step(dq)
-                stab_metrics.update_step(env, no2, config)  # [v5]
-                rw, dn, sc, ri = compute_cruise_reward_planner(
-                    env, no2, config, rs, tracker=rew_tracker)
-                done = dn or ei.get("nan_detected", False)
-                if es >= mx - 1:
-                    done = True; ri.setdefault("termination", "timeout")
-                if sc: suc = True
-                if done and ri.get("termination"): term_reason = ri["termination"]
+                # [v13.0] rl_action 传完整 3D 维度
+                rw, dn, sc, ri = compute_cruise_reward(env, no2, config, rs,
+                                                       tracker=rew_tracker,
+                                                       rl_action=_act_arr)
+                rew_tracker.step()
 
-                agent.add_to_buffer(no, act, bct, rw, float(done), val, lp)
-                er += rw; es += 1; ts += 1; agent.total_steps = ts
-                obs = no2
-                agent._update_entropy_coef(global_ts=ts)
-
-                if agent.buffer.full:
-                    if done:
-                        lv = 0.0
-                    else:
-                        ns_ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)[0]
-                        nn_ = agent.normalize_obs(ns_, update=False)
-                        lv  = agent.get_value_for_state(nn_)
-                    agent.buffer.compute_returns_and_advantages(lv, agent.gamma, agent.gae_lambda)
-                    agent.update(global_ts=ts)
-                    _ppo_update_count += 1
-                    rd = True
-                if done:
-                    rd = True
-
-
-            # ── Descent: PID base + RL residual [v3] ─────────────────────────
+            # ── Descent: PID base + RL residual ──────────────────────────────
             elif phase == "descent" and _descent_pid_residual:
-                act, lp, val = agent.act(no)
+                act, lp, val = agent.act(no_noisy)
                 dq, _pid_dq = _apply_descent_pid_residual(
                     expert, act, obs, env, config, cq)
 
-                bct = np.zeros(agent.action_dim, np.float32)
-                try:
-                    bct = collect_expert_acc(expert, env, obs, cq, phase, config)
-                except Exception:
-                    pass
-
+                dq = _add_act_noise(dq, pert["act_noise"])
                 no2, _, _, _, ei = env.step(dq)
-                stab_metrics.update_step(env, no2, config)  # [v5]
-                rw, dn, sc, ri = compute_descent_reward_tracked(
-                    env, no2, config, rs, tracker=rew_tracker)
-                done = dn or ei.get("nan_detected", False)
-                if es >= mx - 1:
-                    done = True; ri.setdefault("termination", "timeout")
-                if sc: suc = True
-                if done and ri.get("termination"): term_reason = ri["termination"]
+                # [v11.3] 传 rl_action 给 descent reward (action_magnitude/smoothness penalty)
+                rw, dn, sc, ri = compute_descent_reward(env, no2, config, rs,
+                                                        tracker=rew_tracker,
+                                                        rl_action=act)
+                rew_tracker.step()
 
-                agent.add_to_buffer(no, act, bct, rw, float(done), val, lp)
-                er += rw; es += 1; ts += 1; agent.total_steps = ts
-                obs = no2
-                agent._update_entropy_coef(global_ts=ts)
+            # ── Lift v12: NMPC vertical base + RL residual 3D ────────────────
+            # [v12 fix] 用 expert.compute_delta_q_target(..., residual_acc=...)
+            # 这样积分器/速度限制/锚定/IK 都和 test_phase expert-only 完全一致.
+            # 修复了之前 expert.tracker + EEAccController 拼接的"双积分器漂移"问题.
+            elif phase == "lift" and _lift_nmpc_base:
+                act, lp, val = agent.act(no_noisy)
+                # RL 残差 clip 到小范围 (Olesen 2026 推荐: ≤ base 的 10-20%)
+                _rm_xy = float(config["lift_rl"].get("residual_acc_max_xy", 0.08))
+                _rm_z  = float(config["lift_rl"].get("residual_acc_max_z",  0.10))
+                _res3 = np.array([
+                    float(np.clip(act[0], -_rm_xy, _rm_xy)),
+                    float(np.clip(act[1], -_rm_xy, _rm_xy)),
+                    float(np.clip(act[2], -_rm_z,  _rm_z)),
+                ], np.float64)
+                # 调用 expert (与 test_phase 同一函数, 仅多传 residual_acc)
+                dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
+                dq = _add_act_noise(dq, pert["act_noise"])
+                no2, _, _, _, ei = env.step(dq)
+                rw, dn, sc, ri = compute_lift_reward(env, no2, config, rs,
+                                                     tracker=rew_tracker,
+                                                     rl_action=act)
+                rew_tracker.step()
 
-                if agent.buffer.full:
-                    if done:
-                        lv = 0.0
-                    else:
-                        ns_ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)[0]
-                        nn_ = agent.normalize_obs(ns_, update=False)
-                        lv  = agent.get_value_for_state(nn_)
-                    agent.buffer.compute_returns_and_advantages(lv, agent.gamma, agent.gae_lambda)
-                    _is_warmup = _ppo_update_count < _ppo_warmup_updates
-                    if _is_warmup:
-                        _freeze_mean = _ppo_update_count < 5
-                        if _freeze_mean:
-                            for _name, _param in agent.actor.named_parameters():
-                                if 'log_std' not in _name:
-                                    _param.requires_grad_(False)
-                        else:
-                            for _param in agent.actor.parameters():
-                                _param.requires_grad_(True)
-                            _orig_lr = agent.opt_actor.param_groups[0]['lr']
-                            for _pg in agent.opt_actor.param_groups:
-                                _pg['lr'] = _orig_lr * 0.05
-                    agent.update(global_ts=ts)
-                    if _is_warmup:
-                        if _freeze_mean:
-                            for _param in agent.actor.parameters():
-                                _param.requires_grad_(True)
-                        else:
-                            for _pg in agent.opt_actor.param_groups:
-                                _pg['lr'] = _orig_lr
-                    _ppo_update_count += 1
-                    rd = True
-                if done:
-                    rd = True
-
-            else:
-                # lift 或其他
-                act, lp, val = agent.act(no)
+            # ── Lift fallback: 纯 RL 输出 EE acc (旧架构, 不推荐) ──────────────
+            else:  # phase == "lift" without NMPC base, or other fallback
+                act, lp, val = agent.act(no_noisy)
                 dq = ectl.compute_delta_q(act, cq, ree)
-
-                bct = np.zeros(agent.action_dim, np.float32)
-                if phase == "lift":
-                    try:
-                        bct = collect_expert_acc(expert, env, obs, cq, phase, config)
-                    except Exception:
-                        pass
-
+                dq = _add_act_noise(dq, pert["act_noise"])
                 no2, _, _, _, ei = env.step(dq)
-                stab_metrics.update_step(env, no2, config)  # [v5]
-                rw, dn, sc, ri = compute_lift_reward_tracked(
-                    env, no2, config, rs, tracker=rew_tracker)
-                done = dn or ei.get("nan_detected", False)
-                if es >= mx - 1:
-                    done = True; ri.setdefault("termination", "timeout")
-                if sc: suc = True
-                if done and ri.get("termination"): term_reason = ri["termination"]
+                rw, dn, sc, ri = compute_lift_reward(env, no2, config, rs,
+                                                     tracker=rew_tracker,
+                                                     rl_action=act)
+                rew_tracker.step()
 
-                agent.add_to_buffer(no, act, bct, rw, float(done), val, lp)
-                er += rw; es += 1; ts += 1; agent.total_steps = ts
-                obs = no2
-                agent._update_entropy_coef(global_ts=ts)
+            done = dn or ei.get("nan_detected", False)
+            if es >= mx - 1:
+                done = True
+                ri.setdefault("termination", "timeout")
+            if sc: suc = True
+            if done and ri.get("termination"):
+                term_reason = ri["termination"]
 
-                if agent.buffer.full:
-                    if done:
-                        lv = 0.0
-                    else:
-                        ns_ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)[0]
-                        nn_ = agent.normalize_obs(ns_, update=False)
-                        lv  = agent.get_value_for_state(nn_)
-                    agent.buffer.compute_returns_and_advantages(lv, agent.gamma, agent.gae_lambda)
-                    _is_warmup = _ppo_update_count < _ppo_warmup_updates
-                    if _is_warmup:
-                        _freeze_mean = _ppo_update_count < 5
-                        if _freeze_mean:
-                            for _name, _param in agent.actor.named_parameters():
-                                if 'log_std' not in _name:
-                                    _param.requires_grad_(False)
-                        else:
-                            for _param in agent.actor.parameters():
-                                _param.requires_grad_(True)
-                            _orig_lr = agent.opt_actor.param_groups[0]['lr']
-                            for _pg in agent.opt_actor.param_groups:
-                                _pg['lr'] = _orig_lr * 0.05
-                    agent.update(global_ts=ts)
-                    if _is_warmup:
-                        if _freeze_mean:
-                            for _param in agent.actor.parameters():
-                                _param.requires_grad_(True)
-                        else:
-                            for _pg in agent.opt_actor.param_groups:
-                                _pg['lr'] = _orig_lr
-                    _ppo_update_count += 1
-                    rd = True
+            # [v12.6] 细粒度 RL 评估指标更新 (no2 是 env._get_obs() raw 输出)
+            stab.update_step(no2, config, env=env, rl_action=act)
+
+            agent.add_to_buffer(no_noisy, act, rw, float(done), val, lp)
+
+            # [v11 Path 2] descent 步骤记录到 HER recorder
+            if her_recorder is not None and phase == "descent":
+                _pl_pos_now = env.data.body('prefab').xpos
+                _pl_xy_now = np.array([float(_pl_pos_now[0]),
+                                       float(_pl_pos_now[1])], np.float32)
+                # 从 tracker 取本步的 xy_align_reward (用于 relabel 时替换)
+                _xy_align_r = float(rew_tracker.get_last_step_value("xy_align_reward")) \
+                    if hasattr(rew_tracker, "get_last_step_value") else 0.0
+                her_recorder.record(
+                    raw_obs=po, norm_obs=no_noisy, action=act,
+                    reward=rw, done=done, value=val, log_prob=lp,
+                    pl_xy=_pl_xy_now, xy_align_reward=_xy_align_r)
+
+            er += rw; es += 1; ts += 1; agent.total_steps = ts
+            obs = no2
+            agent._update_entropy_coef(global_ts=ts)
+
+            if agent.buffer.full:
                 if done:
-                    rd = True
+                    lv = 0.0
+                else:
+                    ns_ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)[0]
+                    nn_ = agent.normalize_obs(ns_, update=False)
+                    lv = agent.get_value_for_state(nn_)
+                agent.buffer.compute_returns_and_advantages(
+                    lv, agent.gamma, agent.gae_lambda)
+                agent.update(global_ts=ts)
+                _ppo_update_count += 1
+                rd = True
+            if done:
+                rd = True
 
-        # ── 更新课程 & 日志 ───────────────────────────────────────────────────
+        # ── Episode 末: 更新统计 / 课程 / 日志 ───────────────────────────────
         stats.update(reward=er, steps=es, success=float(suc))
         ar = stats.mean("reward"); sr = stats.success_rate()
-        _prev_suc = suc   # [v5] 传递给风力课程
+        cur.update(suc)
+        # [v10] 课程倒退则清 Adam 状态, 避免死局轨迹累积的二阶矩阻碍恢复
+        if cur.consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
+            agent.reset_adam_state(reason=f"{phase}_curriculum_regression")
 
-        cur.update_obs_curriculum(env, ep, ts, er, suc)
-        if phase == "descent":
-            cur.get_descent_init_params(ts, ep, suc)
-        cur_info = cur.get_curriculum_info()
+        # [v11 Path 2] PPO-HER: 失败 episode 用 "final" 策略 relabel, 加入 buffer
+        if (her_recorder is not None and phase == "descent"
+                and not suc and her_recorder.has_data()
+                and _her_eps_added < _her_max_eps
+                and not agent.buffer.full):
+            # 取最后一步的 payload xy 作为 relabel 的 achieved goal
+            achieved_xy = her_recorder.pl_xy_history[-1].copy()
+            relabeled = her_recorder.generate_relabeled_transitions(
+                agent, achieved_xy,
+                xy_tol_relabel=_her_xy_tol_relabel,
+                xy_align_coef=_her_xy_align_coef,
+                success_bonus=_her_success_bonus,
+                min_displacement=_her_min_disp)
+            if relabeled is not None:
+                n_added = agent.ingest_her_transitions(relabeled)
+                _her_eps_added += 1
+                if ep % 20 == 0:
+                    print(f"  [HER] Ep{ep} relabel: achieved=({achieved_xy[0]*100:.1f}, "
+                          f"{achieved_xy[1]*100:.1f})cm, +{n_added} transitions")
+        # 重置 HER recorder for 下一 episode
+        if her_recorder is not None:
+            her_recorder.reset()
+        # rollout buffer 刚 update 完, HER 计数归零
+        if her_recorder is not None and not agent.buffer.full and agent.buffer.ptr == 0:
+            _her_eps_added = 0
 
-        # [v5] 稳定性指标汇总
-        stab_summary = stab_metrics.episode_summary(phase)
-        stab_str = stab_metrics.print_summary(phase)
-        if stab_summary:
-            _stab_ke_list.append(stab_summary.get(f"{phase}/stability/avg_swing_ke_mJ", 0))
-            _stab_ang_list.append(stab_summary.get(f"{phase}/stability/avg_swing_angle_deg", 0))
-            _stab_acc_list.append(stab_summary.get(f"{phase}/stability/avg_ee_acc_ms2", 0))
-            if len(_stab_ke_list) > _stability_window:
-                _stab_ke_list.pop(0); _stab_ang_list.pop(0); _stab_acc_list.pop(0)
-
-        # agent last result (planner 为主)
-        if _cruise_dual:
-            r = agent.planner_agent._last_result
-        else:
-            r = agent._last_result
-        m = "✅" if suc else "❌"
-
-        _swing_str = ""
-        _swing_energy = 0.0
-        if phase == "cruise" and swing_d is not None:
-            _swing_energy = swing_d.last_energy
-            _angle_deg    = swing_d.last_angle_deg
-            _swing_str    = f" | E:{_swing_energy*1000:.1f}mJ θ:{_angle_deg:.1f}°"
-
-        pl_pos_now   = env.data.body('prefab').xpos
+        r = agent._last_result
+        mark = "✅" if suc else "❌"
+        pl_pos_now = env.data.body('prefab').xpos
         dist_to_goal = float(np.linalg.norm(pl_pos_now[:2] - txy)) \
             if phase in ("cruise", "descent") else 0.0
-        cur_str = " | ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in cur_info.items())
 
-        # log_std (planner 的)
-        if _cruise_dual:
-            log_std_dims = agent.planner_agent.actor.log_std.detach().cpu().numpy().copy()
-        elif hasattr(agent.actor, 'log_std'):
-            log_std_dims = agent.actor.log_std.detach().cpu().numpy().copy()
-        else:
-            log_std_dims = np.array([-1.0])
-        log_std_mean = float(np.mean(log_std_dims))
-        log_std_str  = "/".join(f"{v:.3f}" for v in log_std_dims)
-        _ls_ok = all(-2.05 <= v <= 0.35 for v in log_std_dims)
-        _ls_warn = "" if _ls_ok else " ⚠️LOGSTD_OOB"
+        cur_info = cur.info()
+        cur_str = f"L{cur.level_idx}/{cur.n_levels-1} ep{cur.eps_at_level}"
 
-        print(f"Ep{ep:4d} [{ts:7d}] {m} R:{er:6.2f}({ar:5.2f}) SR:{sr*100:4.0f}% "
-              f"S:{es:3d} dist:{dist_to_goal*100:.1f}cm{_swing_str} W:{wf:.1f}N {stab_str}")
-        if _cruise_dual:
-            r2 = agent.swing_agent._last_result
-            print(f"       PPO plan PL:{r.policy_loss:7.4f} VL:{r.value_loss:6.3f} "
-                  f"KL:{r.approx_kl:.4f} | swing PL:{r2.policy_loss:7.4f}")
-        else:
-            if hasattr(r, 'policy_loss'):
-                print(f"       PPO PL:{r.policy_loss:7.4f} VL:{r.value_loss:6.3f} "
-                      f"KL:{r.approx_kl:.4f} CF:{r.clip_fraction:.2f} ent:{r.entropy_coef_used:.4f}")
-        print(f"       logstd[{log_std_str}]{_ls_warn} | {cur_str} | {term_reason}")
+        print(f"Ep{ep:4d} [{ts:7d}] {mark} R:{er:6.2f}({ar:5.2f}) SR:{sr*100:4.0f}% "
+              f"S:{es:3d} dist:{dist_to_goal*100:.1f}cm "
+              f"W:{pert['wind_force']:.1f}N "
+              f"[{cur_str}] | {term_reason}")
+        print(f"       PPO PL:{r.policy_loss:6.3f} VL:{r.value_loss:6.3f} "
+              f"E:{r.entropy_loss:6.3f} KL:{r.approx_kl:.4f}")
 
-        # ── wandb 日志 ────────────────────────────────────────────────────────
+        # ── wandb 日志 ──────────────────────────────────────────────────────
+        # [v10] 诊断指标: actor std + RL action 量级
+        try:
+            _std_per_dim = agent.actor.get_log_std_per_dim()
+            _actor_std_mean = float(np.exp(_std_per_dim).mean())
+            _actor_std_max  = float(np.exp(_std_per_dim).max())
+        except Exception:
+            _actor_std_mean = _actor_std_max = 0.0
+
         log_metrics = {
+            # 训练表现
             f"{phase}/reward":       er,
             f"{phase}/avg_reward":   ar,
             f"{phase}/sr":           sr,
             f"{phase}/steps":        es,
-            f"{phase}/dist_to_goal": dist_to_goal,
-            f"{phase}/wind_force":   wf,   # [v5] 随机风力大小
+            f"{phase}/dist_to_goal_cm": dist_to_goal * 100,
+            # PPO 训练指标
+            "ppo/pol_loss":    r.policy_loss,
+            "ppo/val_loss":    r.value_loss,
+            "ppo/ent_loss":    r.entropy_loss,
+            "ppo/approx_kl":   r.approx_kl,
+            "ppo/clip_frac":   r.clip_fraction,
+            "ppo/ent_coef":    r.entropy_coef_used,
+            # [v10] 诊断指标
+            f"diag/{phase}/actor_std_mean": _actor_std_mean,
+            f"diag/{phase}/actor_std_max":  _actor_std_max,
         }
-        # [v5] 稳定性指标 (wandb)
-        log_metrics.update(stab_summary)
-        log_metrics.update(cur.get_wind_curriculum_info())
-        if _stab_ke_list:
-            log_metrics[f"{phase}/stability/win_avg_ke_mJ"]    = float(np.mean(_stab_ke_list))
-            log_metrics[f"{phase}/stability/win_avg_angle_deg"] = float(np.mean(_stab_ang_list))
-            log_metrics[f"{phase}/stability/win_avg_acc_ms2"]  = float(np.mean(_stab_acc_list))
-
-        if _cruise_dual:
-            log_metrics[f"{phase}/swing_reward"] = ep_swing_reward
-            log_metrics["ppo_planner/pl"]  = r.policy_loss
-            log_metrics["ppo_planner/vl"]  = r.value_loss
-            log_metrics["ppo_planner/kl"]  = r.approx_kl
-            log_metrics["ppo_planner/ent"] = r.entropy_loss
-            r2 = agent.swing_agent._last_result
-            if hasattr(r2, 'policy_loss'):
-                log_metrics["ppo_swing/pl"]  = r2.policy_loss
-                log_metrics["ppo_swing/vl"]  = r2.value_loss
-                log_metrics["ppo_swing/kl"]  = r2.approx_kl
-        elif hasattr(r, 'policy_loss'):
-            log_metrics["ppo/pl"]  = r.policy_loss
-            log_metrics["ppo/vl"]  = r.value_loss
-            log_metrics["ppo/kl"]  = r.approx_kl
-            log_metrics["ppo/cf"]  = r.clip_fraction
-            log_metrics["ppo/ent"] = r.entropy_loss
-            log_metrics["ppo/entropy_coef"] = r.entropy_coef_used
-            log_metrics["ppo/logstd_mean"]  = log_std_mean
-
-        # 摆动能量
-        if phase == "cruise" and swing_d is not None:
-            log_metrics["cruise/swing_energy_mJ"] = _swing_energy * 1000
-            log_metrics["cruise/swing_angle_deg"] = swing_d.last_angle_deg
-            log_metrics["cruise/damp_gain"]       = swing_d._gain_scale
-            log_metrics["cur/success_radius"] = cur.get_current_success_radius(
-                config["cruise_rl"]["reward"])
-
-        # reward 分项 (详细分析)
-        rew_summary = rew_tracker.episode_summary()
-        log_metrics.update(rew_summary)
-        if swing_rew_tracker is not None:
-            swing_summary = swing_rew_tracker.episode_summary()
-            log_metrics.update(swing_summary)
-
+        # 课程指标
         log_metrics.update(cur_info)
-        # [v4] descent 课程追踪 SR (实际统计SR, 非滑动窗口SR)
-        if phase == "descent":
-            log_metrics.update(cur.get_descent_stats_info())
+        # reward 分项
+        log_metrics.update(rew_tracker.episode_summary())
+        # [v12.6] 细粒度 RL 评估指标 (anti-sway quality + RL intervention)
+        log_metrics.update(stab.summary_for_wandb(phase, prefix="stab"))
         logger.log(ep, log_metrics)
 
-        # logstd per dim
-        dim_names = ["ax", "ay", "az"] if not _cruise_dual and \
-            agent.action_dim == 3 else ["ax", "ay"]
-        for i, name in enumerate(dim_names[:len(log_std_dims)]):
-            log_metrics[f"ppo/logstd_{name}"] = float(log_std_dims[i])
-
         with open(lf, "a", newline="") as f:
-            pl_val = r.policy_loss if hasattr(r, 'policy_loss') else 0.0
-            vl_val = r.value_loss  if hasattr(r, 'value_loss')  else 0.0
-            kl_val = r.approx_kl  if hasattr(r, 'approx_kl')   else 0.0
-            cf_val = r.clip_fraction if hasattr(r, 'clip_fraction') else 0.0
             csv.writer(f).writerow([ep, ts, f"{er:.3f}", f"{ar:.3f}", f"{sr:.3f}", es,
-                                    f"{pl_val:.5f}", f"{vl_val:.5f}",
-                                    f"{kl_val:.5f}", f"{cf_val:.3f}", f"{wf:.3f}"])
-        if ep > 0 and ep % SI == 0:
-            save_checkpoint(agent, log_dir, ep)
+                                    f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
+                                    f"{r.entropy_loss:.4f}",
+                                    cur.level_idx, f"{pert['wind_force']:.3f}"])
+        if ep > 0 and ep % SI == 0: save_checkpoint(agent, log_dir, ep)
         if ep > 0 and ep % EI == 0 and sr > best:
             best = sr; save_checkpoint(agent, log_dir, ep, tag="best")
         ep += 1
@@ -1658,83 +1192,716 @@ def train_ppo(phase, log_dir, config, bc_ckpt=None):
     save_checkpoint(agent, log_dir, ep, tag="final")
     print(f"\n[{phase.upper()}-PPO] Done: {ts} steps, {(time.time()-t0)/60:.1f} min, "
           f"best_sr={best*100:.0f}%")
-    logger.close(); env.close(); return agent
-def train_sac(phase, log_dir, config, bc_ckpt=None):
+    logger.close(); env.close()
+    return agent
+
+
+# ==============================================================================
+# [v11 Path 3] PPO 训练 — 向量化版本 (SubprocVecEnv 并行)
+# ==============================================================================
+
+def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
+    """[v11 Path 3] PPO 训练 with SubprocVecEnv.
+
+    每个 worker 子进程独立运行 env + base controllers (NMPC / PID / Z-PID 等).
+    主进程负责: agent inference, PPO update, 课程, wandb, HER (descent).
+
+    与 _train_ppo_single 的差异:
+    - 每 step 通过 vec.rl_step(idx, payload) 远程调用 worker
+    - n_envs 个 episode 同时进行 (各自独立 curriculum 状态/reward tracker)
+    - rollout buffer 接受来自所有 envs 的 transitions
+
+    注意:
+    - HER 暂不支持 vec 模式 (n_envs > 1 时自动禁用)
+    - 推荐 n_envs ≤ CPU 物理核数 - 1
+    """
+    from vec_env import make_vec_env
+    T  = int(config["train"].get("total_timesteps", 2_000_000))
+    SI = int(config["train"]["save_interval"])
+    EI = int(config["train"].get("eval_interval", 100))
+    W  = int(config["train"]["log_smooth_win"])
+    start_method = config["train"].get("vec_env_start_method", "forkserver")
+
+    print(f"\n{'='*60}\n  PPO [VEC n_envs={n_envs}] | {phase.upper()} | "
+          f"{T} steps | {log_dir}\n{'='*60}\n")
+
+    # ── 主进程: agent only, 不持有 env ────────────────────────────────────────
+    agent = PPOPhaseAgent(phase, config=config)
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        agent.load(resume_ckpt); print(f"  Resumed: {resume_ckpt}")
+
+    # [v11 vec fix] PPO-HER 在 vec 模式启用: 每个 worker 自己一份 recorder.
+    # 之前禁用是简化设计, 现在补回, descent 失败 episode 也能产生 relabel 数据.
+    _ppo_her_enabled = (phase == "descent" and bool(
+        config.get("descent_rl", {}).get("ppo_her_enabled", False)))
+    her_recorders = None
+    if _ppo_her_enabled:
+        from phase_agent import HEREpisodeRecorder
+        max_steps_her = int(config["descent_rl"].get("max_steps", 500))
+        her_recorders = [HEREpisodeRecorder(agent.action_dim, max_steps=max_steps_her)
+                         for _ in range(n_envs)]
+        _her_xy_tol_relabel = float(config["descent_rl"].get(
+            "ppo_her_xy_tol_relabel", 0.015))
+        _her_min_disp = float(config["descent_rl"].get(
+            "ppo_her_min_displacement", 0.005))
+        _her_max_eps = int(config["descent_rl"].get("ppo_her_max_episodes", 5))
+        _her_eps_added = 0
+        _her_xy_align_coef = float(config["descent_rl"]["reward"].get(
+            "xy_align_coef", 4.0))
+        _her_success_bonus = float(config["descent_rl"]["reward"].get(
+            "success_bonus", 50.0))
+        print(f"  [v11 vec] PPO-HER 启用: per-worker recorders × {n_envs}, "
+              f"tol={_her_xy_tol_relabel*1000:.0f}mm")
+
+    # ── 启动 n_envs 个 worker (每个独立持有 env + controllers) ───────────────
+    def _make_one(wid):
+        return make_phase_env_and_controllers(phase, config, worker_id=wid)
+    vec = make_vec_env(_make_one, n_envs=n_envs, start_method=start_method)
+
+    # ── 每 env 独立的 curriculum, episode 状态, reward state ──────────────────
+    curs = [CurriculumManager(config, phase) for _ in range(n_envs)]
+    ep_rewards = [0.0] * n_envs; ep_steps = [0] * n_envs
+    ep_suc     = [False] * n_envs
+    ep_term    = ["running"] * n_envs
+    obs_list   = [None] * n_envs
+    sxy_list   = [None] * n_envs; txy_list = [None] * n_envs
+    pt_list    = [0.0] * n_envs;  py_list  = [0.0] * n_envs
+    rstate_list= [None] * n_envs
+
+    # ── 课程 + 物理初始化 (每 worker) ─────────────────────────────────────────
+    def _reset_one_env(i, max_retries=10):
+        for _retry in range(max_retries):
+            pert = curs[i].sample_episode_perturbations()
+            vec.set_force_noise(i, pert["force_noise"])
+            if pert["wind_force"] > 0:
+                vec.set_wind_force(i, pert["wind_force"], pert["wind_dir"])
+            else:
+                try: vec.set_wind_curriculum(i, 0.0)
+                except Exception: pass
+            # reset
+            if phase == "descent":
+                _di = curs[i].get_descent_init()
+                if _di is not None:
+                    obs, pp = vec.reset_for_descent(i, cur_init=_di)
+                else:
+                    obs, pp = vec.reset_for_descent(i, cur_init=None)
+            else:
+                obs, pp = vec.reset(i)
+            if obs is not None:
+                break  # reset 成功
+        else:
+            raise RuntimeError(f"Worker {i}: reset_for_phase 重试 {max_retries} 次仍失败")
+        # [v11 KEY FIX] reset worker 内的 expert / ee_ctrl / z_pid.
+        # 之前漏掉, 导致 NMPC tracker / PID 保留上 episode 状态, base action 错误,
+        # 是 vec 模式 SR=0 的根本原因.
+        cq = vec.get_qpos(i)
+        vec.reset_controllers(i, obs, cq, pp)
+        # start_xy / target_xy
+        if phase == "lift":
+            # [v12 fix] pp is path_3d (N, 3), pp[0] = [x, y, z]; need [x, y] only
+            _pp_arr = np.asarray(pp, np.float32)
+            sxy = np.array([float(_pp_arr[0, 0]), float(_pp_arr[0, 1])], np.float32)
+            txy = sxy
+        else:
+            sxy = None
+            tp_attr = vec.env_attr(i, "target_pos")
+            txy = np.asarray(tp_attr, np.float32)[:2]
+        # rstate: 按 phase 选用对应的 RewardState 类 ([v11 fix])
+        rs = REWARD_STATES[phase]()
+        if phase == "descent":
+            _di = curs[i].get_descent_init()
+            if _di is not None:
+                rs.current_xy_range = _di["xy_range"]
+                rs.current_xy_tol   = _di["xy_tol"]
+                rs.current_descent_level = curs[i].level_idx
+                rs.descent_n_levels      = curs[i].n_levels
+        return obs, sxy, txy, rs, pert
+
+    # 初始化所有 worker
+    perts = [None] * n_envs
+    for i in range(n_envs):
+        obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
+            _reset_one_env(i)
+        pt_list[i] = 0.0; py_list[i] = 0.0
+        ep_rewards[i] = 0.0; ep_steps[i] = 0
+        ep_suc[i] = False; ep_term[i] = "running"
+
+    logger = Logger(log_dir, project=f"phase_rl_v11_vec", run_name=f"{phase}_ppo_vec")
+    logger.update_config(config)
+    stats = EpisodeStats(window=W)
+    ts = 0; ep_count = 0; t0 = time.time(); best = 0.0
+
+    lf = os.path.join(log_dir, f"{phase}_ppo_vec_log.csv")
+    with open(lf, "w", newline="") as f:
+        csv.writer(f).writerow(["episode", "total_steps", "ep_reward", "avg_reward",
+                                "sr", "steps", "pol_loss", "val_loss", "ent",
+                                "lvl", "wind", "worker_id"])
+
+    try:
+        # 首次为每个 worker 通过 worker 端 build_phase_obs (因为主进程没有 env)
+        phase_obs_cache = [None] * n_envs
+        for i in range(n_envs):
+            phase_obs_cache[i] = vec.build_phase_obs_remote(
+                i, phase, obs_list[i], sxy_list[i], txy_list[i],
+                pt_list[i], py_list[i])
+
+        while ts < T:
+            # ── 主进程: 用缓存的 phase obs 做 RL inference ──────────────────
+            actions_list = []; lps_list = []; vals_list = []
+            for i in range(n_envs):
+                po, _, _ = phase_obs_cache[i]
+                no = agent.normalize_obs(po, update=True)
+                no_noisy = _add_obs_noise(no, perts[i]["obs_noise"])
+                act, lp, val = agent.act(no_noisy)
+                actions_list.append(act); lps_list.append(lp); vals_list.append(val)
+
+            # ── 并发发送 rl_step 到所有 worker ────────────────────────────────
+            payloads = []
+            for i in range(n_envs):
+                cq = vec.get_qpos(i)
+                payloads.append({
+                    'phase': phase,
+                    'rl_action': actions_list[i],
+                    'obs': obs_list[i],
+                    'current_q': cq,
+                    'start_xy': sxy_list[i],
+                    'target_xy': txy_list[i],
+                    'prev_tilt': pt_list[i],
+                    'prev_yaw':  py_list[i],
+                    'rstate':    rstate_list[i],
+                    'act_noise': perts[i]["act_noise"],
+                })
+
+            # 异步发送 (SubprocVecEnv); DummyVecEnv 内联
+            if hasattr(vec, 'remotes'):
+                for i, p in enumerate(payloads):
+                    vec.remotes[i].send(('rl_step', p))
+                results = [vec._check_recv(vec.remotes[i].recv(), i)
+                           for i in range(n_envs)]
+            else:
+                results = [vec.rl_step(i, payloads[i]) for i in range(n_envs)]
+
+            # ── 处理每个 env 的结果 ─────────────────────────────────────────
+            for i, res in enumerate(results):
+                rw = res['reward']; done = res['done']; suc_step = res['success']
+                obs_list[i] = res['new_obs']
+                rstate_list[i] = res['rstate']
+
+                # 终止: episode 满 max_steps?
+                mx = int(config[f"{phase}_rl"]["max_steps"])
+                if ep_steps[i] >= mx - 1:
+                    done = True
+                    if res['termination'] == 'running':
+                        res['termination'] = 'timeout'
+                if suc_step: ep_suc[i] = True
+                if done and res['termination']:
+                    ep_term[i] = res['termination']
+
+                # 加入 buffer (用刚才 RL inference 时的 phase obs)
+                # [v11.1 vec fix] 防御性: buffer 在前面 worker 写入后可能已经满,
+                # 此 worker 的 transition 跳过 (但仍计入 ep_steps/total_steps).
+                po_prev, _, _ = phase_obs_cache[i]
+                no_buf = agent.normalize_obs(po_prev, update=False)
+                no_buf_noisy = _add_obs_noise(no_buf, perts[i]["obs_noise"])
+                if not agent.buffer.full:
+                    agent.add_to_buffer(no_buf_noisy, actions_list[i], rw, float(done),
+                                        vals_list[i], lps_list[i])
+
+                # [v11 vec fix] HER recorder 记录本步
+                if her_recorders is not None and phase == "descent":
+                    _pl_xy_now = np.asarray(res.get('pl_xy', np.zeros(2)), np.float32)
+                    _xy_align_r = float(res.get('xy_align_r', 0.0))
+                    her_recorders[i].record(
+                        raw_obs=po_prev, norm_obs=no_buf_noisy,
+                        action=actions_list[i], reward=rw, done=done,
+                        value=vals_list[i], log_prob=lps_list[i],
+                        pl_xy=_pl_xy_now, xy_align_reward=_xy_align_r)
+
+                ep_rewards[i] += rw; ep_steps[i] += 1; ts += 1
+                agent.total_steps = ts
+
+                # 更新 phase_obs_cache: 用 worker 返回的 new_phase_obs (含 new_tilt/yaw)
+                if not done:
+                    phase_obs_cache[i] = (
+                        res['new_phase_obs'], res['new_tilt'], res['new_yaw'])
+                    pt_list[i] = res['new_tilt']; py_list[i] = res['new_yaw']
+
+                # ── Episode 结束: log + 重置 ──────────────────────────────
+                if done:
+                    # [v11 vec fix] HER: 失败 episode 用 'final' relabel
+                    if (her_recorders is not None and phase == "descent"
+                            and not ep_suc[i] and her_recorders[i].has_data()
+                            and _her_eps_added < _her_max_eps
+                            and not agent.buffer.full):
+                        ach_xy = her_recorders[i].pl_xy_history[-1].copy()
+                        relabeled = her_recorders[i].generate_relabeled_transitions(
+                            agent, ach_xy,
+                            xy_tol_relabel=_her_xy_tol_relabel,
+                            xy_align_coef=_her_xy_align_coef,
+                            success_bonus=_her_success_bonus,
+                            min_displacement=_her_min_disp)
+                        if relabeled is not None:
+                            n_added = agent.ingest_her_transitions(relabeled)
+                            _her_eps_added += 1
+                            if ep_count % 20 == 0:
+                                print(f"  [HER] w{i} Ep{ep_count} +{n_added} relabel")
+                    # 重置该 worker 的 HER recorder
+                    if her_recorders is not None:
+                        her_recorders[i].reset()
+                    # buffer 重置时也清 HER episode 计数器
+                    if (her_recorders is not None and not agent.buffer.full
+                            and agent.buffer.ptr == 0):
+                        _her_eps_added = 0
+
+                    stats.update(reward=ep_rewards[i], steps=ep_steps[i],
+                                 success=float(ep_suc[i]))
+                    curs[i].update(ep_suc[i])
+                    if curs[i].consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
+                        agent.reset_adam_state(reason=f"{phase}_w{i}_regression")
+
+                    ar = stats.mean("reward"); sr = stats.success_rate()
+                    r = agent._last_result
+                    mark = "✅" if ep_suc[i] else "❌"
+                    cur_str = f"L{curs[i].level_idx}/{curs[i].n_levels-1} ep{curs[i].eps_at_level}"
+                    print(f"[w{i}] Ep{ep_count:4d} [{ts:7d}] {mark} R:{ep_rewards[i]:6.2f}"
+                          f"({ar:5.2f}) SR:{sr*100:4.0f}% S:{ep_steps[i]:3d} "
+                          f"W:{perts[i]['wind_force']:.1f}N [{cur_str}] | {ep_term[i]}")
+
+                    cur_info = curs[i].info()
+                    try:
+                        _std = agent.actor.get_log_std_per_dim()
+                        _std_mean = float(np.exp(_std).mean())
+                    except Exception:
+                        _std_mean = 0.0
+                    log_metrics = {
+                        f"{phase}/reward":   ep_rewards[i],
+                        f"{phase}/avg_reward": ar,
+                        f"{phase}/sr":       sr,
+                        f"{phase}/steps":    ep_steps[i],
+                        "ppo/pol_loss":      r.policy_loss,
+                        "ppo/val_loss":      r.value_loss,
+                        "ppo/ent_loss":      r.entropy_loss,
+                        "ppo/approx_kl":     r.approx_kl,
+                        "ppo/clip_frac":     r.clip_fraction,
+                        "ppo/ent_coef":      r.entropy_coef_used,
+                        f"diag/{phase}/actor_std_mean": _std_mean,
+                        "diag/vec/worker_id": i,
+                    }
+                    log_metrics.update(cur_info)
+                    # [v12.6] vec 模式 stab: worker 在 done 时返回 stab_summary, 直接喂 wandb
+                    _stab_sum = res.get('stab_summary')
+                    if _stab_sum:
+                        log_metrics.update({
+                            f"stab/{phase}/{k}": v for k, v in _stab_sum.items()
+                        })
+                    logger.log(ep_count, log_metrics)
+
+                    with open(lf, "a", newline="") as f:
+                        csv.writer(f).writerow([ep_count, ts, f"{ep_rewards[i]:.3f}",
+                            f"{ar:.3f}", f"{sr:.3f}", ep_steps[i],
+                            f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
+                            f"{r.entropy_loss:.4f}",
+                            curs[i].level_idx, f"{perts[i]['wind_force']:.3f}", i])
+
+                    ep_count += 1
+                    if ep_count > 0 and ep_count % SI == 0:
+                        save_checkpoint(agent, log_dir, ep_count)
+                    if sr > best:
+                        best = sr; save_checkpoint(agent, log_dir, ep_count, tag="best")
+
+                    # 重置此 worker 的 env + 状态
+                    obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
+                        _reset_one_env(i)
+                    pt_list[i] = 0.0; py_list[i] = 0.0
+                    ep_rewards[i] = 0.0; ep_steps[i] = 0
+                    ep_suc[i] = False; ep_term[i] = "running"
+                    # 重新 build phase obs (新 episode 起点)
+                    phase_obs_cache[i] = vec.build_phase_obs_remote(
+                        i, phase, obs_list[i], sxy_list[i], txy_list[i],
+                        pt_list[i], py_list[i])
+
+                agent._update_entropy_coef(global_ts=ts)
+
+            # ── Buffer 满? 触发 PPO update ─────────────────────────────────
+            if agent.buffer.full:
+                agent.buffer.compute_returns_and_advantages(
+                    0.0, agent.gamma, agent.gae_lambda)
+                agent.update(global_ts=ts)
+    finally:
+        vec.close()
+        try: logger.close()
+        except Exception: pass
+
+    save_checkpoint(agent, log_dir, ep_count, tag="final")
+    print(f"\n[{phase.upper()}-PPO-VEC] Done: {ts} steps, {(time.time()-t0)/60:.1f} min, "
+          f"best_sr={best*100:.0f}%")
+    return agent
+
+
+# ==============================================================================
+# [v11 Path 3] SAC 训练 — 向量化版本 (SubprocVecEnv 并行)
+# ==============================================================================
+
+def train_sac_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
+    """[v11 Path 3] SAC 训练 with SubprocVecEnv.
+
+    设计:
+    - N 个 worker 子进程独立运行 env + base controllers
+    - 主进程: SAC agent (actor + 2 critics + replay buffer)
+    - 每步: 主进程为 N 个 worker 各生成 1 action, 并发发送 rl_step,
+            收回 N 个 transitions, 全部加入共享 replay buffer
+    - 每 update_interval 步: SAC train_step (off-policy 优化)
+    - Warmup: 用 actor 输出 + 高斯噪声 (cruise actor 零初始化, 起步即接近 NMPC)
+
+    与 train_ppo_vec 的差异:
+    - 不需要 phase_obs_cache (SAC act 是 stateless)
+    - HER 仅在 descent 单 env 时支持; vec descent 仅记 episode-level HER (worker 末 flush)
+    - update 频率独立于 buffer 满 (off-policy)
+    """
+    from vec_env import make_vec_env
+    T  = int(config["train"].get("total_timesteps", 2_000_000))
+    SI = int(config["train"]["save_interval"])
+    EI = int(config["train"].get("eval_interval", 100))
+    W  = int(config["train"]["log_smooth_win"])
+    WU = int(config["sac"].get("warmup_steps", 5000))
+    start_method = config["train"].get("vec_env_start_method", "forkserver")
+
+    print(f"\n{'='*60}\n  SAC [VEC n_envs={n_envs}] | {phase.upper()} | "
+          f"{T} steps | warmup={WU} | {log_dir}\n{'='*60}\n")
+
+    # ── 主进程: 仅 agent ─────────────────────────────────────────────────────
+    agent = SACPhaseAgent(phase, config=config)
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        agent.load(resume_ckpt); print(f"  Resumed: {resume_ckpt}")
+
+    # ── 启动 worker (每个独立持有 env + controllers) ─────────────────────────
+    def _make_one(wid):
+        return make_phase_env_and_controllers(phase, config, worker_id=wid)
+    vec = make_vec_env(_make_one, n_envs=n_envs, start_method=start_method)
+
+    # ── per-env 状态 ─────────────────────────────────────────────────────────
+    curs = [CurriculumManager(config, phase) for _ in range(n_envs)]
+    ep_rewards = [0.0] * n_envs; ep_steps = [0] * n_envs
+    ep_suc     = [False] * n_envs
+    ep_term    = ["running"] * n_envs
+    obs_list   = [None] * n_envs
+    sxy_list   = [None] * n_envs; txy_list = [None] * n_envs
+    pt_list    = [0.0] * n_envs;  py_list  = [0.0] * n_envs
+    rstate_list= [None] * n_envs
+
+    def _reset_one_env(i, max_retries=10):
+        for _retry in range(max_retries):
+            pert = curs[i].sample_episode_perturbations()
+            vec.set_force_noise(i, pert["force_noise"])
+            if pert["wind_force"] > 0:
+                vec.set_wind_force(i, pert["wind_force"], pert["wind_dir"])
+            else:
+                try: vec.set_wind_curriculum(i, 0.0)
+                except Exception: pass
+            if phase == "descent":
+                _di = curs[i].get_descent_init()
+                obs, pp = vec.reset_for_descent(i, cur_init=_di)
+            else:
+                obs, pp = vec.reset(i)
+            if obs is not None:
+                break
+        else:
+            raise RuntimeError(f"Worker {i}: reset_for_phase 重试 {max_retries} 次仍失败")
+        # [v11 KEY FIX] reset worker 内的 expert / ee_ctrl / z_pid (同 PPO vec)
+        cq = vec.get_qpos(i)
+        vec.reset_controllers(i, obs, cq, pp)
+        if phase == "lift":
+            # [v12 fix] pp is path_3d (N, 3), pp[0] = [x, y, z]; need [x, y] only
+            _pp_arr = np.asarray(pp, np.float32)
+            sxy = np.array([float(_pp_arr[0, 0]), float(_pp_arr[0, 1])], np.float32)
+            txy = sxy
+        else:
+            sxy = None
+            tp_attr = vec.env_attr(i, "target_pos")
+            txy = np.asarray(tp_attr, np.float32)[:2]
+        # [v11 fix] 按 phase 选用对应的 RewardState 类
+        rs = REWARD_STATES[phase]()
+        if phase == "descent":
+            _di = curs[i].get_descent_init()
+            if _di is not None:
+                rs.current_xy_range = _di["xy_range"]
+                rs.current_xy_tol   = _di["xy_tol"]
+                rs.current_descent_level = curs[i].level_idx
+                rs.descent_n_levels      = curs[i].n_levels
+        return obs, sxy, txy, rs, pert
+
+    perts = [None] * n_envs
+    for i in range(n_envs):
+        obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
+            _reset_one_env(i)
+        pt_list[i] = 0.0; py_list[i] = 0.0
+
+    logger = Logger(log_dir, project=f"phase_rl_v11_vec", run_name=f"{phase}_sac_vec")
+    logger.update_config(config)
+    stats = EpisodeStats(window=W)
+    ts = 0; ep_count = 0; t0 = time.time(); best = 0.0; onf = False
+    update_interval = int(config["sac"].get("update_interval", 1))
+
+    lf = os.path.join(log_dir, f"{phase}_sac_vec_log.csv")
+    with open(lf, "w", newline="") as f:
+        csv.writer(f).writerow(["episode", "total_steps", "ep_reward", "avg_reward",
+                                "sr", "steps", "cl", "al", "alpha", "lvl", "wind",
+                                "worker_id"])
+
+    try:
+        # 首轮 build phase obs (远程, 因主进程无 env)
+        phase_obs_cache = [None] * n_envs
+        for i in range(n_envs):
+            phase_obs_cache[i] = vec.build_phase_obs_remote(
+                i, phase, obs_list[i], sxy_list[i], txy_list[i],
+                pt_list[i], py_list[i])
+
+        while ts < T:
+            # ── 主进程: 为每个 worker 生成 action ─────────────────────────────
+            actions_list = []
+            for i in range(n_envs):
+                po, _, _ = phase_obs_cache[i]
+                no = agent.normalize_obs(po, update=not onf)
+                no_noisy = _add_obs_noise(no, perts[i]["obs_noise"])
+                if ts < WU:
+                    # Warmup: actor zero-init + 较大噪声 (cruise residual ~0 + noise)
+                    act_base = agent.act(no_noisy, deterministic=False)
+                    noise = np.random.normal(0, 0.1, len(act_base)).astype(np.float32)
+                    act = (act_base + noise).astype(np.float32)
+                else:
+                    act = agent.act(no_noisy, deterministic=False)
+                actions_list.append(act)
+            if ts >= WU and not onf:
+                agent._freeze_obs_norm = True; onf = True
+
+            # ── 并发发送 rl_step ──────────────────────────────────────────────
+            payloads = []
+            for i in range(n_envs):
+                cq = vec.get_qpos(i)
+                payloads.append({
+                    'phase': phase,
+                    'rl_action': actions_list[i],
+                    'obs': obs_list[i],
+                    'current_q': cq,
+                    'start_xy': sxy_list[i],
+                    'target_xy': txy_list[i],
+                    'prev_tilt': pt_list[i],
+                    'prev_yaw':  py_list[i],
+                    'rstate':    rstate_list[i],
+                    'act_noise': perts[i]["act_noise"],
+                })
+
+            if hasattr(vec, 'remotes'):
+                for i, p in enumerate(payloads):
+                    vec.remotes[i].send(('rl_step', p))
+                results = [vec._check_recv(vec.remotes[i].recv(), i)
+                           for i in range(n_envs)]
+            else:
+                results = [vec.rl_step(i, payloads[i]) for i in range(n_envs)]
+
+            # ── 处理每个 worker 的 transition ─────────────────────────────────
+            for i, res in enumerate(results):
+                rw = res['reward']; done = res['done']; suc_step = res['success']
+                obs_list[i] = res['new_obs']
+                rstate_list[i] = res['rstate']
+
+                mx = int(config[f"{phase}_rl"]["max_steps"])
+                if ep_steps[i] >= mx - 1:
+                    done = True
+                    if res['termination'] == 'running':
+                        res['termination'] = 'timeout'
+                if suc_step: ep_suc[i] = True
+                if done and res['termination']:
+                    ep_term[i] = res['termination']
+
+                # 计算 normalized obs (主进程做): SAC remember 用 norm_obs + norm_next_obs
+                po_prev, _, _ = phase_obs_cache[i]
+                no_prev = agent.normalize_obs(po_prev, update=False)
+                no_prev_noisy = _add_obs_noise(no_prev, perts[i]["obs_noise"])
+                if res.get('new_phase_obs') is not None:
+                    new_po = res['new_phase_obs']
+                    new_no = agent.normalize_obs(new_po, update=False)
+                else:
+                    new_no = no_prev_noisy  # falling 等异常 case
+                pl_xy_now = res.get('pl_xy', np.zeros(2, np.float32))
+                # achieved_pos: 3D (用 pl_xy + z), 简化只传 xy
+                achieved_pos = np.array([pl_xy_now[0], pl_xy_now[1],
+                                          float(config.get("insertion", {}).get(
+                                              "target_payload_z", 0.10))], np.float32)
+                agent.remember(no_prev_noisy, actions_list[i], new_no,
+                               rw, float(done), achieved_pos=achieved_pos)
+
+                ep_rewards[i] += rw; ep_steps[i] += 1; ts += 1
+                agent.total_steps = ts
+
+                if not done:
+                    phase_obs_cache[i] = (
+                        res['new_phase_obs'], res['new_tilt'], res['new_yaw'])
+                    pt_list[i] = res['new_tilt']; py_list[i] = res['new_yaw']
+
+                # Episode 结束
+                if done:
+                    # HER flush (descent)
+                    if phase == "descent":
+                        agent.flush_episode_her(
+                            txy_list[i],
+                            float(config["insertion"]["target_payload_z"]))
+
+                    stats.update(reward=ep_rewards[i], steps=ep_steps[i],
+                                 success=float(ep_suc[i]))
+                    curs[i].update(ep_suc[i])
+                    # [v11 vec fix] 倒退时 reset Adam state, 同 PPO vec.
+                    if curs[i].consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
+                        agent.reset_adam_state(reason=f"{phase}_w{i}_regression")
+
+                    ar = stats.mean("reward"); sr = stats.success_rate()
+                    r = agent._last_result
+                    mark = "✅" if ep_suc[i] else "❌"
+                    cur_str = f"L{curs[i].level_idx}/{curs[i].n_levels-1} ep{curs[i].eps_at_level}"
+                    print(f"[w{i}] Ep{ep_count:4d} [{ts:7d}] {mark} R:{ep_rewards[i]:6.2f}"
+                          f"({ar:5.2f}) SR:{sr*100:4.0f}% S:{ep_steps[i]:3d} "
+                          f"W:{perts[i]['wind_force']:.1f}N [{cur_str}] | {ep_term[i]}")
+                    print(f"       SAC CL:{r.critic_loss:.4f} AL:{r.actor_loss:.4f} "
+                          f"α:{agent.alpha:.4f}")
+
+                    cur_info = curs[i].info()
+                    log_metrics = {
+                        f"{phase}/reward":   ep_rewards[i],
+                        f"{phase}/avg_reward": ar,
+                        f"{phase}/sr":       sr,
+                        f"{phase}/steps":    ep_steps[i],
+                        "sac/critic_loss":   r.critic_loss,
+                        "sac/actor_loss":    r.actor_loss,
+                        "sac/alpha_loss":    r.alpha_loss,
+                        "sac/alpha":         r.alpha,
+                        "sac/q_mean":        r.q_mean,
+                        # [v11.4] Q-divergence 早期检测
+                        "sac/target_q_mean": getattr(agent, '_last_target_q', 0.0),
+                        "sac/q_target_gap":  r.q_mean - getattr(agent, '_last_target_q', 0.0),
+                        "diag/vec/worker_id": i,
+                    }
+                    log_metrics.update(cur_info)
+                    # [v12.6] vec 模式 stab: worker 返回 stab_summary
+                    _stab_sum = res.get('stab_summary')
+                    if _stab_sum:
+                        log_metrics.update({
+                            f"stab/{phase}/{k}": v for k, v in _stab_sum.items()
+                        })
+                    logger.log(ep_count, log_metrics)
+
+                    with open(lf, "a", newline="") as f:
+                        csv.writer(f).writerow([ep_count, ts, f"{ep_rewards[i]:.3f}",
+                            f"{ar:.3f}", f"{sr:.3f}", ep_steps[i],
+                            f"{r.critic_loss:.5f}", f"{r.actor_loss:.5f}",
+                            f"{agent.alpha:.5f}",
+                            curs[i].level_idx, f"{perts[i]['wind_force']:.3f}", i])
+
+                    ep_count += 1
+                    if ep_count > 0 and ep_count % SI == 0:
+                        save_checkpoint(agent, log_dir, ep_count)
+                    if sr > best:
+                        best = sr; save_checkpoint(agent, log_dir, ep_count, tag="best")
+
+                    # Reset this worker
+                    obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
+                        _reset_one_env(i)
+                    pt_list[i] = 0.0; py_list[i] = 0.0
+                    ep_rewards[i] = 0.0; ep_steps[i] = 0
+                    ep_suc[i] = False; ep_term[i] = "running"
+                    phase_obs_cache[i] = vec.build_phase_obs_remote(
+                        i, phase, obs_list[i], sxy_list[i], txy_list[i],
+                        pt_list[i], py_list[i])
+
+            # ── SAC train_step (off-policy update) ────────────────────────────
+            # [v11 vec fix] 每个外层 step 收集 n_envs 个 transitions; 必须做
+            # n_envs 次 update 才能 keep up, 否则 buffer 涨太快、critic 训练量
+            # 落后, 表现为 critic_loss 涨到 100-300 (单进程仅 5-10).
+            # 来源: SAC 原论文 (Haarnoja 2018) 推荐 1 update per 1 env step.
+            if ts >= WU and ts % update_interval == 0:
+                _n_updates = n_envs  # vec 模式: n_envs updates per outer step
+                for _ in range(_n_updates):
+                    agent.train_step()
+
+    finally:
+        vec.close()
+        try: logger.close()
+        except Exception: pass
+
+    save_checkpoint(agent, log_dir, ep_count, tag="final")
+    print(f"\n[{phase.upper()}-SAC-VEC] Done: {ts} steps, "
+          f"{(time.time()-t0)/60:.1f} min, best_sr={best*100:.0f}%")
+    return agent
+
+
+# ==============================================================================
+# SAC 训练 (单进程)
+# ==============================================================================
+
+def train_sac(phase, log_dir, config, resume_ckpt=None):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
     W  = int(config["train"]["log_smooth_win"])
     WU = int(config["sac"].get("warmup_steps", 5000))
 
-    print(f"\n{'='*60}\n  SAC | {phase.upper()} | {T} steps | warmup={WU} | {log_dir}\n{'='*60}\n")
+    print(f"\n{'='*60}\n  SAC | {phase.upper()} | {T} steps | warmup={WU} | "
+          f"{log_dir}\n{'='*60}\n")
 
     env    = CableRobotEnvWithObstacles(config=config)
     agent  = SACPhaseAgent(phase, config=config)
     expert = JointSpaceExpert(config, env.ik_solver)
-    wex    = JointSpaceExpert(config, env.ik_solver)
     ectl   = EEAccController(config, env.ik_solver)
     z_pid   = CruiseZYawPID(config)          if phase == "cruise" else None
     swing_d = SwingDampingController(config) if phase == "cruise" else None
-    _cruise_nmpc_base_sac = (phase == "cruise" and
-                             bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)))
-    orca_expert = None  # [v7] ORCA 已废弃
-    cur = CurriculumManager(config, phase)
-    if cur.use_obs_cur:
-        env.set_curriculum_n_obstacles(cur.current_n_obs)
-
-    if bc_ckpt and os.path.exists(bc_ckpt):
-        agent.load(bc_ckpt); print(f"  Loaded BC ckpt: {bc_ckpt}")
-
+    _cruise_nmpc_base = (phase == "cruise" and
+        bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)))
     _descent_pid_residual = (phase == "descent" and
-                              bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
-    # NOTE: cruise dual-RL (CruiseDualRLAgent) is PPO-only.
-    # SAC cruise uses single SACPhaseAgent (use_dual_rl ignored for SAC).
-    cur.mark_rl_start()   # 必须在 RL 开始前调用，否则 descent 课程永远不推进
+        bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
+    # [v12] lift 也支持 NMPC base + RL 残差
+    _lift_nmpc_base = (phase == "lift" and
+        bool(config.get("lift_rl", {}).get("use_nmpc_base", False)))
 
-    logger = Logger(log_dir, f"{phase}_sac", f"{phase}_sac")
+    cur = CurriculumManager(config, phase)
+
+    # [v9] resume_ckpt 用于断点续训
+    if resume_ckpt and os.path.exists(resume_ckpt):
+        agent.load(resume_ckpt); print(f"  Resumed from ckpt: {resume_ckpt}")
+
+    logger = Logger(log_dir, project=f"phase_rl_v9", run_name=f"{phase}_sac")
     logger.update_config(config)
     stats = EpisodeStats(window=W)
     ep = 0; ts = 0; best = 0.0; t0 = time.time(); onf = False
 
-    # [v5] 随机风力 & 稳定性追踪初始化
-    _prev_suc = False
-    _stability_window = 50
-    _stab_ke_list = []; _stab_ang_list = []; _stab_acc_list = []
-
     lf = os.path.join(log_dir, f"{phase}_sac_log.csv")
     with open(lf, "w", newline="") as f:
         csv.writer(f).writerow(["episode", "total_steps", "ep_reward", "avg_reward",
-                                 "sr", "steps", "cl", "al", "alpha", "wind"])
+                                "sr", "steps", "cl", "al", "alpha", "lvl", "wind"])
 
     while ts < T:
-        # ── 随机风力采样 [v5] ─────────────────────────────────────────────
-        _wind_force_ep, _wind_dir_ep = cur.sample_wind(ep, _prev_suc, stats)
-        wf = _wind_force_ep
-        if _wind_force_ep > 0 and hasattr(env, 'set_wind_force'):
-            env.set_wind_force(_wind_force_ep, _wind_dir_ep)
+        pert = cur.sample_episode_perturbations()
+        env.set_force_noise(pert["force_noise"])
+        if pert["wind_force"] > 0 and hasattr(env, 'set_wind_force'):
+            env.set_wind_force(pert["wind_force"], pert["wind_dir"])
         else:
-            env.set_wind_curriculum(0.0)
-
-
-        _desc_init = None
-        if phase == "descent":
-            _desc_init = cur.get_descent_init_params(ts, ep, False)
+            try: env.set_wind_curriculum(0.0)
+            except Exception: pass
 
         if phase == "descent":
-            obs, pp = reset_for_phase_omnireset(env, phase, config, cur=cur, ts=ts, ep=ep, suc=False)
+            obs, pp = reset_for_descent_with_cur(env, config, cur)
         else:
-            obs, pp = reset_for_phase(env, phase, config, cruise_dist_frac=1.0)
+            obs, pp = reset_for_phase(env, phase, config)
         if obs is None:
             continue
 
         cq = env.data.qpos[:7].copy()
-        expert.reset(obs, cq, env=env); wex.reset(obs, cq, env=env)
+        expert.reset(obs, cq, env=env)
         if pp is not None:
-            expert.set_path(pp); wex.set_path(pp)
+            # [v12.2] lift 时只把"lift 段"喂给 tracker, 防止 look-ahead 跨段拉走 xy
+            _pp_for_expert = _truncate_path_for_lift(pp, config) if phase == "lift" else pp
+            expert.set_path(_pp_for_expert)
             if phase != "lift":
                 plp = env.data.body('prefab').xpos.copy()
                 _advance_expert_to_nearest_wp(expert, pp, plp)
-                _advance_expert_to_nearest_wp(wex, pp, plp)
         ectl.reset(env._get_ee_pos(), cq)
 
         if z_pid is not None:
@@ -1745,46 +1912,40 @@ def train_sac(phase, log_dir, config, bc_ckpt=None):
 
         sxy = env.default_start_xy.copy(); txy = env.target_pos.copy()
         pt, py = 0.0, 0.0
+
         rs = REWARD_STATES[phase]()
         if hasattr(rs, 'total_steps_global'):
             rs.total_steps_global = ts
-        if phase == "descent" and _desc_init is not None:
-            rs.current_xy_range = _desc_init["xy_range"]
-            rs.current_xy_tol   = _desc_init.get("xy_tol", None)  # [v3.4] per-level tol
-            rs.current_descent_level = cur.current_descent_level
-            rs.descent_n_levels      = len(cur.descent_levels)
-            rs.steps_at_max_level    = ts - cur.descent_lvl_ts \
-                if cur.current_descent_level >= len(cur.descent_levels) - 1 else 0
-        if phase == "cruise" and hasattr(rs, 'current_success_radius'):
-            rs.current_success_radius = cur.get_current_success_radius(
-                config["cruise_rl"]["reward"])
-        # [v3 SHADOW] 注入影子障碍物
-        if phase == "cruise" and hasattr(rs, 'shadow_obstacles'):
-            rs.shadow_obstacles = cur.sample_shadow_obstacles(sxy, txy)
-            rs.n_real_obstacles  = len(env._obstacles) if hasattr(env, '_obstacles') else 0
-
-        # [v3.6] 注入 lift start_xy
         if phase == "lift" and hasattr(rs, 'start_xy'):
             rs.start_xy = env.data.body('prefab').xpos[:2].copy()
+        if phase == "descent":
+            _di = cur.get_descent_init()
+            if _di is not None:
+                rs.current_xy_range = _di["xy_range"]
+                rs.current_xy_tol   = _di["xy_tol"]
+                rs.current_descent_level = cur.level_idx
+                rs.descent_n_levels      = cur.n_levels
 
+        rew_tracker = RewardComponentTracker(phase)
+        # [v12.6] 细粒度 RL 评估指标 tracker
+        stab = StabilityMetrics()
         er = 0.0; es = 0; suc = False; term_reason = "running"
         mx = int(config[f"{phase}_rl"]["max_steps"])
-        rew_tracker = RewardComponentTracker(phase)  # reward 分项追踪器
-        stab_metrics = StabilityMetrics()   # [v5]
 
         while True:
             cq = env.data.qpos[:7].copy().astype(np.float32)
             po, pt, py = build_phase_obs(phase, obs, env, sxy, txy, pt, py)
             no = agent.normalize_obs(po, update=not onf)
+            no_noisy = _add_obs_noise(no, pert["obs_noise"])
 
             if ts < WU:
                 try:
-                    act = collect_expert_acc(wex, env, obs, cq, phase, config, orca_expert)
-                    act += np.random.normal(0, 0.1, len(act)).astype(np.float32)
+                    act = collect_expert_acc(expert, env, obs, cq, phase, config)
+                    act = act + np.random.normal(0, 0.1, len(act)).astype(np.float32)
                 except Exception:
                     act = np.zeros(agent.action_dim, np.float32)
             else:
-                act = agent.act(no, deterministic=False)
+                act = agent.act(no_noisy, deterministic=False)
             if ts == WU and not onf:
                 agent._freeze_obs_norm = True; onf = True
 
@@ -1805,25 +1966,24 @@ def train_sac(phase, log_dir, config, bc_ckpt=None):
                     rw = -5.0
                     npo, _, _ = build_phase_obs(phase, obs, env, sxy, txy, pt, py)
                     nn_ = agent.normalize_obs(npo, update=False)
-                    agent.remember(no, act, nn_, rw, 1.0)
+                    agent.remember(no_noisy, act, nn_, rw, 1.0)
                     er += rw; es += 1; ts += 1; agent.total_steps = ts; break
 
-                # [v3] 监控 swing_d 但不叠加到控制
                 if swing_d is not None:
                     _pl_vel  = env.data.qvel[_dof_idx:_dof_idx+3].copy()
                     _ee_vel  = getattr(env, '_ee_vel_cache', np.zeros(3))
                     swing_d.compute(_pl_pos, ree, _pl_vel, _ee_vel)
 
-                # [v7] NMPC base + RL 残差 (SAC)
-                if _cruise_nmpc_base_sac:
+                if _cruise_nmpc_base:
                     try:
                         _a4 = expert.tracker.compute_ee_acceleration(obs, target_yaw=_tgt_yaw)
                         _ba = np.array([float(_a4[0]), float(_a4[1])], np.float32)
                     except Exception:
                         _ba = np.zeros(2, np.float32)
-                    _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
+                    # [v11 Path 1] SAC cruise 默认与 PPO 对齐
+                    _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
                     _cm = _ba + np.clip(act[:2], -_rm, _rm)
-                    _am = float(config["cruise_rl"].get("residual_acc_max_xy", 0.80))
+                    _am = float(config["cruise_rl"].get("residual_acc_max_xy", 0.60))
                     _cn = float(np.linalg.norm(_cm))
                     if _cn > _am: _cm = _cm / _cn * _am
                     a3 = np.array([_cm[0], _cm[1], 0.0])
@@ -1835,477 +1995,144 @@ def train_sac(phase, log_dir, config, bc_ckpt=None):
                     z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
                     base_acc_xy=None, residual_mode=False)
 
-            elif phase == "cruise":
-                a3 = np.array([act[0], act[1], 0.0])
-                dq = ectl.compute_delta_q(a3, cq, ree, lock_z=True,
-                                          z_lock_height=float(config["cruise_rl"]["z_lock_height"]))
-
             elif phase == "descent" and _descent_pid_residual:
-                # SAC 版本: act 直接用 SAC 输出 (已在主循环采样, 不重复采样)
                 dq, _pid_dq = _apply_descent_pid_residual(
                     expert, act, obs, env, config, cq)
+
+            elif phase == "lift" and _lift_nmpc_base:
+                # [v12 fix] 用 expert.compute_delta_q_target(..., residual_acc=...)
+                # 与 test_phase expert-only 路径完全一致.
+                _rm_xy = float(config["lift_rl"].get("residual_acc_max_xy", 0.08))
+                _rm_z  = float(config["lift_rl"].get("residual_acc_max_z",  0.10))
+                _res3 = np.array([
+                    float(np.clip(act[0], -_rm_xy, _rm_xy)),
+                    float(np.clip(act[1], -_rm_xy, _rm_xy)),
+                    float(np.clip(act[2], -_rm_z,  _rm_z)),
+                ], np.float64)
+                dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
+
             else:
                 dq = ectl.compute_delta_q(act, cq, ree)
 
+            dq = _add_act_noise(dq, pert["act_noise"])
             no2, _, _, _, ei = env.step(dq)
-            stab_metrics.update_step(env, no2, config)  # [v5]
-            # 使用带追踪的 reward 函数
+
             if phase == "lift":
-                rw, dn, sc, ri = compute_lift_reward_tracked(env, no2, config, rs, tracker=rew_tracker)
+                # [v12] 传 rl_action 给 lift reward
+                rw, dn, sc, ri = compute_lift_reward(env, no2, config, rs,
+                                                     tracker=rew_tracker,
+                                                     rl_action=act)
             elif phase == "cruise":
-                rw, dn, sc, ri = compute_cruise_reward_planner(env, no2, config, rs, tracker=rew_tracker)
+                # [v11.2] 传 rl_action 给 cruise reward (action_magnitude/smoothness penalty)
+                rw, dn, sc, ri = compute_cruise_reward(env, no2, config, rs,
+                                                       tracker=rew_tracker,
+                                                       rl_action=act[:2])
             elif phase == "descent":
-                rw, dn, sc, ri = compute_descent_reward_tracked(env, no2, config, rs, tracker=rew_tracker)
+                # [v11.3] 传 rl_action 给 descent reward
+                rw, dn, sc, ri = compute_descent_reward(env, no2, config, rs,
+                                                        tracker=rew_tracker,
+                                                        rl_action=act)
             else:
-                rw, dn, sc, ri = compute_lift_reward_tracked(env, no2, config, rs, tracker=rew_tracker)
+                rw, dn, sc, ri = compute_lift_reward(env, no2, config, rs,
+                                                     tracker=rew_tracker,
+                                                     rl_action=act)
+            rew_tracker.step()
+
             done = dn or ei.get("nan_detected", False)
             if es >= mx - 1:
                 done = True; ri.setdefault("termination", "timeout")
             if sc: suc = True
             if done and ri.get("termination"): term_reason = ri["termination"]
 
+            # [v12.6] 细粒度 RL 评估指标更新
+            stab.update_step(no2, config, env=env, rl_action=act)
+
             npo, _, _ = build_phase_obs(phase, no2, env, sxy, txy, pt, py)
             nn_ = agent.normalize_obs(npo, update=False)
             _pl_pos_now = env.data.body('prefab').xpos.copy()
-            agent.remember(no, act, nn_, rw, float(done), achieved_pos=_pl_pos_now)
+            agent.remember(no_noisy, act, nn_, rw, float(done),
+                           achieved_pos=_pl_pos_now)
             if ts >= WU and ts % agent.update_interval == 0:
                 agent.train_step()
             er += rw; es += 1; ts += 1; agent.total_steps = ts; obs = no2
             if done:
                 if phase == "descent":
-                    agent.flush_episode_her(txy, float(config["insertion"]["target_payload_z"]))
+                    agent.flush_episode_her(txy,
+                        float(config["insertion"]["target_payload_z"]))
                 break
 
-        # ── 更新课程 & 日志 ───────────────────────────────────────────────────
         stats.update(reward=er, steps=es, success=float(suc))
         ar = stats.mean("reward"); sr = stats.success_rate()
-        _prev_suc = suc   # [v5] 传递给风力课程
-
-        cur.update_obs_curriculum(env, ep, ts, er, suc)
-        if phase == "descent":
-            cur.get_descent_init_params(ts, ep, suc)
-        cur_info = cur.get_curriculum_info()
-
-        # [v5] 稳定性指标
-        stab_summary = stab_metrics.episode_summary(phase)
-        stab_str = stab_metrics.print_summary(phase)
-        if stab_summary:
-            _stab_ke_list.append(stab_summary.get(f"{phase}/stability/avg_swing_ke_mJ", 0))
-            _stab_ang_list.append(stab_summary.get(f"{phase}/stability/avg_swing_angle_deg", 0))
-            _stab_acc_list.append(stab_summary.get(f"{phase}/stability/avg_ee_acc_ms2", 0))
-            if len(_stab_ke_list) > _stability_window:
-                _stab_ke_list.pop(0); _stab_ang_list.pop(0); _stab_acc_list.pop(0)
-
+        cur.update(suc)
+        # [v10] 课程倒退后清理 (SAC 没有 reset_adam_state, 只清标志)
+        if cur.consume_regression_flag():
+            print(f"  [v10] SAC: 课程倒退检测到 (无 actor reset 处理)")
         r = agent._last_result
-        m = "✅" if suc else "❌"
-        pl_pos_now   = env.data.body('prefab').xpos
+
+        mark = "✅" if suc else "❌"
+        pl_pos_now = env.data.body('prefab').xpos
         dist_to_goal = float(np.linalg.norm(pl_pos_now[:2] - txy)) \
             if phase in ("cruise", "descent") else 0.0
-
-        _swing_str = ""
-        _swing_energy = 0.0
-        if phase == "cruise" and swing_d is not None:
-            _swing_energy = swing_d.last_energy
-            _angle_deg    = swing_d.last_angle_deg
-            _swing_str    = f" | E:{_swing_energy*1000:.1f}mJ θ:{_angle_deg:.1f}°"
-
-        cur_str = " | ".join(f"{k.split('/')[-1]}={v:.3f}" for k, v in cur_info.items())
-        print(f"Ep{ep:4d} [{ts:7d}] {m} R:{er:6.2f}({ar:5.2f}) SR:{sr*100:4.0f}% "
-              f"S:{es:3d} dist:{dist_to_goal*100:.1f}cm{_swing_str} W:{wf:.1f}N {stab_str}")
+        cur_info = cur.info()
+        print(f"Ep{ep:4d} [{ts:7d}] {mark} R:{er:6.2f}({ar:5.2f}) SR:{sr*100:4.0f}% "
+              f"S:{es:3d} dist:{dist_to_goal*100:.1f}cm "
+              f"W:{pert['wind_force']:.1f}N L{cur.level_idx} | {term_reason}")
         print(f"       SAC CL:{r.critic_loss:7.4f} AL:{r.actor_loss:7.4f} "
-              f"α:{agent.alpha:.4f} | {cur_str} | {term_reason}")
+              f"α:{agent.alpha:.4f}")
 
         log_metrics = {
             f"{phase}/reward":       er,
             f"{phase}/avg_reward":   ar,
             f"{phase}/sr":           sr,
             f"{phase}/steps":        es,
-            f"{phase}/dist_to_goal": dist_to_goal,
-            f"{phase}/wind_force":   wf,   # [v5]
-            "sac/alpha":             agent.alpha,
-            "sac/cl":                r.critic_loss,
-            "sac/al":                r.actor_loss,
+            f"{phase}/dist_to_goal_cm": dist_to_goal * 100,
+            "sac/critic_loss": r.critic_loss,
+            "sac/actor_loss":  r.actor_loss,
+            "sac/alpha_loss":  r.alpha_loss,
+            "sac/alpha":       r.alpha,
+            "sac/q_mean":      r.q_mean,
+            # [v11.4] Q-divergence 早期检测 (q_mean 应 ≈ target_q, gap 大说明 critic 落后)
+            "sac/target_q_mean": getattr(agent, '_last_target_q', 0.0),
+            "sac/q_target_gap":  r.q_mean - getattr(agent, '_last_target_q', 0.0),
         }
-        # [v5] 稳定性指标
-        log_metrics.update(stab_summary)
-        log_metrics.update(cur.get_wind_curriculum_info())
-        if _stab_ke_list:
-            log_metrics[f"{phase}/stability/win_avg_ke_mJ"]    = float(np.mean(_stab_ke_list))
-            log_metrics[f"{phase}/stability/win_avg_angle_deg"] = float(np.mean(_stab_ang_list))
-            log_metrics[f"{phase}/stability/win_avg_acc_ms2"]  = float(np.mean(_stab_acc_list))
-        if phase == "cruise" and swing_d is not None:
-            log_metrics["cruise/swing_energy_mJ"] = _swing_energy * 1000
-            log_metrics["cruise/swing_angle_deg"] = swing_d.last_angle_deg
-            log_metrics["cruise/damp_gain"]       = swing_d._gain_scale
-            log_metrics["cur/success_radius"] = cur.get_current_success_radius(
-                config["cruise_rl"]["reward"])
-        # reward 分项追踪
-        rew_summary = rew_tracker.episode_summary()
-        log_metrics.update(rew_summary)
         log_metrics.update(cur_info)
-        if phase == "descent":
-            log_metrics.update(cur.get_descent_stats_info())
+        log_metrics.update(rew_tracker.episode_summary())
+        # [v12.6] 细粒度 RL 评估指标
+        log_metrics.update(stab.summary_for_wandb(phase, prefix="stab"))
         logger.log(ep, log_metrics)
 
         with open(lf, "a", newline="") as f:
             csv.writer(f).writerow([ep, ts, f"{er:.3f}", f"{ar:.3f}", f"{sr:.3f}", es,
                                     f"{r.critic_loss:.5f}", f"{r.actor_loss:.5f}",
-                                    f"{agent.alpha:.5f}", f"{wf:.3f}"])
+                                    f"{agent.alpha:.5f}",
+                                    cur.level_idx, f"{pert['wind_force']:.3f}"])
         if ep > 0 and ep % SI == 0: save_checkpoint(agent, log_dir, ep)
-        if ep > 0 and ep % EI == 0 and sr > best: best = sr; save_checkpoint(agent, log_dir, ep, tag="best")
+        if ep > 0 and ep % EI == 0 and sr > best:
+            best = sr; save_checkpoint(agent, log_dir, ep, tag="best")
         ep += 1
 
     save_checkpoint(agent, log_dir, ep, tag="final")
     print(f"\n[{phase.upper()}-SAC] Done: {ts} steps, {(time.time()-t0)/60:.1f} min, "
           f"best_sr={best*100:.0f}%")
-    logger.close(); env.close(); return agent
+    logger.close(); env.close()
+    return agent
+
 
 
 # ==============================================================================
-# BC 预训练 — Cruise [v7: NMPC base, 执行者=标签者, 量纲正确]
+# 训练入口
 # ==============================================================================
 
-def pretrain_bc_cruise(agent, config):
+def train(phase, log_dir, algo="ppo", custom_config=None, resume_ckpt=None):
+    """[v11] BC 完全移除. cruise 残差用 actor 输出层零初始化 (自动); descent 用 PID 残差.
+
+    Args:
+        phase:        "lift" / "cruise" / "descent"
+        log_dir:      日志和 checkpoint 目录
+        algo:         "ppo" 或 "sac"
+        custom_config: 覆盖 DEFAULT_CONFIG 的字段 (CLI 参数)
+        resume_ckpt:   断点续训用的 checkpoint 路径 (可选)
     """
-    BC 预训练 v7: NMPC 执行 + NMPC tracker xy acc 标签
-
-    关键修复:
-      acc_max = action_scale = residual_acc_max_xy_rl = 0.25 m/s²
-      BC 标签限幅到 ±0.95×acc_max 防止 atanh 饱和
-    """
-    bc = config.get("bc_pretrain", {})
-    if not bc.get("enabled", True): return
-
-    nep               = int(bc.get("n_episodes",     800))
-    nepoch            = int(bc.get("n_epochs_cruise", 30))
-    lr                = float(bc.get("lr",            3e-4))
-    lr_decay          = float(bc.get("lr_decay",      0.5))
-    lr_decay_interval = int(bc.get("lr_decay_interval", 15))
-    bs                = int(bc.get("batch_size",      512))
-    eval_interval     = int(bc.get("eval_interval",   5))
-    eval_episodes     = int(bc.get("eval_episodes",   30))
-    patience          = int(bc.get("patience",        4))
-    loss_thresh       = float(bc.get("loss_threshold", 0.015))
-    eps_start         = float(bc.get("epsilon_start", 0.2))
-    eps_end           = float(bc.get("epsilon_end",   0.0))
-    n_dagger_rounds   = int(bc.get("n_dagger_rounds", 2))
-
-    # [v7 KEY] action_scale = residual_acc_max_xy_rl
-    acc_max   = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
-    max_steps = int(config["cruise_rl"]["max_steps"])
-
-    import copy as _copy
-    from phase_reward import CruiseRewardState, compute_cruise_reward
-    bc_config = _copy.deepcopy(config)
-    rope_L = float(config["controller"].get("L", 0.5))
-    bc_config["step_logic"]["instability_grace_steps"] = max_steps
-    bc_config["step_logic"]["swing_xy_max"] = rope_L * 1.5
-    _sr_real = float(config["cruise_rl"]["reward"].get("success_radius_end", 0.10))
-
-    print(f"\n{'='*60}")
-    print(f"  [BC-cruise v7] NMPC base | {nep} eps | {nepoch} epochs")
-    print(f"  action_scale={acc_max:.3f} m/s² | 真实SR≈100%")
-    print(f"{'='*60}")
-
-    env    = CableRobotEnvWithObstacles(config=config)
-    expert = JointSpaceExpert(config, env.ik_solver)
-    aobs_tr, aact_tr = [], []
-    aobs_ev, aact_ev = [], []
-    ve = 0; att = 0; succ = 0
-
-    while ve < nep and att < nep * 2:
-        att += 1
-        sys.stdout = open(os.devnull, 'w')
-        try:
-            obs, pp = reset_for_phase(env, "cruise", config)
-        finally:
-            sys.stdout.close(); sys.stdout = sys.__stdout__
-        if obs is None or pp is None: continue
-
-        current_q = env.data.qpos[:7].copy()
-        expert.reset(obs, current_q, env=env)
-        if pp is not None:
-            expert.set_path(pp)
-            _advance_expert_to_nearest_wp(expert, pp, env.data.body('prefab').xpos.copy())
-
-        txy = env.target_pos.copy()
-        pt2, py2 = 0.0, 0.0; ve += 1
-        is_eval = (ve % max(nep // max(eval_episodes, 1), 1) == 0)
-        ep_succ = False
-        rstate = CruiseRewardState()
-        rstate.current_success_radius = _sr_real
-
-        for _s in range(max_steps):
-            current_q = env.data.qpos[:7].copy().astype(np.float32)
-            # [v7] 标签: NMPC tracker xy acc, 限幅到 0.95×acc_max 防 atanh 饱和
-            try:
-                _a4 = expert.tracker.compute_ee_acceleration(obs, target_yaw=0.0)
-                acc_label = np.clip(
-                    np.array([float(_a4[0]), float(_a4[1])], np.float32),
-                    -acc_max * 0.95, acc_max * 0.95)
-            except Exception:
-                acc_label = np.zeros(2, np.float32)
-
-            po, pt2, py2 = build_cruise_obs(obs, env, txy, pt2, py2)
-            no = agent.normalize_obs(po, update=True)
-            if is_eval:
-                aobs_ev.append(no.copy()); aact_ev.append(acc_label.copy())
-            else:
-                aobs_tr.append(no.copy()); aact_tr.append(acc_label.copy())
-
-            delta_q = expert.compute_delta_q_target(obs, current_q)
-            obs, _r, env_term, env_trunc, env_info = env.step(delta_q)
-            _rb, r_done, r_success, _ = compute_cruise_reward(env, obs, bc_config, rstate)
-            if r_success: ep_succ = True
-            if r_done or env_term or env_trunc or env_info.get("nan_detected", False): break
-
-        if ep_succ: succ += 1
-        if ve % 100 == 0 or ve == nep:
-            print(f"  [BC-cruise] {ve:4d}/{nep} | tr={len(aobs_tr):6d} ev={len(aobs_ev):5d} "
-                  f"| NMPC SR={succ/max(ve,1)*100:.0f}%")
-
-    env.close()
-    if len(aobs_tr) < 500:
-        print(f"  [BC-cruise] ⚠ 样本不足({len(aobs_tr)})，跳过"); return
-
-    ot = torch.tensor(np.array(aobs_tr), device=agent.device)
-    at = torch.tensor(np.array(aact_tr), device=agent.device)
-    oe = torch.tensor(np.array(aobs_ev), device=agent.device) if aobs_ev else None
-    ae = torch.tensor(np.array(aact_ev), device=agent.device) if aobs_ev else None
-    ns = len(aobs_tr)
-
-    bp  = [p for n, p in agent.actor.named_parameters() if 'log_std' not in n]
-    opt = torch.optim.AdamW(bp, lr=lr, weight_decay=1e-5)
-    sch = torch.optim.lr_scheduler.StepLR(opt, step_size=lr_decay_interval, gamma=lr_decay)
-    best_eval = float('inf'); best_state = None
-
-    for dagger_round in range(max(1, n_dagger_rounds)):
-        if dagger_round > 0:
-            dagger_eps = nep // max(n_dagger_rounds, 1)
-            print(f"  [BC-cruise] DAgger 轮{dagger_round+1}: {dagger_eps}eps")
-            env_d  = CableRobotEnvWithObstacles(config=config)
-            exp_d  = JointSpaceExpert(config, env_d.ik_solver)
-            dobs_new, dact_new = [], []
-            dv = 0
-            while dv < dagger_eps:
-                sys.stdout = open(os.devnull, 'w')
-                try: d_obs, d_pp = reset_for_phase(env_d, "cruise", config)
-                finally: sys.stdout.close(); sys.stdout = sys.__stdout__
-                if d_obs is None or d_pp is None: continue
-                d_cq = env_d.data.qpos[:7].copy()
-                exp_d.reset(d_obs, d_cq, env=env_d)
-                if d_pp is not None:
-                    exp_d.set_path(d_pp)
-                    _advance_expert_to_nearest_wp(exp_d, d_pp, env_d.data.body('prefab').xpos.copy())
-                d_txy = env_d.target_pos.copy(); d_pt2, d_py2 = 0.0, 0.0; dv += 1
-                d_rs = CruiseRewardState(); d_rs.current_success_radius = _sr_real
-                for _ds in range(max_steps):
-                    try:
-                        _da4 = exp_d.tracker.compute_ee_acceleration(d_obs, target_yaw=0.0)
-                        d_lbl = np.clip(np.array([float(_da4[0]), float(_da4[1])], np.float32),
-                                        -acc_max * 0.95, acc_max * 0.95)
-                    except Exception:
-                        d_lbl = np.zeros(2, np.float32)
-                    d_po, d_pt2, d_py2 = build_cruise_obs(d_obs, env_d, d_txy, d_pt2, d_py2)
-                    d_no = agent.normalize_obs(d_po, update=False)
-                    dobs_new.append(d_no.copy()); dact_new.append(d_lbl.copy())
-                    d_cq_now = env_d.data.qpos[:7].copy().astype(np.float32)
-                    d_dq = exp_d.compute_delta_q_target(d_obs, d_cq_now)
-                    d_obs, _, d_et, d_etr, d_ei = env_d.step(d_dq)
-                    _, d_rd, d_rs_ok, _ = compute_cruise_reward(env_d, d_obs, bc_config, d_rs)
-                    if d_rd or d_et or d_etr or d_rs_ok: break
-            env_d.close()
-            if dobs_new:
-                ot = torch.cat([ot, torch.tensor(np.array(dobs_new), device=agent.device)], dim=0)
-                at = torch.cat([at, torch.tensor(np.array(dact_new), device=agent.device)], dim=0)
-                ns = len(ot); print(f"  DAgger +{len(dobs_new)}, 总计 {ns}")
-
-        round_nepoch = nepoch if dagger_round == 0 else nepoch // 2
-        pat = 0
-        for e in range(round_nepoch):
-            eps = max(eps_end, eps_start * (1.0 - e / max(round_nepoch - 1, 1)))
-            agent.actor.train()
-            idx = np.random.permutation(ns); tl = 0.0; nb = 0
-            for st in range(0, ns, bs):
-                i = idx[st:st+bs]; ab = at[i]
-                if eps > 0:
-                    mask  = torch.rand(len(i), device=agent.device) < eps
-                    noise = (torch.rand_like(ab)*2 - 1) * acc_max * 0.3
-                    ab    = torch.where(mask.unsqueeze(1), ab + noise, ab)
-                loss, _, _ = agent.actor.bc_forward(ot[i], ab)
-                opt.zero_grad(); loss.backward()
-                torch.nn.utils.clip_grad_norm_(bp, 1.0)
-                opt.step(); tl += loss.item(); nb += 1
-            sch.step(); tl /= max(nb, 1)
-            if (e+1) % eval_interval == 0 or e == round_nepoch - 1:
-                agent.actor.eval()
-                with torch.no_grad():
-                    el = agent.actor.bc_forward(oe, ae)[0].item() if oe is not None else tl
-                print(f"  R{dagger_round+1} Ep{e+1:3d}/{round_nepoch} "
-                      f"tr={tl:.5f} ev={el:.5f} eps={eps:.2f} pat={pat}/{patience}")
-                if el < best_eval - 1e-6:
-                    best_eval = el
-                    best_state = {k: v.clone() for k, v in agent.actor.state_dict().items()}
-                    pat = 0
-                else:
-                    pat += 1
-                if pat >= patience: print(f"  早停"); break
-                if el < loss_thresh: print(f"  loss 达标"); break
-
-    if best_state:
-        agent.actor.load_state_dict(best_state)
-        print(f"  [BC-cruise] ✅ ev={best_eval:.5f}")
-    if hasattr(agent, 'reset_log_std_for_rl'):
-        agent.reset_log_std_for_rl()
-    print(f"  [BC-cruise v7] 完成 | NMPC SR={succ/max(ve,1)*100:.0f}%\n")
-# BC 预训练 — Descent [v3: n_epochs=20, 防过拟合]
-# ==============================================================================
-
-def pretrain_bc_descent(agent, config):
-    bc = config.get("bc_pretrain", {})
-    if not bc.get("enabled", True): return
-
-    nep       = int(bc.get("n_episodes",    1000))
-    # [v3] 大幅削减 epochs: 60→20, 防止过拟合导致熵崩塌
-    nepoch    = int(bc.get("n_epochs",      20))
-    lr        = float(bc.get("lr",          3e-4))
-    lr_decay  = float(bc.get("lr_decay",    0.5))
-    lr_decay_interval = int(bc.get("lr_decay_interval", 20))
-    bs        = int(bc.get("batch_size",    512))
-    eval_interval = int(bc.get("eval_interval", 5))
-    eval_episodes = int(bc.get("eval_episodes", 30))
-    patience  = int(bc.get("patience",      3))   # [v3] 5→3
-    loss_thresh = 0.10
-    eps_start = float(bc.get("epsilon_start", 0.3))
-    eps_end   = float(bc.get("epsilon_end",   0.0))
-
-    ee_cfg     = config.get("ee_control", {})
-    dcfg       = config.get("descent_rl", {})
-    acc_max_xy = float(dcfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 0.5)))
-    acc_max_z  = float(dcfg.get("acc_max_z",  ee_cfg.get("acc_max_z", 1.0)))
-
-    print(f"\n{'='*60}")
-    print(f"  [BC-descent v3] {nep} eps | {nepoch} epochs (防过拟合: patience={patience})")
-    print(f"  acc_max: xy={acc_max_xy}, z={acc_max_z} | loss_thresh={loss_thresh}")
-    print(f"  [v3 NOTE] BC 标签是残差为 0 时 PID 对应的 acc, 初始化 actor 接近零残差")
-    print(f"{'='*60}")
-
-    env = CableRobotEnvWithObstacles(config=config)
-    expert = JointSpaceExpert(config, env.ik_solver)
-    aobs_train = []; aact_train = []
-    aobs_eval  = []; aact_eval  = []
-    ve = 0; att = 0; succ = 0
-
-    while ve < nep and att < nep * 3:
-        att += 1
-        old_stdout = sys.stdout
-        sys.stdout = open(os.devnull, 'w')
-        try:
-            obs, pp = reset_for_phase(env, "descent", config)
-        finally:
-            sys.stdout.close(); sys.stdout = old_stdout
-        if obs is None: continue
-
-        cq = env.data.qpos[:7].copy()
-        expert.reset(obs, cq, env=env)
-        if pp is not None:
-            expert.set_path(pp)
-            _advance_expert_to_nearest_wp(expert, pp, env.data.body('prefab').xpos.copy())
-
-        txy = env.target_pos.copy()
-        target_pz = float(config["insertion"]["target_payload_z"])
-        pt2, py2 = 0.0, 0.0
-        ve += 1
-        is_eval_ep = (ve % max(nep // eval_episodes, 1) == 0)
-        mx = int(config["descent_rl"]["max_steps"])
-
-        for s in range(mx):
-            cq = env.data.qpos[:7].copy().astype(np.float32)
-            po, pt2, py2 = build_descent_obs(obs, env, txy, pt2, py2)
-            no = agent.normalize_obs(po, update=True)
-
-            # [v3] BC 标签: 残差为 0 (目标是让 RL 从零残差开始学习)
-            # 这里标签全为 0, 让 actor 初始化接近零输出
-            # 注: 如果需要更好的初始化, 可以用专家 acc 作为目标
-            #     但零残差初始化与 PID+residual 架构更匹配
-            acc_label = np.zeros(3, dtype=np.float32)
-
-            if is_eval_ep:
-                aobs_eval.append(no.copy()); aact_eval.append(acc_label.copy())
-            else:
-                aobs_train.append(no.copy()); aact_train.append(acc_label.copy())
-
-            # 用 expert PID 执行动作 (收集 obs 分布)
-            dq = expert.compute_delta_q_target(obs, cq)
-            obs, _, t, tr, _ = env.step(dq)
-            if t or tr: break
-
-        succ += 1
-        if ve % 100 == 0 or ve == nep:
-            print(f"  [BC-descent] {ve}/{nep} | train={len(aobs_train)} eval={len(aobs_eval)}")
-
-    env.close()
-    if len(aobs_train) < 100:
-        print(f"  [BC-descent] ⚠ 样本不足({len(aobs_train)}), 跳过"); return
-
-    ot = torch.tensor(np.array(aobs_train), device=agent.device)
-    at = torch.tensor(np.array(aact_train), device=agent.device)
-    oe = torch.tensor(np.array(aobs_eval),  device=agent.device) if aobs_eval else None
-    ae = torch.tensor(np.array(aact_eval),  device=agent.device) if aobs_eval else None
-    ns = len(aobs_train)
-
-    bp = [p for n, p in agent.actor.named_parameters() if 'log_std' not in n]
-    opt = torch.optim.AdamW(bp, lr=lr, weight_decay=1e-5)
-    scheduler = torch.optim.lr_scheduler.StepLR(opt, step_size=lr_decay_interval, gamma=lr_decay)
-    best_eval_loss = float('inf'); best_state = None; patience_count = 0
-
-    for e in range(nepoch):
-        eps = eps_start + (eps_end - eps_start) * min(e / max(nepoch - 1, 1), 1.0)
-        agent.actor.train()
-        idx = np.random.permutation(ns)
-        tl = 0.0; nb = 0
-        for st in range(0, ns, bs):
-            i = idx[st:st+bs]
-            act_b = at[i]
-            if eps > 0:
-                mask = torch.rand(len(i), device=agent.device) < eps
-                noise = torch.rand_like(act_b) * 2 - 1
-                act_b = torch.where(mask.unsqueeze(1), noise * 0.1, act_b)   # 小幅噪声
-            loss, loss_a, _ = agent.actor.bc_forward(ot[i], act_b)
-            opt.zero_grad(); loss.backward()
-            torch.nn.utils.clip_grad_norm_(bp, 1.0)
-            opt.step()
-            tl += loss.item(); nb += 1
-        scheduler.step(); tl /= max(nb, 1)
-
-        if (e + 1) % eval_interval == 0 or e == nepoch - 1:
-            agent.actor.eval()
-            with torch.no_grad():
-                el = agent.actor.bc_forward(oe, ae)[0].item() if oe is not None else tl
-            print(f"  Ep{e+1:3d}/{nepoch} train={tl:.5f} eval={el:.5f} "
-                  f"eps={eps:.3f} pat={patience_count}/{patience}")
-            if el < best_eval_loss - 1e-5:
-                best_eval_loss = el
-                best_state = {k: v.clone() for k, v in agent.actor.state_dict().items()}
-                patience_count = 0
-            else:
-                patience_count += 1
-            if patience_count >= patience: print(f"  [BC-descent] 早停"); break
-            if el < loss_thresh: print(f"  [BC-descent] 目标达成 {el:.5f}"); break
-
-    if best_state:
-        agent.actor.load_state_dict(best_state)
-        print(f"  [BC-descent] ✅ 最佳权重 eval={best_eval_loss:.5f}")
-    if hasattr(agent, 'reset_log_std_for_rl'):
-        agent.reset_log_std_for_rl()
-    print(f"  [BC-descent] 完成\n")
-
-
-# ==============================================================================
-# 入口
-# ==============================================================================
-
-def train(phase, log_dir, algo="ppo", custom_config=None, bc_ckpt=None, skip_bc=False):
     config = copy.deepcopy(DEFAULT_CONFIG)
     if custom_config:
         for k, v in custom_config.items():
@@ -2316,91 +2143,70 @@ def train(phase, log_dir, algo="ppo", custom_config=None, bc_ckpt=None, skip_bc=
     set_global_seed(config["train"].get("seed", 42))
     os.makedirs(log_dir, exist_ok=True)
 
-    if phase in ("cruise", "descent") and not skip_bc and bc_ckpt is None:
-        # [v4] cruise BC:
-        #   PPO → CruiseDualRLAgent: trains planner, saves planner_actor/swing_actor format
-        #   SAC → plain SACPhaseAgent: trains single agent, saves actor/critic format
-        #         (SAC dual-RL not supported; single SAC agent is the RL agent)
-        _ppo_dual = (phase == "cruise" and algo == "ppo" and
-                     config.get("cruise_rl", {}).get("use_dual_rl", True))
-
-        if _ppo_dual:
-            ag = CruiseDualRLAgent(config=config, algo="ppo")
-            pretrain_bc_cruise(ag.planner_agent, config)
-            try:
-                ag.swing_agent.actor.load_state_dict(
-                    ag.planner_agent.actor.state_dict(), strict=False)
-            except Exception:
-                pass
-        elif algo == "ppo":
-            ag = PPOPhaseAgent(phase, config=config)
-            if phase == "cruise":
-                pretrain_bc_cruise(ag, config)
-            else:
-                pretrain_bc_descent(ag, config)
-        else:  # SAC
-            ag = SACPhaseAgent(phase, config=config)
-            if phase == "cruise":
-                # For SAC BC: train a temporary PPO agent, then extract actor weights
-                _tmp_ppo = PPOPhaseAgent(phase, config=config)
-                pretrain_bc_cruise(_tmp_ppo, config)
-                # Transfer BC actor weights (shared MLP backbone compatible)
-                try:
-                    ag.actor.load_state_dict(_tmp_ppo.actor.state_dict(), strict=False)
-                    print("  [BC] PPO→SAC actor weight transfer")
-                except Exception as e:
-                    print(f"  [BC] actor transfer warning: {e}")
-                if hasattr(_tmp_ppo, 'obs_norm'):
-                    ag.obs_norm.load_state_dict(_tmp_ppo.obs_norm.state_dict())
-                del _tmp_ppo
-            else:
-                pretrain_bc_descent(ag, config)
-        bp = os.path.join(log_dir, "ckpt_bc.pt"); ag.save(bp); bc_ckpt = bp
-
+    n_envs = int(config["train"].get("n_envs", 1))
     if algo == "ppo":
-        return train_ppo(phase, log_dir, config, bc_ckpt)
+        # [v11 Path 3] n_envs > 1 时启用 SubprocVecEnv 并行版本
+        if n_envs > 1:
+            print(f"\n  [v11 Path 3] 启用 vectorized PPO with n_envs={n_envs}")
+            return train_ppo_vec(phase, log_dir, config,
+                                 resume_ckpt=resume_ckpt, n_envs=n_envs)
+        return train_ppo(phase, log_dir, config, resume_ckpt=resume_ckpt)
     elif algo == "sac":
-        return train_sac(phase, log_dir, config, bc_ckpt)
+        # [v11 Path 3] SAC 也支持 vec
+        if n_envs > 1:
+            print(f"\n  [v11 Path 3] 启用 vectorized SAC with n_envs={n_envs}")
+            return train_sac_vec(phase, log_dir, config,
+                                 resume_ckpt=resume_ckpt, n_envs=n_envs)
+        return train_sac(phase, log_dir, config, resume_ckpt=resume_ckpt)
     else:
         raise ValueError(f"Unknown algo: {algo}")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="三阶段 RL 训练 v3")
-    parser.add_argument("--phase",      type=str, required=True, choices=["lift", "cruise", "descent"])
-    parser.add_argument("--algo",       type=str, default="ppo", choices=["ppo", "sac"])
-    parser.add_argument("--log-dir",    type=str, default=None)
-    parser.add_argument("--timesteps",  type=int, default=None)
-    parser.add_argument("--render",     action="store_true")
-    parser.add_argument("--gpu",        type=int, default=0)
-    parser.add_argument("--bc-ckpt",    type=str, default=None)
-    parser.add_argument("--skip-bc",    action="store_true")
-    parser.add_argument("--seed",       type=int, default=42)
-    parser.add_argument("--wind",       action="store_true")
-    parser.add_argument("--no-curriculum", action="store_true", help="禁用课程学习")
-    parser.add_argument("--obstacles",  type=int, default=None,
-                        help="手动设置障碍物数量 (0=无障碍物训练, 1-3=引入障碍物)")
+    parser = argparse.ArgumentParser(
+        description="[v13.0] 两阶段 RL 训练: cruise (NMPC 抬升+平移) + descent (PID 下降)")
+    parser.add_argument("--phase",     type=str, required=True,
+                        choices=["cruise", "descent", "lift"],
+                        help="[v13.0] 推荐 'cruise' 或 'descent'. 'lift' 已被合并到 "
+                             "cruise, 输入 'lift' 会自动重定向到 cruise.")
+    parser.add_argument("--algo",      type=str, default="ppo",
+                        choices=["ppo", "sac"])
+    parser.add_argument("--log-dir",   type=str, default=None)
+    parser.add_argument("--timesteps", type=int, default=None)
+    parser.add_argument("--render",    action="store_true")
+    parser.add_argument("--gpu",       type=int, default=0)
+    parser.add_argument("--resume-ckpt", type=str, default=None,
+                        help="[v11] 断点续训 checkpoint 路径 (替代旧 --bc-ckpt)")
+    parser.add_argument("--seed",      type=int, default=42)
+    parser.add_argument("--no-curriculum", action="store_true",
+                        help="禁用课程学习 (level 永远停在 0)")
+    parser.add_argument("--n-envs",    type=int, default=None,
+                        help="[v11 Path 3] 并行环境数 (默认 1 = 单进程, "
+                             ">1 = SubprocVecEnv 多进程)")
+    parser.add_argument("--disable-her", action="store_true",
+                        help="[v11 Path 2] 禁用 PPO descent 的 HER (默认开启)")
     args = parser.parse_args()
+
+    # [v13.0] lift 已合并进 cruise, 自动重定向
+    if args.phase == "lift":
+        print("\n" + "=" * 70)
+        print("[v13.0 提示] lift 阶段已合并进 cruise (NMPC 抬升+平移统一段)")
+        print("             自动重定向 --phase lift → --phase cruise")
+        print("=" * 70 + "\n")
+        args.phase = "cruise"
 
     ld = args.log_dir or f"saves/{args.phase}_{args.algo}"
     cc = {}
-    if args.render:      cc.setdefault("sim", {})["render"] = True
-    if args.gpu != 0:    cc.setdefault("train", {})["gpu_id"] = args.gpu
-    if args.timesteps:   cc.setdefault("train", {})["total_timesteps"] = args.timesteps
+    if args.render:    cc.setdefault("sim", {})["render"]   = True
+    if args.gpu != 0:  cc.setdefault("train", {})["gpu_id"] = args.gpu
+    if args.timesteps: cc.setdefault("train", {})["total_timesteps"] = args.timesteps
     cc.setdefault("train", {})["seed"] = args.seed
-    if args.wind:
-        cc.setdefault("curriculum", {})["wind_enabled"] = True
-        cc.setdefault("wind", {})["enabled"] = True
-    if args.no_curriculum: cc.setdefault("curriculum", {})["enabled"] = False
-    if args.obstacles is not None:
-        # 手动指定障碍物数量 (用于加入障碍物的第二阶段训练)
-        if args.obstacles == 0:
-            cc.setdefault("curriculum", {})["obstacle_enabled"] = False
-            cc.setdefault("scene", {})["n_obstacles"] = 0
-        else:
-            cc.setdefault("curriculum", {})["obstacle_enabled"] = True
-            cc.setdefault("curriculum", {})["obstacle_start_n"] = args.obstacles
-            cc.setdefault("scene", {})["n_obstacles"] = args.obstacles
+    if args.no_curriculum:
+        cc.setdefault("curriculum", {})["enabled"] = False
+    if args.n_envs is not None:
+        cc.setdefault("train", {})["n_envs"] = args.n_envs
+    if args.disable_her:
+        cc.setdefault("descent_rl", {})["ppo_her_enabled"] = False
 
     train(args.phase, ld, algo=args.algo, custom_config=cc or None,
-          bc_ckpt=args.bc_ckpt, skip_bc=args.skip_bc)
+          resume_ckpt=args.resume_ckpt)

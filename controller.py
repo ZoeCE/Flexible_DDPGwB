@@ -575,10 +575,33 @@ class JointSpaceExpert:
     def set_path(self, path):
         self.tracker.set_path(path)
 
-    def compute_joint_target(self, env_obs, current_q, target_yaw=0.0):
+    def compute_joint_target(self, env_obs, current_q, target_yaw=0.0,
+                             residual_acc=None):
+        """
+        计算 joint target. 与 test_phase 单独 expert 完全相同的积分器路径.
+
+        [v12 新增] residual_acc 可选参数:
+            形状 (3,) 的 EE 加速度残差, 加在 NMPC 输出 action_4d[:3] 上.
+            注入点: 在 action_4d 输出之后, 在积分器之前.
+            这样 NMPC 预测、积分器、速度限制、锚定、IK 全部与 test_phase 一致,
+            残差 RL 真正变成 "在 expert 内部的小幅微调".
+        """
         is_desc = self.tracker._is_descending
 
         action_4d = self.tracker.compute_ee_acceleration(env_obs, target_yaw)
+
+        # [v12 关键修复] 在 NMPC 输出后, 积分器前, 注入 RL 残差
+        # 这样: NMPC 在"真实 ee state"上规划 → 积分器用"NMPC + RL 残差"演化
+        # → 与 test_phase 中 expert-only (residual=0) 路径完全一致.
+        if residual_acc is not None:
+            _res = np.asarray(residual_acc, dtype=np.float64)
+            if _res.shape == (3,):
+                action_4d = np.array([
+                    float(action_4d[0]) + _res[0],
+                    float(action_4d[1]) + _res[1],
+                    float(action_4d[2]) + _res[2],
+                    float(action_4d[3]),  # yaw 不加残差
+                ], dtype=np.float64)
 
         real_ee = np.array([float(env_obs[OBS_EE_X]),
                              float(env_obs[OBS_EE_Y]),
@@ -765,8 +788,11 @@ class JointSpaceExpert:
         self._last_q = q_target.copy()
         return q_target.astype(np.float32)
 
-    def compute_delta_q_target(self, env_obs, current_q, target_yaw=0.0):
-        q_target = self.compute_joint_target(env_obs, current_q, target_yaw)
+    def compute_delta_q_target(self, env_obs, current_q, target_yaw=0.0,
+                               residual_acc=None):
+        """计算 delta_q. [v12] 加 residual_acc 可选参数."""
+        q_target = self.compute_joint_target(env_obs, current_q, target_yaw,
+                                             residual_acc=residual_acc)
         delta_q  = q_target.astype(np.float64) - current_q.astype(np.float64)
         delta_q  = np.clip(delta_q, -self.dq_max, self.dq_max)
         return delta_q.astype(np.float32)

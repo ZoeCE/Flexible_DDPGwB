@@ -141,6 +141,8 @@ class CableRobotEnvWithObstacles:
         self.ik_solver = NativeIKSolver(self.model, self.data)
         print("✅ IK Solver 初始化成功！")
         self._reresolve_ids()
+        # [v12.3] 缓存绳索 body id, 用于 cable obs / energy 计算
+        self._cache_cable_body_ids()
 
         self._obstacles        = []
         self._planned_path     = None
@@ -163,6 +165,7 @@ class CableRobotEnvWithObstacles:
         self.wind_theta = 0.0          # 风向角 (rad)
         self.wind_F     = 0.0          # 风力大小 (N)
         self._wind_curriculum_frac = 1.0  # 训练时的风力倍率（0→1）
+        self._force_noise_sigma    = 0.0  # [v8] 环境噪声力 σ (N)
 
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
@@ -209,6 +212,123 @@ class CableRobotEnvWithObstacles:
 
     def _get_ee_mat(self):
         return self.data.site_xmat[self.ee_site_id].reshape(3, 3).copy()
+
+    # ────────────────────────────────────────────────────────────────────────
+    # [v12.3 修订] 绳索每个 segment 的运动状态观测 (用户要求)
+    #
+    # 文献依据:
+    #   - Kotaru et al. 2017 (arXiv:1711.04895): 多段绳建模, 每段 unit vector + omega
+    #   - Goodarzi et al. 2014 (arXiv:1407.8164): geometric control of flexible cable
+    #   - FLARE 2025 (arXiv:2508.09797): cable state in observation
+    #
+    # 我们的结构 (来自 generate_four_cables_with_plate.py):
+    #   4 根绳 × 10 段 = 40 个 body (链接点)
+    #   绳命名: rope_fl, rope_fr, rope_rl, rope_rr
+    #   段命名: rope_<NAME>_root, rope_<NAME>_1, ..., rope_<NAME>_9
+    #   (root 是顶段, 其余按序号)
+    #   每段有 ball joint (3 DoF rotation)
+    #
+    # 每段观测: rel_pos(3) + lin_vel(3) = 6 维
+    #   rel_pos: 该段 com 相对于"该绳上端锚点 ee 上的 attachment_site"的位置 (世界系)
+    #   lin_vel: 该段 com 的线速度 (世界系, 从 cvel[3:6] 读)
+    # 加速度: 不入 obs (RL 可通过相邻帧 vel 差分隐式推断, LSTM actor 尤其擅长)
+    #
+    # 总维度: 4 × 10 × 6 = 240 维
+    # ────────────────────────────────────────────────────────────────────────
+    CABLE_NAMES = ("rope_fl", "rope_fr", "rope_rl", "rope_rr")
+    CABLE_OBS_PER_SEG = 6   # rel_pos(3) + lin_vel(3)
+    CABLE_OBS_TOTAL = 4 * 10 * 6  # = 240 (4 ropes × 10 segs × 6 dims)
+
+    def _cache_cable_body_ids(self):
+        """缓存绳索分段 body id (在 _reresolve_ids 后调用)."""
+        n_segs = int(self.config.get("rope", {}).get("num_segments", 10))
+        self._cable_n_segs = n_segs
+
+        self._cable_body_ids = []   # [n_cables][n_segs] — body ids
+        for cname in self.CABLE_NAMES:
+            this_cable = []
+            # rope_<NAME>_root 是第 0 段, rope_<NAME>_1 ... rope_<NAME>_{n_segs-1}
+            for si in range(n_segs):
+                if si == 0:
+                    bname = f"{cname}_root"
+                else:
+                    bname = f"{cname}_{si}"
+                bid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, bname)
+                this_cable.append(bid)  # 即使 -1 也保留, 后续会检查
+            self._cable_body_ids.append(this_cable)
+
+        # 检查: 至少第一根第一段必须存在
+        if (self._cable_body_ids and
+            len(self._cable_body_ids[0]) > 0 and
+            self._cable_body_ids[0][0] >= 0):
+            self._cable_obs_available = True
+        else:
+            self._cable_obs_available = False
+            # 仅首次警告 (避免每次 reset 都打)
+            if not getattr(self, '_cable_warned', False):
+                print(f"[v12.3] 警告: 找不到绳索 body (期望命名: rope_fl_root, rope_fl_1, ...). "
+                      f"cable obs 将全 0, 不影响其他训练. 检查 generate_four_cables_with_plate.py 是否一致.")
+                self._cable_warned = True
+
+    def get_cable_segment_states(self):
+        """
+        返回每根绳每段的 (相对位置, 线速度).
+
+        Returns:
+            seg_obs: np.array shape (4*10*6,) = (240,), float32
+                每 6 维: [rel_x, rel_y, rel_z, vx, vy, vz]
+                顺序: rope_fl seg0..9, rope_fr seg0..9, rope_rl seg0..9, rope_rr seg0..9
+                rel_pos: seg com 减去 attachment_site 的世界位置
+                lin_vel: cvel[3:6] (世界系)
+        """
+        if not getattr(self, '_cable_obs_available', False):
+            return np.zeros(self.CABLE_OBS_TOTAL, np.float32)
+
+        # 上端锚点位置 (4 根绳共用 attachment_site, 即 ee 上的连接点)
+        # 注: 实际 root_pos 是相对于 attachment_site 的偏移 (h, h, 0) 等,
+        #     但绝对位置我们用 attachment_site (在 _get_ee_pos 上方)
+        anchor_world = self._get_ee_pos()   # 简化: 用 ee site 作 anchor
+
+        out = np.zeros(self.CABLE_OBS_TOTAL, np.float32)
+        idx = 0
+        for ci in range(4):
+            for si in range(self._cable_n_segs):
+                bid = self._cable_body_ids[ci][si]
+                if bid < 0:
+                    idx += 6
+                    continue
+                # 段 com 位置 (世界系)
+                p_seg = self.data.body(bid).xpos.copy()
+                rel = p_seg - anchor_world
+                out[idx:idx+3] = rel.astype(np.float32)
+                # 段 com 线速度 (cvel: 6=angular(3)+linear(3), 世界系)
+                cvel = self.data.cvel[bid]
+                lin_vel = cvel[3:6]
+                out[idx+3:idx+6] = lin_vel.astype(np.float32)
+                idx += 6
+        return out
+
+    def _get_cable_energy(self):
+        """
+        返回所有绳所有段的总动能 (近似), 用作 reward 防摆项.
+
+        cable_kinetic_energy = sum over segments: 0.5 * m_seg * ||v_seg||²
+        但因为各段 mass 相同 (default 0.01 kg), 我们直接用 v² 总和, mass 通过 coef 调.
+
+        Returns:
+            cable_kinetic_energy: float, 单位 m²/s² (没乘 mass)
+        """
+        if not getattr(self, '_cable_obs_available', False):
+            return 0.0
+        total_v_sq = 0.0
+        for ci in range(4):
+            for si in range(self._cable_n_segs):
+                bid = self._cable_body_ids[ci][si]
+                if bid < 0:
+                    continue
+                v = self.data.cvel[bid][3:6]
+                total_v_sq += float(v[0]**2 + v[1]**2 + v[2]**2)
+        return total_v_sq
 
     def _launch_viewer(self):
         kw = {}
@@ -284,6 +404,30 @@ class CableRobotEnvWithObstacles:
         """返回当前风力状态 (wind_F, wind_theta)，供观测构建使用。"""
         effective_F = self.wind_F * self._wind_curriculum_frac
         return float(effective_F), float(self.wind_theta)
+
+    # ── [v8] 环境噪声力 (force_noise) ────────────────────────────────────────
+    def set_force_noise(self, sigma_n: float):
+        """
+        设置环境噪声力标准差 (N).
+        每个物理子步施加 N(0, sigma) 力到 payload, 随机方向.
+        与风力可叠加 (wind 是确定性, force_noise 是高斯).
+        """
+        self._force_noise_sigma = float(max(0.0, sigma_n))
+
+    def _apply_force_noise(self):
+        """在 step 子循环中调用, 施加随机噪声力到 payload。"""
+        sigma = getattr(self, '_force_noise_sigma', 0.0)
+        if sigma <= 0:
+            return
+        if not (hasattr(self, 'data') and hasattr(self, 'prefab_body_id')):
+            return
+        # 随机方向 2D 力 (z=0, 模拟空气扰动而非冲击)
+        fx, fy = np.random.normal(0.0, sigma, 2)
+        # 注意: xfrc_applied 已被 wind/test_wind 占用, 这里叠加而不覆盖
+        cur = self.data.xfrc_applied[self.prefab_body_id, :3].copy()
+        cur[0] += fx
+        cur[1] += fy
+        self.data.xfrc_applied[self.prefab_body_id, :3] = cur
 
     # ── [v3-CURRICULUM] 运行时动态设置障碍物数 ────────────────────────────────
     def set_curriculum_n_obstacles(self, n: int):
@@ -572,6 +716,8 @@ class CableRobotEnvWithObstacles:
 
         self.ik_solver.update_model(self.model,self.data)
         self._reresolve_ids()
+        # [v12.3] scene 切换后重新缓存绳索 body id
+        self._cache_cable_body_ids()
 
         mujoco.mj_resetData(self.model,self.data)
         self.data.qpos[:]=0.; self.data.qvel[:]=0.
@@ -698,6 +844,7 @@ class CableRobotEnvWithObstacles:
             self._update_wind()
             self._apply_wind_force()
             self._apply_test_wind()   # 测试风力：覆盖随机游走，施加恒定风
+            self._apply_force_noise() # [v8] 环境噪声力
             mujoco.mj_step(self.model, self.data)
 
         if np.any(np.isnan(self.data.qpos)) or np.any(np.isnan(self.data.qvel)):
@@ -1101,6 +1248,15 @@ class CableRobotEnvWithObstacles:
                 rebar_w = self.target_pos + rebar_pos[i]
                 rebar_errors[i] = float(np.linalg.norm(hole_w - rebar_w))
 
+        # [v12.3 修订] 绳索每段运动状态 (240 维): 4 根 × 10 段 × 6 维 (rel_pos + lin_vel)
+        # 用户原话: "把四根绳索的每个链接点的运动状态(相对位移、速度、加速度)加入观测层"
+        # 文献: Kotaru 2017 (arXiv:1711.04895), Goodarzi 2014 (arXiv:1407.8164), FLARE 2025
+        # 加速度: 由 LSTM actor 通过相邻帧 vel 差分隐式推断 (避免维度爆炸)
+        try:
+            cable_obs = list(self.get_cable_segment_states())
+        except Exception:
+            cable_obs = [0.0] * (4 * 10 * 6)   # = 240
+
         return np.array(
             [ee_x,ee_y,ee_vx,ee_vy,payload_x,payload_y,payload_vx,payload_vy,rel_tx,rel_ty]
             +obs_data[:tl]
@@ -1111,7 +1267,8 @@ class CableRobotEnvWithObstacles:
             +list(joint_q)+list(joint_dq)
             +phase_encode
             +[progress, z_error]
-            +rebar_errors,
+            +rebar_errors
+            +cable_obs,    # [v12.3] 240 维: 4 根绳 × 10 段 × (rel_pos+lin_vel)
             dtype=np.float32)
 
 

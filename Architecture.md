@@ -1,240 +1,302 @@
-# 三阶段 RL 控制架构设计文档 v4
+# Cable-Suspended Payload RL Training Framework — v13.0
 
-## 1. 架构总览
+> 2 阶段架构: **cruise** (NMPC 抬升+平移) + **descent** (PID 下降+插入)
 
-```
-┌──────────────────────────────────────────────────────────────────────┐
-│                    三阶段分治控制系统 v4                              │
-│                                                                      │
-│  ┌─────────────┐    ┌──────────────────────┐    ┌────────────────┐  │
-│  │  Phase 1    │    │  Phase 2             │    │  Phase 3       │  │
-│  │  Lift RL    │───>│  Cruise              │───>│  Descent RL    │  │
-│  │  (提升)     │    │  (平移避障+防摆)     │    │  (精准下降)    │  │
-│  └──────┬──────┘    └──────┬───────────────┘    └──────┬─────────┘  │
-│         │                  │                            │            │
-│    EE acc(3D)    ┌─────────┴──────────┐          PID+residual       │
-│    ax,ay,az      │  ORCA Expert (BC)  │          EE acc(3D)        │
-│    差分 reward   │  CruiseDualRLAgent │                            │
-│    KE+PE 摆动    │  ┌──────────────┐  │                            │
-│    XY差分惩罚    │  │ planner_RL   │  │                            │
-│                  │  │ (导航+避障)  │  │                            │
-│                  │  ├──────────────┤  │                            │
-│                  │  │ swing_RL     │  │                            │
-│                  │  │ (防摆残差)   │  │                            │
-│                  │  └──────────────┘  │                            │
-│                  └────────────────────┘                            │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │              EE Acceleration Controller                      │   │
-│  │  acc → 积分 → EE vel/pos → IK → q_target → delta_q         │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-│                                                                      │
-│  ┌──────────────────────────────────────────────────────────────┐   │
-│  │           Detailed WandB Reward Tracking                     │   │
-│  │  各阶段: z_approach / xy_drift / swing_energy / step_penalty │   │
-│  │  cruise: pbrs_nav / obs_repulsion / swing_penalty           │   │
-│  │  descent: xy_align / z_descent / swing_ke / tilt / yaw      │   │
-│  └──────────────────────────────────────────────────────────────┘   │
-└──────────────────────────────────────────────────────────────────────┘
-```
+---
 
-## 2. v4 主要变更
-
-### 2.1 Phase 1: Lift RL — 增强 Reward
-
-**原问题**: 纯 KE 摆动惩罚忽略势能; XY 绝对值惩罚导致"提升=漂移=惩罚"局部最优
-
-**v4 修改**:
-- 摆动能量: KE + PE (完整机械能), 与 cruise/descent 统一
-- XY 惩罚: 差分形式 `(prev_dtf - dtf) × coef`, 靠近 start_xy → 正, 远离 → 负
-- 成功判定: z 双边 ±25mm + |vz|<5cm/s + swing_energy<50mJ + hold_steps=3
-- WandB 分项: `z_approach`, `xy_drift_reward`, `swing_energy_penalty`, `swing_energy_J`
-
-### 2.2 Phase 2: Cruise — ORCA Expert + 双 RL
-
-**原架构**: 单 RL agent, 多目标 reward (导航+防摆冲突)
-
-**v4 架构**:
-```
-ORCA Expert (orca_expert.py):
-  - ORCAPlanner: 基于速度障碍半平面约束的 2D 速度规划
-  - CruiseORCAExpert: ORCA + 防摆阻尼 (用于 BC 数据收集)
-  - 替代原 tracker-based expert, 更真实的避障行为
-
-CruiseDualRLAgent:
-  - planner_agent: PPO/SAC, 2D xy acc, 主用导航 reward
-    reward: pbrs_nav (PBRS 势能差分) + obs_repulsion + 轻量防摆
-  - swing_agent:   PPO/SAC, 2D xy acc (残差, 更小 acc_max)
-    reward: 摆动能量惩罚 + 摆动速度惩罚 (无导航 reward)
-  - total_acc = planner_acc + clip(swing_acc, ±swing_acc_max)
-```
-
-**两网络 Reward 分离设计**:
-| Agent | 主要 Reward | 不包含 |
-|-------|------------|--------|
-| planner | PBRS导航 + 避障 + 轻量防摆 | 不强调防摆 |
-| swing_rl | 摆动能量惩罚 + 摆动速度 | 无导航目标 |
-
-**优势**: reward 信号更清晰, 避免多目标梯度冲突; 可独立诊断各功能学习效果
-
-### 2.3 Phase 3: Descent — 残差 RL (不变 + 增强日志)
-
-框架与 v3 相同 (PID base + RL residual delta_q), 新增 WandB 分项追踪:
-- `xy_align_reward`, `z_descent_reward`, `swing_ke_penalty`
-- `tilt_penalty`, `yaw_penalty`, `step_penalty`, `success_bonus`
-- `xy_dist_mm`, `z_dist_mm`, `swing_ke_J`
-
-## 3. ORCA 算法说明
-
-### orca_expert.py
-
-**ORCAPlanner** (2D 静态障碍物版):
-```python
-# 核心流程
-for obstacle in obstacles:
-    # 构建速度障碍 VO (Velocity Obstacle)
-    # 计算到 VO 边界的最短修正向量 u
-    # 添加半平面约束: n · v >= n·(vel + u)
-# 迭代投影求满足所有约束的最近 v_pref
-v_opt = LP_solve(half_planes, v_pref, max_speed)
-```
-
-**CruiseORCAExpert**:
-```python
-acc = k_nav * (v_orca - v_pl) + k_damp * (v_pl - v_ee)
-#     导航项: 跟踪 ORCA 目标速度    防摆项: EE 跟随 payload
-```
-
-### BC 数据收集 (pretrain_bc_cruise)
-- 使用 ORCA expert 代替原 tracker-based expert
-- planner_agent 接受 ORCA acc 作为 BC 标签
-- swing_agent BC 标签为 0 (从零防摆残差开始)
-
-## 4. WandB 分项 Reward 曲线
-
-### RewardComponentTracker (phase_reward.py)
-
-每个 episode 结束后汇总并上报以下分项:
-
-**Lift**:
-- `lift/rew/z_approach` — z 接近主导奖励
-- `lift/rew/xy_drift_reward` — XY 差分奖励
-- `lift/rew/swing_energy_penalty` — 摆动能量惩罚
-- `lift/rew/swing_energy_J` — 摆动能量监控 (J)
-- `lift/rew/step_penalty` — 步惩罚
-- `lift/rew/success_bonus` — 成功奖励
-- 以上均有 `_per_step` 版本 (每步平均)
-
-**Cruise (planner)**:
-- `cruise/rew/pbrs_nav` — PBRS 导航信号
-- `cruise/rew/obs_repulsion` — 障碍物排斥
-- `cruise/rew/swing_penalty_planner` — 轻量防摆
-- `cruise/rew/near_goal_bonus` — 近目标奖励
-- `cruise/rew/milestone_bonus` — 里程碑
-
-**Cruise (swing_rl)**:
-- `cruise_swing/rew/swing_energy_penalty` — 防摆主导
-- `cruise_swing/rew/swing_ke_J` — 动能监控
-- `cruise_swing/rew/swing_pe_J` — 势能监控
-- `cruise_swing/rew/swing_angle_deg` — 摆角监控
-- `cruise_swing/rew/swing_vel_penalty` — 摆速惩罚
-
-**Descent**:
-- `descent/rew/xy_align_reward` — XY 对准差分
-- `descent/rew/z_descent_reward` — Z 下降差分
-- `descent/rew/swing_ke_penalty` — 摆动动能惩罚
-- `descent/rew/tilt_penalty` — 姿态惩罚
-- `descent/rew/yaw_penalty` — 偏航惩罚
-- `descent/rew/xy_dist_mm` — XY 距离监控 (mm)
-- `descent/rew/z_dist_mm` — Z 高度监控 (mm)
-- `descent/rew/precision_bonus` — 成功精准度奖励
-
-## 5. 训练命令
+## 一、快速开始
 
 ```bash
-# Phase 1: Lift (PPO / SAC)
-python train_phase.py --phase lift --algo ppo --log-dir saves/lift_ppo
-python train_phase.py --phase lift --algo sac --log-dir saves/lift_sac
+# 训练 (2 阶段, 不再有独立 lift)
+python train_phase.py --phase cruise  --algo ppo --n-envs 8 --timesteps 2500000
+python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000
 
-# Phase 2: Cruise (Residual RL, PPO / SAC)
-python train_phase.py --phase cruise --algo ppo --log-dir saves/cruise_residual
+# 测试单段
+python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 20
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 20
 
-# Phase 3: Descent (PID + 残差 RL)
-python train_phase.py --phase descent --algo ppo --log-dir saves/descent_ppo
-python train_phase.py --phase descent --algo sac --log-dir saves/descent_sac
-```
-
-## 6. 测试命令
-
-```bash
-# 单阶段专家 (cruise 使用 ORCA expert)
-python test_phase.py --phase lift    --algo expert --render
-python test_phase.py --phase cruise --algo expert --render --obstacles 3 --episodes 20
-python test_phase.py --phase descent --algo expert --render
-
-# 单阶段 RL 测试
-python test_phase.py --phase lift --algo ppo --ckpt saves/lift_ppo/ckpt_best.pt --render
-python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_residual/ckpt_best.pt --render --obstacles 3
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_best.pt --render
-
-# 有风测试
-python test_phase.py --phase cruise --algo expert \
-    --obstacles 3 --episodes 20 \
-    --wind-force 2.0 --render
-
-# 完整流水线
+# 测试完整流水线 (cruise → descent)
 python test_phase.py --phase pipeline \
-    --lift-ckpt   saves/lift_ppo/ckpt_best.pt \
-    --cruise-ckpt saves/cruise_residual/ckpt_best.pt \
-    --descent-ckpt saves/descent_ppo/ckpt_best.pt \
-    --lift-algo ppo --cruise-algo ppo --descent-algo ppo --render
+    --cruise-ckpt saves/cruise_ppo/best.pt \
+    --descent-ckpt saves/descent_ppo/best.pt \
+    --cruise-algo ppo --descent-algo ppo \
+    --episodes 30
 ```
 
-## 7. 文件结构 v4
+**注意**: `--phase lift` 仍被接受, 但会自动重定向到 `cruise`(并打印提示)。
+旧脚本无需立即修改, 但建议尽快迁移。
+
+---
+
+## 二、架构总览 (v13.0)
+
+### Phase 1: `cruise` — 抬升 + 平移统一段
 
 ```
-project/
-├── config.py               # 全局配置 (新增: cruise_rl.use_dual_rl)
-├── controller.py           # Base Controller (不修改)
-├── mujoco_env_new.py       # MuJoCo 仿真环境 (不修改)
-├── ee_acc_controller.py    # EE 加速度控制器 (不修改)
-├── orca_expert.py          # ★ NEW: ORCA 路径规划 + 防摆 Expert
-├── phase_agent.py          # ★ 新增 CruiseDualRLAgent
-├── phase_reward.py         # ★ 新增 RewardComponentTracker + tracked reward 函数
-├── train_phase.py          # ★ 支持双 RL Cruise + ORCA BC + 详细 wandb 日志
-├── test_phase.py           # ★ 支持 CruiseDualRLAgent + ORCA expert 测试
-└── Architecture.md         # ★ 本文档 v4
+起点: (start_xy, z=0.11)         ←—— payload 在地面附近
+       │
+       │ NMPC 自动垂直抬升 (lift sub-phase)
+       │ tracker 检测 lift WP, 防止跨越 lift→cruise 边界 (v12.2)
+       ↓
+       (start_xy, z=z_cruise=0.25)
+       │
+       │ NMPC 水平平移 (cruise sub-phase) + lock_z 保持高度
+       │ 加入 RL 残差 (3D acc) 抗扰
+       ↓
+终点: (target_xy, z=z_cruise)     ←—— payload 到达目标位置上方
 ```
 
-## 8. 关键设计决策 v4
+- **Base Controller**: NMPC (统一, 内部识别 lift/cruise 两个子阶段)
+- **RL 残差**: 3D acc (xy + z)
+  - 低空段 (payload_z < z_cruise - 0.03):
+    `expert.compute_delta_q_target(obs, cq, residual_acc=res3)` — 与 test_phase 完全一致
+  - 高空段:
+    `EEAccController.compute_delta_q(..., lock_z=True)` — 锁高度专心 xy
+- **奖励**: 防摆 (swing_energy + cable_ke) + z_approach (低空引导) + tilt
+- **成功条件**: payload 到达 `target_xy` ± success_radius
 
-### 8.1 为什么 Cruise 用双 RL 而不是单 RL 多目标?
-
-| 方式 | 问题 | v4 解决方案 |
-|------|------|-------------|
-| 单 RL, 导航+防摆 reward | 梯度方向冲突, reward 量级需精细调参 | 分离网络, 独立 reward 信号 |
-| 单 RL, 只有导航 | 忽略防摆, 运动可能导致摆动失控 | swing_rl 专门处理防摆 |
-| 双 RL 叠加 | 两者可能互相干扰 | swing_acc 限幅保证主导权在 planner |
-
-### 8.2 为什么 ORCA 替代原 tracker-based expert?
-
-1. **物理一致性**: ORCA 基于速度约束, 输出的 acc 物理意义更清晰
-2. **障碍物感知**: 原 expert 不感知障碍物; ORCA 显式绕障
-3. **防摆**: ORCA expert 内置阻尼控制, BC 数据质量更高
-4. **可扩展**: ORCA 参数化, 易于调整探索/保守程度
-
-### 8.3 WandB 分项曲线的分析方法
+### Phase 2: `descent` — 下降 + 插入
 
 ```
-诊断 Lift SR 低:
-  z_approach 高但 SR 低 → 检查 xy_drift_reward (是否 XY 漂移)
-  z_approach 低 → 检查 swing_energy_J (摆动过大阻碍上升)
-
-诊断 Cruise SR 低:
-  pbrs_nav 高但 SR 低 → 检查 obs_repulsion (碰撞?)
-  planner SR 高但 swing 仍大 → swing_rl 学习失败, 检查 swing_energy_J
-
-诊断 Descent SR 低:
-  xy_align 高但 z_descent 低 → 对准不足 30mm, 检查 xy_dist_mm
-  z_descent 高但 SR 低 → 检查 tilt_penalty + yaw_penalty (姿态问题)
+起点: (target_xy, z=0.25)        ←—— 接续 cruise 终点
+       │
+       │ PID 3D base + RL 残差精度修正
+       │ HER 回放经验加速学习
+       ↓
+终点: 插入钢筋 (xy_tol = 5mm)
 ```
+
+- **Base Controller**: PID (3D 位置控制)
+- **RL 残差**: 3D acc, **与 PID 输出解耦** (v12.3 fix)
+- **奖励**: swing_ke + xy_align + rebar_align + precision_bonus
+- **成功条件**: xy 误差 < 5mm + z 到达 target_z
+
+---
+
+## 三、关键设计 (v13.0 整合所有版本改进)
+
+### 3.1 训练课程 (v12.5)
+
+只保留风力扰动, 渐进 6 级 (cruise) / 5 级 (descent):
+
+```python
+# cruise (合并 lift): 6 级渐进, 风力 0 → 2N
+[0.00, 0.40, 0.80, 1.20, 1.60, 2.00]
+
+# descent: 5 级渐进, 风力 0 → 1N (descent 精度高更敏感)
+[0.00, 0.25, 0.50, 0.75, 1.00]
+```
+
+**关键**: 课程倒退 (`regression`) 全部关闭, 避免 PPO 灾难性发散.
+学坏时延长当前级训练 (`hard_cap_eps` 增大).
+
+### 3.2 NMPC 与 EE 控制器一致性 (v12.1)
+
+`EEAccController` 参数与 `JointSpaceExpert` 完全对齐:
+- `vel_max_xy = 0.15` (一致)
+- `vel_max_z = 0.20` (一致)
+- `anchor_alpha = 0.10` (一致)
+
+`JointSpaceExpert.compute_delta_q_target(obs, cq, residual_acc=res3)` 接受 3D 残差注入,
+**与 test_phase 走完全相同的代码路径**.
+
+### 3.3 绳索观测 + 能量惩罚 (v12.3)
+
+每个 segment 的运动状态加入 obs:
+- 4 根绳 × 10 段 = 40 个 link points
+- 每段: `rel_pos (3) + lin_vel (3)` = 6 维
+- 总 **240 维 cable obs**
+
+`cable_ke_penalty`: 三段都加, 防止 RL 让 cable 高频振动.
+
+### 3.4 细粒度 RL 评估指标 (v12.6)
+
+成功率 (SR) 无法衡量 "RL vs 纯 base controller" 的改进.
+新增 15 个指标输出到 wandb:
+
+| 类别 | 指标 |
+|------|------|
+| 摆动质量 | `avg/max/p95/rms_ke_mJ`, `integral_ke_mJs`, `avg/max/p95/rms_angle` |
+| 绳索动能 | `cable_ke_peak/avg/integral` |
+| payload 运动 | `pl_vel_peak/rms` |
+| EE 控制 | `avg/max_acc` |
+| RL 介入 | `rl_action_mag_mean/peak` |
+
+wandb 名称: `stab/{phase}/{metric}`
+
+### 3.5 Descent 残差权威性修复 (v12.3)
+
+旧 bug: `max_residual_norm = residual_dq_scale * max(|pid_dq|, ...)`
+让 RL 残差随 PID 收敛而消失, 无法做最后 5mm 精度修正.
+
+修复: `max_residual_norm = residual_dq_scale * dq_max_avg` —
+RL 始终有恒定 ~36mm 权威.
+
+### 3.6 单一精度训练 (v12.3, Ankile 2024 ResiP 方法)
+
+descent 不再逐层降低精度, 直接在 **5mm 最终精度** 上训练:
+- L0: 5mm + 无噪声
+- L1-L4: 5mm + 渐进风力
+
+---
+
+## 四、超参数
+
+### 主要配置
+
+| 参数 | 值 | 说明 |
+|------|----|----|
+| `cruise_rl.action_dim` | 3 | xy + z 残差 |
+| `cruise_rl.max_steps` | 700 | lift 段 + cruise 段总长度 |
+| `cruise_rl.residual_acc_max_xy_rl` | 0.08 | xy 残差上限 |
+| `cruise_rl.residual_acc_max_z_rl` | 0.10 | z 残差上限 (低空段用) |
+| `cruise_rl.target_z_cruise` | 0.25 | 巡航高度 |
+| `descent_rl.action_dim` | 3 | xy + z 残差 |
+| `descent_rl.acc_max_xy` | 0.20 | 残差最大加速度 xy |
+| `descent_rl.acc_max_z` | 0.40 | 残差最大加速度 z |
+| `descent_rl.residual_dq_scale` | 0.30 | 残差占 base 比例 |
+
+### PPO
+
+| 参数 | 值 |
+|------|----|
+| hidden_dim | 384 (适配 ~270 维 obs) |
+| n_layers | 3 |
+| seq_len (LSTM) | 8 |
+| lstm_dim | 128 |
+| n_epochs | 6 |
+| batch_size | 256 |
+| target_kl | 0.02 |
+| clip_eps | 0.2 |
+| entropy_coef anneal | 0.05 → 0.005 over 600k steps |
+
+### SAC (备用)
+
+PPO 为主算法. SAC 仍可用 (`--algo sac`).
+
+---
+
+## 五、常用任务
+
+### 5.1 完整训练流程
+
+```bash
+# Step 1: 训练 cruise (合并的抬升+平移段)
+python train_phase.py --phase cruise --algo ppo --n-envs 8 --timesteps 2500000
+
+# Step 2: 训练 descent
+python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000
+
+# Step 3: 测试单段 SR + 细粒度指标
+python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 30
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 30
+
+# Step 4: 测试 pipeline (cruise → descent)
+python test_phase.py --phase pipeline \
+    --cruise-ckpt saves/cruise_ppo/best.pt \
+    --descent-ckpt saves/descent_ppo/best.pt \
+    --cruise-algo ppo --descent-algo ppo \
+    --episodes 50 \
+    --wind-force 1.5
+```
+
+### 5.2 baseline 对比 (RL vs 纯 NMPC/PID)
+
+```bash
+# 跑 expert-only baseline 收集 stab metrics
+python test_phase.py --phase cruise --algo expert --episodes 30
+python test_phase.py --phase descent --algo expert --episodes 30
+
+# 跑 RL 训练后的版本
+python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 30
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 30
+```
+
+对比 `stab/cruise/max_angle`, `integral_ke_mJs` 等指标 →
+量化 RL 防摆改善程度.
+
+### 5.3 风力鲁棒性测试
+
+```bash
+# 不同风力下测试 (sim2real gap 评估)
+for wind in 0.0 0.5 1.0 1.5 2.0; do
+    python test_phase.py --phase pipeline \
+        --cruise-ckpt saves/cruise_ppo/best.pt \
+        --descent-ckpt saves/descent_ppo/best.pt \
+        --cruise-algo ppo --descent-algo ppo \
+        --episodes 20 --wind-force $wind
+done
+```
+
+---
+
+## 六、文件结构
+
+```
+.
+├── README.md                       # 本文件
+├── config.py                       # 所有超参数
+├── controller.py                   # JointSpaceExpert + NMPCTrajectoryTracker
+├── ee_acc_controller.py            # EE 加速度积分控制器
+├── mujoco_env_new.py               # 环境 + obs (含 240 维 cable obs)
+├── phase_agent.py                  # PPO / SAC agent + build_*_obs
+├── phase_reward.py                 # reward 函数 (lift kept 仅供兼容)
+├── train_phase.py                  # 训练入口 (PPO/SAC × single/vec)
+├── test_phase.py                   # 测试入口 (single phase + pipeline)
+├── vec_env.py                      # SubprocVecEnv 多进程
+├── stability_metrics.py            # 共享 StabilityMetrics class
+└── docs/                           # 设计文档
+    ├── v12_4_lift_cruise_unified.md
+    ├── v12_5_curriculum_smooth_progression.md
+    ├── v12_6_train_test_metrics_adaptation.md
+    └── v13_0_two_phase_merge.md    # 本次合并文档
+```
+
+---
+
+## 七、版本历史关键改动
+
+| 版本 | 改动 |
+|------|------|
+| v8-v10 | 原始 3 阶段 (lift/cruise/descent), 大量 reward 实验 |
+| v11.2 | cruise reward 重设计 (CAPS + Olesen 2026) |
+| v11.4 | SAC alpha 失控修复 + Q-divergence 防护 |
+| v12.1 | train↔test NMPC 路径一致性修复 (核心 bug) |
+| v12.2 | Lift expert 早期平移修复 (tracker 跨越保护) |
+| v12.3 | 240 维 cable obs + descent residual 权威性修复 |
+| v12.4 | Lift+cruise reward 合并 (统一防摆主体) |
+| v12.5 | 课程平滑改造 (只保留风力, 6 级渐进, 关闭倒退) |
+| v12.6 | 细粒度 stab metrics 集成到 train/test |
+| **v13.0** | **完整合并: 2 阶段架构 (cruise + descent)** |
+
+---
+
+## 八、文献依据
+
+1. **Ankile et al. 2024** (ResiP). arXiv:2407.16677 — 残差 RL 单一精度训练.
+2. **Olesen et al. 2026** (Crane RL). arXiv:2602.05895 — anti-sway residual reward.
+3. **Mysore et al. 2021** (CAPS). arXiv:2012.06644 — action smoothness regularization.
+4. **Kotaru et al. 2017**. arXiv:1711.04895 — multi-link cable modeling.
+5. **Goodarzi et al. 2014**. arXiv:1407.8164 — geometric control cable payload.
+6. **FLARE 2025**. arXiv:2508.09797 — RL anti-sway for cable-suspended quadrotor.
+7. **Pinto et al. 2017**. arXiv:1703.02702 — Robust adversarial RL (单一扰动维度).
+8. **Narvekar et al. 2020**. arXiv:2003.04960 — Curriculum learning survey.
+
+---
+
+## 九、已知问题 + 提醒
+
+1. **旧 checkpoints 不兼容**: obs_dim 263-278 (含 240 维 cable) + hidden 384,
+   v12.0 之前的 ckpt 完全无法 load. 必须从头训练.
+
+2. **VecEnv 模式 (`--n-envs > 1`)**: stab metrics 通过 remote 返回, 工作正常但
+   每 ep 多一次序列化开销 (< 1ms, 可忽略).
+
+3. **`--phase lift` 兼容**: 仍可用, 自动重定向到 cruise.
+   旧 lift checkpoint 即使能加载也会 fail (action_dim 不一致).
+
+4. **保留代码**: `phase_reward.py::compute_lift_reward` 等保留以兼容历史调用,
+   但训练实际只调 cruise + descent. 长期会清理.
+
+5. **课程层数与时长**: cruise (6 级) / descent (5 级) 都加大了 min_eps 和 hard_cap_eps,
+   单段训练需要 200-300 万 step 才能跑完全部课程. 不要中途停训.
