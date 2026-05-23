@@ -365,7 +365,12 @@ class CableRobotEnvWithObstacles:
 
     def set_wind_curriculum(self, frac: float):
         """设置风力课程学习倍率，0.0=无风，1.0=全风力。"""
+        self._test_wind_mode = False
         self._wind_curriculum_frac = float(np.clip(frac, 0.0, 1.0))
+        if self._wind_curriculum_frac <= 0.0:
+            self.wind_F = 0.0
+            if hasattr(self, 'data') and hasattr(self, 'prefab_body_id'):
+                self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
 
     def set_wind_force(self, force_n: float, direction_rad: float = 0.0):
         """
@@ -382,8 +387,15 @@ class CableRobotEnvWithObstacles:
             force_n:       风力大小 (N)
             direction_rad: 风向角 (rad)，0=+x 方向，π/2=+y 方向
         """
+        if abs(float(force_n)) <= 1e-12:
+            self.clear_wind_force()
+            return
+
         self.wind_F     = float(force_n)
         self.wind_theta = float(direction_rad)
+        self._test_wind_force = float(force_n)
+        self._test_wind_dir = float(direction_rad)
+        self._wind_curriculum_frac = 1.0
         self._test_wind_mode = True
         # 立即写入（reset 后 data 已存在）
         self._apply_test_wind()
@@ -394,14 +406,30 @@ class CableRobotEnvWithObstacles:
             return
         if not (hasattr(self, 'data') and hasattr(self, 'prefab_body_id')):
             return
-        fx = self.wind_F * np.cos(self.wind_theta)
-        fy = self.wind_F * np.sin(self.wind_theta)
+        force = float(getattr(self, '_test_wind_force', self.wind_F))
+        theta = float(getattr(self, '_test_wind_dir', self.wind_theta))
+        fx = force * np.cos(theta)
+        fy = force * np.sin(theta)
         self.data.xfrc_applied[self.prefab_body_id, :3] = [fx, fy, 0.0]
+
+    def clear_wind_force(self):
+        """Disable externally forced wind and clear any residual xfrc."""
+        self._test_wind_mode = False
+        self._test_wind_force = 0.0
+        self._test_wind_dir = 0.0
+        self._wind_curriculum_frac = 0.0
+        self.wind_F = 0.0
+        self.wind_theta = 0.0
+        if hasattr(self, 'data') and hasattr(self, 'prefab_body_id'):
+            self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
 
 
 
     def get_wind_state(self):
         """返回当前风力状态 (wind_F, wind_theta)，供观测构建使用。"""
+        if getattr(self, '_test_wind_mode', False):
+            return (float(getattr(self, '_test_wind_force', self.wind_F)),
+                    float(getattr(self, '_test_wind_dir', self.wind_theta)))
         effective_F = self.wind_F * self._wind_curriculum_frac
         return float(effective_F), float(self.wind_theta)
 

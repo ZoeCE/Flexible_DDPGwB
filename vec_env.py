@@ -56,7 +56,10 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
     返回 dict:
         {
             'new_obs':      env_obs after step,
-            'new_phase_obs': phase obs (build_phase_obs 输出),
+            'new_core_obs':  non-cable phase obs,
+            'new_cable_raw': raw cable obs,
+            'new_wind_obs':  wind obs,
+            'new_base_dq':   descent base controller delta_q for next obs,
             'reward':       float,
             'done':         bool,
             'success':      bool,
@@ -197,6 +200,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 py     = float(payload.get('prev_yaw', 0.0))
                 rstate = payload['rstate']
                 act_noise = float(payload.get('act_noise', 0.0))
+                base_dq = payload.get('base_dq', None)
 
                 ree = env._get_ee_pos()
                 term_reason = "running"
@@ -228,7 +232,9 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                             remote.send({
                                 'falling': True, 'reward': -5.0, 'done': True,
                                 'success': False, 'termination': 'falling',
-                                'new_obs': obs, 'new_phase_obs': None,
+                                'new_obs': obs,
+                                'new_core_obs': None, 'new_cable_raw': None, 'new_wind_obs': None,
+                                'new_base_dq': None,
                                 'new_tilt': pt, 'new_yaw': py,
                                 'pl_xy': _pl_pos[:2].copy(), 'xy_align_r': 0.0,
                                 'rstate': rstate,
@@ -288,7 +294,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
 
                 elif phase == "descent":
                     dq, _pid_dq = _apply_descent_pid_residual(
-                        expert, rl_act, obs, env, config, cq)
+                        expert, rl_act, obs, env, config, cq,
+                        pid_dq=base_dq)
                     dq = _add_act_noise(dq, act_noise)
                     no2, _, _, _, ei = env.step(dq)
                     # [v11.3] 传 rl_action
@@ -320,9 +327,21 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                         rl_action=rl_act)
                     term_reason = ri.get('termination', 'running')
 
-                # 构造 phase obs (供下一步 RL inference)
-                new_phase_obs, new_tilt, new_yaw = build_phase_obs(
-                    phase, no2, env, sxy, txy, pt, py)
+                # [v14.0] 构造 phase obs (供下一步 RL inference)
+                from phase_agent import build_wind_obs as _bw
+                _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+                _wobs_next = _bw(env, _wind_max)
+                _base_next = None
+                if phase == "descent" and not done:
+                    try:
+                        _cq_next = env.data.qpos[:7].copy().astype(np.float32)
+                        _base_next = expert.compute_delta_q_target(
+                            no2, _cq_next.astype(np.float64))
+                    except Exception:
+                        _base_next = np.zeros(7, dtype=np.float32)
+                _core_next, _cable_next, _wobs_next, new_tilt, new_yaw = build_phase_obs(
+                    phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs_next,
+                    base_action=_base_next)
                 pl_xy_now = env.data.body('prefab').xpos[:2].copy().astype(np.float32)
                 xy_align_r = float(tracker.get_last_step_value("xy_align_reward")) \
                     if hasattr(tracker, 'get_last_step_value') else 0.0
@@ -339,20 +358,37 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
 
                 remote.send({
                     'falling': False,
-                    'new_obs': no2, 'new_phase_obs': new_phase_obs,
+                    'new_obs': no2,
+                    'new_core_obs': _core_next,       # [v14.0]
+                    'new_cable_raw': _cable_next,     # [v14.0]
+                    'new_wind_obs': _wobs_next,       # [v14.0]
+                    'new_base_dq': _base_next,
                     'reward': float(reward), 'done': bool(done), 'success': bool(success),
                     'info': ei, 'new_tilt': float(new_tilt), 'new_yaw': float(new_yaw),
                     'pl_xy': pl_xy_now, 'xy_align_r': xy_align_r,
                     'rstate': rstate, 'termination': term_reason,
-                    'stab_summary': stab_summary,    # [v12.6] None or dict
+                    'stab_summary': stab_summary,
                 })
 
             elif cmd == 'build_phase_obs':
-                # data = (phase, env_obs, start_xy, target_xy, prev_tilt, prev_yaw)
+                # [v14.0] data = (phase, env_obs, start_xy, target_xy, prev_tilt, prev_yaw)
                 from train_phase import build_phase_obs
+                from phase_agent import build_wind_obs
                 phase_b, eo, sxy_b, txy_b, pt_b, py_b = data
-                po, t, y = build_phase_obs(phase_b, eo, env, sxy_b, txy_b, pt_b, py_b)
-                remote.send((po, t, y))
+                _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+                _wobs = build_wind_obs(env, _wind_max)
+                _base_b = None
+                if phase_b == "descent":
+                    try:
+                        _cq_b = env.data.qpos[:7].copy().astype(np.float32)
+                        _base_b = expert.compute_delta_q_target(
+                            np.asarray(eo, np.float32), _cq_b.astype(np.float64))
+                    except Exception:
+                        _base_b = np.zeros(7, dtype=np.float32)
+                core, cable_raw, _wobs, t, y = build_phase_obs(
+                    phase_b, eo, env, sxy_b, txy_b, pt_b, py_b,
+                    wind_obs=_wobs, base_action=_base_b)
+                remote.send((core, cable_raw, _wobs, t, y, _base_b))
 
             elif cmd == 'get_pl_pos':
                 pp = env.data.body('prefab').xpos.copy()
@@ -368,6 +404,12 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 f, d = data
                 if hasattr(env, 'set_wind_force'):
                     env.set_wind_force(f, d)
+                remote.send('ok')
+            elif cmd == 'clear_wind_force':
+                if hasattr(env, 'clear_wind_force'):
+                    env.clear_wind_force()
+                elif hasattr(env, 'set_wind_force'):
+                    env.set_wind_force(0.0, 0.0)
                 remote.send('ok')
             elif cmd == 'set_wind_curriculum':
                 if hasattr(env, 'set_wind_curriculum'):
@@ -494,6 +536,12 @@ class DummyVecEnv:
         if hasattr(self.envs[idx], 'set_wind_force'):
             self.envs[idx].set_wind_force(f, d)
 
+    def clear_wind_force(self, idx):
+        if hasattr(self.envs[idx], 'clear_wind_force'):
+            self.envs[idx].clear_wind_force()
+        elif hasattr(self.envs[idx], 'set_wind_force'):
+            self.envs[idx].set_wind_force(0.0, 0.0)
+
     def set_wind_curriculum(self, idx, w):
         if hasattr(self.envs[idx], 'set_wind_curriculum'):
             self.envs[idx].set_wind_curriculum(w)
@@ -506,10 +554,26 @@ class DummyVecEnv:
 
     def build_phase_obs_remote(self, idx, phase, env_obs, start_xy,
                                target_xy, prev_tilt, prev_yaw):
-        """主进程调用 build_phase_obs (DummyVecEnv 直接调本地 env)."""
+        """[v14.0] 主进程调用 build_phase_obs (DummyVecEnv 直接调本地 env)."""
         from train_phase import build_phase_obs
-        return build_phase_obs(phase, env_obs, self.envs[idx], start_xy,
-                               target_xy, prev_tilt, prev_yaw)
+        from phase_agent import build_wind_obs
+        env = self.envs[idx]
+        ctrls = self.controllers_list[idx]
+        config = self.configs[idx]
+        _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+        _wobs = build_wind_obs(self.envs[idx], _wind_max)
+        _base = None
+        if phase == "descent":
+            try:
+                _cq = env.data.qpos[:7].copy().astype(np.float32)
+                _base = ctrls["expert"].compute_delta_q_target(
+                    np.asarray(env_obs, np.float32), _cq.astype(np.float64))
+            except Exception:
+                _base = np.zeros(7, dtype=np.float32)
+        core, cable_raw, _wobs, t, y = build_phase_obs(
+            phase, env_obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
+            wind_obs=_wobs, base_action=_base)
+        return core, cable_raw, _wobs, t, y, _base
 
     def get_env(self, idx):
         return self.envs[idx]
@@ -548,6 +612,7 @@ def _run_rl_step_inline(env, controllers, config, payload):
     py     = float(payload.get('prev_yaw', 0.0))
     rstate = payload['rstate']
     act_noise = float(payload.get('act_noise', 0.0))
+    base_dq = payload.get('base_dq', None)
 
     ree = env._get_ee_pos()
     tracker = RewardComponentTracker(phase)
@@ -567,7 +632,9 @@ def _run_rl_step_inline(env, controllers, config, payload):
             return {
                 'falling': True, 'reward': -5.0, 'done': True,
                 'success': False, 'termination': 'falling',
-                'new_obs': obs, 'new_phase_obs': None,
+                'new_obs': obs,
+                'new_core_obs': None, 'new_cable_raw': None, 'new_wind_obs': None,
+                'new_base_dq': None,
                 'new_tilt': pt, 'new_yaw': py,
                 'pl_xy': _pl_pos[:2].copy().astype(np.float32),
                 'xy_align_r': 0.0, 'rstate': rstate, 'info': {},
@@ -604,7 +671,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
             env, no2, config, rstate, tracker=tracker, rl_action=rl_act[:2])
     elif phase == "descent":
         dq, _pid_dq = _apply_descent_pid_residual(
-            expert, rl_act, obs, env, config, cq)
+            expert, rl_act, obs, env, config, cq,
+            pid_dq=base_dq)
         dq = _add_act_noise(dq, act_noise)
         no2, _, _, _, ei = env.step(dq)
         # [v11.3] 传 rl_action
@@ -631,8 +699,21 @@ def _run_rl_step_inline(env, controllers, config, payload):
         reward, done, success, ri = compute_lift_reward(
             env, no2, config, rstate, tracker=tracker, rl_action=rl_act)
 
-    new_phase_obs, new_tilt, new_yaw = build_phase_obs(
-        phase, no2, env, sxy, txy, pt, py)
+    # [v14.0]
+    from phase_agent import build_wind_obs as _bw2
+    _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+    _wobs_d = _bw2(env, _wind_max)
+    _base_d = None
+    if phase == "descent" and not done:
+        try:
+            _cq_d = env.data.qpos[:7].copy().astype(np.float32)
+            _base_d = expert.compute_delta_q_target(
+                no2, _cq_d.astype(np.float64))
+        except Exception:
+            _base_d = np.zeros(7, dtype=np.float32)
+    _core_d, _cable_d, _wobs_d, new_tilt, new_yaw = build_phase_obs(
+        phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs_d,
+        base_action=_base_d)
     pl_xy_now = env.data.body('prefab').xpos[:2].copy().astype(np.float32)
     xy_align_r = float(tracker.get_last_step_value("xy_align_reward")) \
         if hasattr(tracker, 'get_last_step_value') else 0.0
@@ -640,7 +721,9 @@ def _run_rl_step_inline(env, controllers, config, payload):
         done = True
 
     return {
-        'falling': False, 'new_obs': no2, 'new_phase_obs': new_phase_obs,
+        'falling': False, 'new_obs': no2,
+        'new_core_obs': _core_d, 'new_cable_raw': _cable_d, 'new_wind_obs': _wobs_d,
+        'new_base_dq': _base_d,
         'reward': float(reward), 'done': bool(done), 'success': bool(success),
         'info': ei, 'new_tilt': float(new_tilt), 'new_yaw': float(new_yaw),
         'pl_xy': pl_xy_now, 'xy_align_r': xy_align_r,
@@ -670,8 +753,10 @@ class SubprocVecEnv:
     def __init__(self, env_fns, start_method=None):
         self.n_envs = len(env_fns)
         if start_method is None:
-            # macOS 默认 spawn, Linux 默认 fork. fork 更快但 MuJoCo 不一定线程安全
-            start_method = 'spawn' if sys.platform == 'darwin' else 'forkserver'
+            # Windows/macOS only support spawn-like safe startup; Linux can use forkserver.
+            start_method = 'forkserver' if sys.platform.startswith('linux') else 'spawn'
+        if start_method == 'forkserver' and not sys.platform.startswith('linux'):
+            start_method = 'spawn'
         ctx = mp.get_context(start_method)
 
         try:
@@ -753,6 +838,10 @@ class SubprocVecEnv:
 
     def set_wind_force(self, idx, f, d):
         self.remotes[idx].send(('set_wind_force', (f, d)))
+        return self._check_recv(self.remotes[idx].recv(), idx)
+
+    def clear_wind_force(self, idx):
+        self.remotes[idx].send(('clear_wind_force', None))
         return self._check_recv(self.remotes[idx].recv(), idx)
 
     def set_wind_curriculum(self, idx, w):

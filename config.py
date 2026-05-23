@@ -297,6 +297,31 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     # 17b. Cruise Z/Yaw PID
     # ==========================================================================
+
+    # ==========================================================================
+    # 17c. [v14.0] Cable Encoder — 压缩 240 维绳索 obs 到低维隐特征
+    # ==========================================================================
+    # 问题: 240 维 cable obs 占 obs 总维的 ~90%, 淹没其他关键信号
+    # 方案: 用 2 层 MLP encoder 压缩到 32 维, 再与其他 obs concat
+    # 文献: Peng et al. 2017 (privileged info), Miki et al. 2022 (encoder for terrain)
+    "cable_encoder": {
+        "raw_dim":               240,   # 4 根 × 10 段 × 6 维
+        "hidden_dim":            128,   # encoder 隐藏层
+        "output_dim":            32,    # encoder 输出维度 (接入 actor/critic)
+        "n_layers":              2,     # encoder 深度
+        "normalize_input":       True,  # 对 raw cable obs 做 LayerNorm
+    },
+
+    # ==========================================================================
+    # 17d. [v14.0] Wind Observation — 让 RL 知道当前风力
+    # ==========================================================================
+    # 问题: obs 中完全没有风力信息 → RL 无法适应不同风力
+    # 方案: 在 obs 中追加 [wind_force_normalized, wind_dir_cos, wind_dir_sin]
+    # 这 3 维让 RL 能区分有风/无风, 并知道风从哪个方向来
+    "wind_obs": {
+        "enabled":               True,
+        "wind_force_max":        2.0,   # 归一化分母
+    },
     "cruise_z_pid": {
         "kp_z":               3.0,
         "ki_z":               0.3,
@@ -318,7 +343,9 @@ DEFAULT_CONFIG = {
     # - RL 残差: 在 NMPC 基础上做小幅微调 (主要抗风/抗噪)
     # - 用户要求: RL 残差权重小, 只是提高稳定性
     "lift_rl": {
-        "obs_dim":            263,  # [v12.3] +240 for cable seg states (4x10x6: rel_pos + lin_vel)
+        # [v14.0] obs_dim 重算: 原始 23 维 + cable_encoder_out(32) + wind_obs(3) = 58
+        # 原 263 = 23 + 240(raw cable); 现用 CableEncoder 压缩到 32 维, 加 3 维风力obs
+        "obs_dim":            58,
         "action_dim":         3,
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
@@ -335,8 +362,9 @@ DEFAULT_CONFIG = {
         "total_acc_max_z":           1.50,
 
         # log_std phase-specific (新 lift residual 用 zero-init + 小 std)
-        "lift_log_std_init":         -2.0,   # std exp(-2.0) ≈ 0.135
-        "lift_log_std_floor_init":   -3.0,
+        # [v14.0] log_std_init 从 -2.0 提到 -1.0 (std 0.37), 给 cruise 残差更多探索
+        "lift_log_std_init":         -1.0,   # v12 -2.0 → v14 -1.0 (std 0.37)
+        "lift_log_std_floor_init":   -1.5,   # v12 -3.0 → v14 -1.5 (std 0.22)
         "lift_log_std_floor_final":  -3.0,
 
         "reward": {
@@ -392,7 +420,8 @@ DEFAULT_CONFIG = {
     # 来源: Jeon et al. 2025 (Residual MPC), Ankile et al. 2024 (ResiP).
     # ==========================================================================
     "cruise_rl": {
-        "obs_dim":            278,  # [v12.3] +240 for cable seg states
+        # [v14.0] obs_dim: 原始 38 + cable_encoder(32) + wind_obs(3) = 73
+        "obs_dim":            73,
         "action_dim":         3,    # [v13.0] 2 → 3 (xy + z), 因为合并了 lift 的 z 残差
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
@@ -442,7 +471,8 @@ DEFAULT_CONFIG = {
 
             # 3. [v11.2 新增, v11.4 缩小] action_magnitude_penalty
             #    Olesen et al. 2026: residual policy 应默认 0, 仅必要时介入
-            "action_magnitude_coef":      0.02,    # v11.2 0.05 → v11.4 0.02
+            # [v14.0] 从 0.02 提到 0.10 — 强制 RL 保持 residual, 不 override NMPC
+            "action_magnitude_coef":      0.10,    # v11.4 0.02 → v14.0 0.10
 
             # 4. [v11.2 新增, v11.4 缩小] action_smoothness_penalty (CAPS)
             "action_smoothness_coef":     0.04,    # v11.2 0.10 → v11.4 0.04
@@ -494,28 +524,81 @@ DEFAULT_CONFIG = {
     # 20. Phase 3: Descent RL (PID base + RL residual delta_q)
     # ==========================================================================
     "descent_rl": {
-        "obs_dim":            269,  # [v12.3] +240 for cable seg states
+        # [v15.4] obs_dim: 原始 29 + normalized insertion-state(5)
+        # + base_dq_norm(7) + cable_encoder(32) + wind_obs(3) = 76
+        "obs_dim":            76,
         "action_dim":         3,
         "init_xy_range":      0.030,
         "init_z_range":       0.005,
         "init_tilt_range":    0.010,
         "init_vel_range":     0.030,
-        "max_steps":          500,
+        # [v14.2] max_steps 500→150
+        # 理由: PID 控制下 payload 从 z=0.25 降到 z=0.10 约需 15-30 步 (1.5-3s)
+        # 到达目标 z 后如果 xy 没对准, 剩下 400+ 步全在积累无效负 reward
+        # 缩短到 150 步 (15s), 覆盖下降+精调+hold 已足够
+        "max_steps":          300,
+
+        # [v15.1] Z 软门控 + 保守慢降:
+        # 旧逻辑在 xy >= hard_gate 时完全锁死 z, RL 为了防摆只要把 xy 留在门外,
+        # 就会出现 reward 上升但 payload 长时间悬停在高处、最终 timeout。
+        # 新逻辑仍然优先对准, 但 hard_gate 外到 trickle_xy_gate 内允许小比例慢降,
+        # 让策略持续看到“下降才有更高插入对准价值”的信号。
+        "z_hard_gate":        0.035,
+        "z_soft_gate_full":   0.015,
+        "z_trickle_enabled":  True,    # xy 未完全进门时也允许保守慢降, 避免高处悬停刷 reward
+        "z_trickle_xy_gate":  0.120,   # 覆盖 cruise→descent 交接附近的 10cm 区域
+        "z_min_speed_frac":   0.25,    # hard gate 外的最小下降速度比例
+        "z_vel_slowdown":     0.70,    # 横向速度大时降速, 不再直接几乎锁死 z
+        "z_yaw_slowdown":     0.70,    # yaw 未完全对准时降速
+        "z_near_slowdown_margin": 0.030,
+        "base_v_max_z":       0.025,   # 2.5cm/s, 300 step 内有足够下降余量
+
+        # [v14.2 新增] 早停: payload 到达目标 z 附近但 xy 偏差太大时提前终止
+        # 避免在"已经失败"的状态下继续浪费步数
+        "early_stop_enabled":      True,
+        "early_stop_z_near":       0.030,   # 距 target_z 30mm 内视为"已到达"
+        "early_stop_xy_fail":      0.025,   # xy 偏差 > 25mm 时判定失败
+        "early_stop_patience":     20,      # 到达 z 后允许 20 步精调窗口
+        "early_stop_penalty":      -12.0,   # failure penalty; applied in reward
 
         # 架构: PID + residual RL
         "pid_residual_mode":   True,
-        "residual_dq_scale":   0.30,
-        "residual_acc_max_xy": 0.30,
-        "residual_acc_max_z":  0.50,
+        # [v14.2b] 加大残差权威
+        # 诊断: 成功案例都在 rl_action_mag_peak ≥ 0.25 时出现
+        # 说明 RL 需要足够大的残差才能完成最后 5mm 精度修正
+        # 旧: residual_dq_scale=0.30 → max_residual_norm=0.036 → ~21mm EE 权威
+        # 新: residual_dq_scale=0.50 → max_residual_norm=0.060 → ~36mm EE 权威
+        # acc_max_xy/z 也相应提升, 给 actor 更大的输出范围
+        "residual_dq_scale":   0.80,     # v15: give residual enough authority for final 5mm correction
+        "residual_acc_max_xy": 0.60,
+        "residual_acc_max_z":  0.90,
 
-        # [v10] descent 因 action_scale=[0.5,0.5,1.0] 较大, 需更紧 floor
-        "descent_log_std_init":        -1.5,    # std exp(-1.5) ≈ 0.22
-        "descent_log_std_floor_init":  -1.5,
+        # [v14.2] descent log_std 调整
+        # v14.2a: actor_std 从 0.22→0.35 仍在爬升, 虽然被 log_std_max 限制住
+        # 根因: entropy_coef 0.033 >> action_magnitude_penalty 0.003 (12x 差距)
+        # 修复: 1) descent 专属 entropy 更快退火  2) 进一步收紧 log_std_max  3) 加强 action penalty
+        "descent_log_std_init":        -1.5,    # std ≈ 0.22
+        "descent_log_std_floor_init":  -2.0,    # std 0.14
         "descent_log_std_floor_final": -3.0,
+        "descent_log_std_max":         -1.2,    # [v14.2a] -0.7→-1.2, std 上限 ≈ 0.30
+                                                # 从一开始就不允许 std > 0.30
+
+        # Descent-specific entropy schedule. Keep a small exploration floor and
+        # anneal slower after removing best-checkpoint rollback.
+        "descent_entropy_coef_start":       0.02,
+        "descent_entropy_coef_end":         0.004,
+        "descent_entropy_coef_anneal_steps": 900_000,
+
+        # Best checkpoints are saved for evaluation/manual resume only. PPO
+        # training should not jump back to them mid-run because that breaks the
+        # on-policy trajectory and optimizer state continuity.
 
         # [v11 Path 2] PPO-HER (Crowder et al. 2024, arXiv:2410.22524)
         # [v11.3] max_eps 5 → 16, 让 HER 真正补偿 sparse reward
-        "ppo_her_enabled":             True,
+        # Disabled after adding normalized insertion-state to observations:
+        # the old relabeler only edits target_xy/pl_target_err and would leave
+        # the normalized success-tube features inconsistent in single-env PPO.
+        "ppo_her_enabled":             False,
         "ppo_her_xy_tol_relabel":      0.020,  # 0.015 → 0.020 (更宽松, 更易 relabel)
         "ppo_her_min_displacement":    0.003,  # 0.005 → 0.003
         "ppo_her_max_episodes":         16,    # 5 → 16 (≥ 1 个 rollout 大量 relabel)
@@ -526,62 +609,54 @@ DEFAULT_CONFIG = {
         # 但太大又会破坏 PID. 取中庸: 0.20/0.40 (v8 的 40%, v11.4 的 200%)
         # 来源: Ankile et al. 2024 (ResiP) — residual scale 应 5-30% of base
         # PID base xy 量级 ~0.5, 取 40% = 0.20 ✓
-        "acc_max_xy":         0.20,           # v11.4 0.10 → v12.3 0.20
-        "acc_max_z":          0.40,           # v11.4 0.20 → v12.3 0.40
+        # [v14.2b] actor output scale 提升, 与 residual_dq_scale 匹配
+        # PID base xy 量级 ~0.5, 取 60% = 0.30
+        "acc_max_xy":         0.60,
+        "acc_max_z":          0.90,
         "vel_max_z":          0.05,
 
         "reward": {
-            # ─────────────────────────────────────────────────────────────────
-            # [v12.3] 用户核心需求 (descent): 防摆 + 抗扰 + 稳定 SR
-            # 重点强化: swing_ke (防摆) + xy_align (与钢筋对准) + 抗扰 robust
-            # 
-            # [v12.3 用户决定] 不加 step_penalty (保持 v11.3 设计):
-            #   - 用户明确表态 "不加 penalty"
-            #   - 改为通过单一精度课程 + cable obs/reward 让 RL 直接学
-            # ─────────────────────────────────────────────────────────────────
+            # v15 simplified descent reward:
+            # 1) payload swing energy (KE + PE), 2) cable vibration energy,
+            # 3) insertion alignment shaping, 4) sparse task success.
+            "swing_energy_thresh":       0.008,
+            "swing_energy_coef":         6.0,
+            "swing_energy_penalty_max":  0.40,
 
-            # 1. XY 对准差分 (PID 已经在 align, 给小奖励)
-            "xy_align_coef":      1.0,
-            # 2. Z 下降差分 (gate by xy aligned)
-            "z_descent_coef":     1.5,
-            "z_descent_xy_gate":  0.030,
-            "z_rise_penalty_coef": 0.5,
-            "z_rise_max_penalty":  0.05,
+            "cable_ke_thresh":           0.05,
+            "cable_ke_penalty_coef":     0.25,
+            "cable_ke_penalty_max":      0.04,
 
-            # 3. 防摆 (用户核心需求, v12 加强)
-            "swing_ke_coef":      1.5,    # v11.4 0.8 → v12 1.5 (用户要求强化防摆)
-            "swing_ke_max":       0.25,   # 有界, 避免单步惩罚过大
-            # [v12.3 新增] 绳索动能惩罚
-            "cable_ke_thresh":            0.05,
-            "cable_ke_penalty_coef":      0.8,
-            "cable_ke_penalty_max":       0.06,
+            "alignment_xy_sigma_tol":    0.75,
+            "alignment_z_sigma_tol":     0.75,
+            "alignment_tilt_sigma_tol":  0.90,
+            "alignment_yaw_sigma_tol":   0.90,
+            "alignment_success_coef":    0.30,
+            "alignment_progress_coef":   0.42,
+            "alignment_progress_clip":   0.25,
+            "alignment_z_gate":          0.060,
+            "alignment_z_progress_coef": 5.0,
+            "alignment_height_penalty_coef": 0.04,
 
-            # 4. 稳定性 (tilt + yaw)
-            "tilt_coef":          0.4,
-            "yaw_coef":           0.5,
+            # Soft residual intervention regularizer. This keeps small corrective
+            # residuals free, but discourages the current high sustained action
+            # regime seen in rl_action_mag_mean/peak.
+            "action_rms_free":           0.30,
+            "action_magnitude_coef":     0.28,
+            "action_smoothness_coef":    0.035,
+            "action_penalty_max":        0.08,
 
-            # 5. [v12 新增] 钢筋对准 bonus (rebar align)
-            # 用户要求: 与地面钢筋对准给奖励, 这是 descent 段精度的关键
-            # 当 xy_dist < 5mm 时给持续 bonus (每步, 鼓励 hold 在对准状态)
-            "rebar_align_radius":  0.010,   # 1cm 内开始给
-            "rebar_align_bonus":   0.02,    # 每步小奖励, 一 ep cap ~10 步累积 0.2
-            "rebar_close_radius":  0.005,   # 5mm 内给双倍 bonus
+            # Make long non-successful hovering less attractive without
+            # punishing the early descent/transient alignment phase.
+            "late_step_penalty_start_frac": 0.70,
+            "late_step_penalty_coef":       0.02,
+            "late_step_penalty_max":        0.05,
+            "timeout_penalty":             -8.0,
+            "failure_miss_penalty_coef":   10.0,
+            "failure_miss_penalty_max":    25.0,
+            "failure_miss_error_clip":      3.0,
 
-            # 6. 高精度 bonus (近目标高斯, 比 rebar_align 更窄)
-            "precision_bonus_coef":  2.5,
-            "precision_bonus_sigma": 0.005,
-
-            # 7. [v11.3] step_penalty=0, 防 dead critic
-            "step_penalty":       0.0,
-
-            # 8. [v11.3 起] action penalties (residual RL 标准做法)
-            "action_magnitude_coef":   0.01,
-            "action_smoothness_coef":  0.02,
-
-            # 9. 终止信号
-            "success_bonus":      12.0,
-            "instability_penalty": -0.8,
-            "crash_penalty":      -1.2,
+            "success_bonus":             50.0,
         },
     },
 
@@ -589,9 +664,9 @@ DEFAULT_CONFIG = {
     # 21. PPO 超参数
     # ==========================================================================
     "ppo": {
-        # [v12.3] obs_dim 263-278 (含 240 维绳索状态), hidden_dim 升 256→384
-        # 经验法则: hidden_dim ≥ obs_dim 才能充分编码
-        "hidden_dim":            384,
+        # [v14.0] obs_dim 从 ~270 降到 ~60-73 (cable encoder + wind obs)
+        # hidden_dim 不再需要 384, 降到 256 减少过拟合风险
+        "hidden_dim":            256,
         "n_layers":              3,
         "lr_actor":              1e-4,
         "lr_critic":             3e-4,
@@ -615,13 +690,14 @@ DEFAULT_CONFIG = {
         "log_std_min":          -3.0,
         "log_std_max":           0.0,
         "target_kl":             0.02,
-        # [v10] floor 放宽: 不再硬性限制 cruise 残差 std 必须 ≥ 0.61
-        "log_std_floor_init":   -1.0,    # v9 -0.5 → v10 -1.0 (std 0.61 → 0.37)
-        "log_std_floor_final":  -2.5,    # v9 -2.0 → v10 -2.5
-        "log_std_floor_steps":   500_000,  # v9 1M → v10 0.5M (更快放宽)
+        # [v14.0] log_std_floor 放宽: 初始 floor 更高, 允许更多探索
+        "log_std_floor_init":   -0.5,    # v10 -1.0 → v14.0 -0.5 (std 0.61)
+        "log_std_floor_final":  -2.5,    # 不变
+        "log_std_floor_steps":   800_000,  # v10 0.5M → v14.0 0.8M (更慢收紧)
+        # [v14.0] entropy annealing 大幅延长, 与课程同步
         "entropy_coef_start":         0.05,
         "entropy_coef_end":           0.005,
-        "entropy_coef_anneal_steps":  600_000,
+        "entropy_coef_anneal_steps":  1_500_000,  # v12 600k → v14 1.5M (覆盖全部课程)
         "plasticity_reset_interval":  200_000,
     },
 
@@ -629,8 +705,8 @@ DEFAULT_CONFIG = {
     # 22. SAC 超参数
     # ==========================================================================
     "sac": {
-        # [v12.3] hidden_dim 升 256→384 for obs_dim ~270 with cable states
-        "hidden_dim":           384,
+        # [v14.0] hidden_dim 降到 256 (obs_dim 从 ~270 降到 ~60-73)
+        "hidden_dim":           256,
         "n_layers":             3,
         # [v11 vec fix] lr 降一半, 对抗 vec 模式 batch 内相关性导致的 critic 高方差
         "lr_actor":             1.5e-4,    # v10 3e-4 → 1.5e-4
@@ -689,7 +765,7 @@ DEFAULT_CONFIG = {
         # n_envs>1 → SubprocVecEnv (需要重构 train loop, 见 README)
         # 建议: n_envs ≤ 物理 CPU 核心数 - 1
         "n_envs":                1,
-        "vec_env_start_method":  "forkserver",  # 'spawn'/'fork'/'forkserver'
+        "vec_env_start_method":  "spawn",  # Windows-safe default; Linux may override to forkserver
         "algo":                  "ppo",
         "seed":                  42,
     },
@@ -730,54 +806,75 @@ DEFAULT_CONFIG = {
         # 3. 晋级条件: 严格 (SR ≥ 阈值 + min_eps 充分训练)
         # 4. 不倒退: 学坏 → 延长当前级 (hard_cap_eps 增大)
 
-        # ── Lift 课程 (6 级渐进, 风力 0 → 2.0N) ──────────────────────────────
-        # 用户上限 ≤ 2N, 每级增量 0.4N
+        # ── Lift 课程 (8 级渐进, 风力 0.05 → 2.0N) ──────────────────────────────
+        # [v14.0] 与 cruise 统一 (lift 已合并到 cruise)
         "lift_levels": [
-            {"wind_max": 0.00},
-            {"wind_max": 0.40},
+            {"wind_max": 0.05},
+            {"wind_max": 0.15},
+            {"wind_max": 0.30},
+            {"wind_max": 0.50},
             {"wind_max": 0.80},
-            {"wind_max": 1.20},
-            {"wind_max": 1.60},
+            {"wind_max": 1.10},
+            {"wind_max": 1.50},
             {"wind_max": 2.00},
         ],
         "lift_sr_threshold":  0.75,
-        "lift_min_eps":       200,    # v12.3: 150 → v12.5: 200 (每级训练更久)
-        "lift_hard_cap_eps":  1500,   # v12.3: 1000 → v12.5: 1500
-        "lift_stats_window":  60,     # v12.3: 50 → v12.5: 60
+        "lift_min_eps":       350,    # v12.5 200 → v14.0 350
+        "lift_hard_cap_eps":  2500,   # v12.5 1500 → v14.0 2500
+        "lift_stats_window":  100,    # v12.5 60 → v14.0 100
 
-        # ── Cruise 课程 (6 级渐进, 风力 0 → 2.0N) ────────────────────────────
+        # ── Cruise 课程 (8 级渐进, 风力 0.05 → 2.0N) ────────────────────────────
+        # [v14.0] 关键改动: 不从 0 风开始, 从微弱风 (0.05N) 开始训练
+        # 理由: RL 从一开始就学习"有扰动"环境, 避免 0→有风的分布突变
+        # 增量更细: 每级 ≤ 0.3N, 8 级渐进, 比 v12.5 的 6 级更平滑
         "cruise_levels": [
-            {"wind_max": 0.00},
-            {"wind_max": 0.40},
+            {"wind_max": 0.05},
+            {"wind_max": 0.15},
+            {"wind_max": 0.30},
+            {"wind_max": 0.50},
             {"wind_max": 0.80},
-            {"wind_max": 1.20},
-            {"wind_max": 1.60},
+            {"wind_max": 1.10},
+            {"wind_max": 1.50},
             {"wind_max": 2.00},
         ],
         "cruise_sr_threshold":  0.60,
-        "cruise_min_eps":       250,   # v12.3: 200 → v12.5: 250
-        "cruise_hard_cap_eps":  2000,  # v12.3: 1500 → v12.5: 2000
-        "cruise_stats_window":  80,
+        "cruise_min_eps":       350,   # v12.5 250 → v14.0 350 (每级训练更久)
+        "cruise_hard_cap_eps":  2500,  # v12.5 2000 → v14.0 2500
+        "cruise_stats_window":  100,   # v12.5 80 → v14.0 100
 
-        # ── Descent 课程 (5 级渐进, 风力 0 → 1.0N) ───────────────────────────
-        # descent 精度要求高 (5mm), 风力上限低于 lift/cruise
-        # 每级增量 0.25N, 渐进幅度最小, 避免精度破坏
+        # [v14.2] 连续课程 ramp 参数
+        "cruise_ramp_episodes":     600,   # 从 min→max wind 需要 ~600 成功 episode
+        "cruise_ramp_sr_threshold": 0.48,  # SR 低于此值时暂停 wind 增长
+
+        # Descent starts with tiny nonzero wind so the policy learns
+        # disturbance rejection before it overfits the no-wind insertion.
         "descent_levels": [
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.00},
+             "wind_max": 0.005},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.25},
+             "wind_max": 0.015},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.50},
+             "wind_max": 0.03},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.75},
+             "wind_max": 0.06},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 1.00},
+             "wind_max": 0.10},
+            {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+             "wind_max": 0.20},
+            {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+             "wind_max": 0.35},
         ],
         "descent_sr_threshold":  0.80,
-        "descent_min_eps":       250,   # v12.3: 200 → v12.5: 250
-        "descent_hard_cap_eps":  2000,  # v12.3: 1500 → v12.5: 2000
-        "descent_stats_window":   80,   # v12.3: 60 → v12.5: 80
+        "descent_min_eps":       400,   # v12.5 250 → v14.0 400
+        "descent_hard_cap_eps":  2500,  # v12.5 2000 → v14.0 2500
+        "descent_stats_window":   100,  # v12.5 80 → v14.0 100
+
+        # [v14.2] 连续课程 ramp 参数
+        "descent_ramp_episodes":     1000,  # tiny wind starts early, so ramp more gently
+        "descent_ramp_min_wind":     0.005,
+        "descent_ramp_sr_threshold": 0.60,
+        "descent_ramp_warmup_sr_threshold": 0.45,
+        "descent_ramp_warmup_scale": 0.25,
 
         # OmniReset (descent 仍用; 早期阶段从目标附近开始, 加速学习)
         "omnireset_enabled":          True,

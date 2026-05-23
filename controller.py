@@ -519,15 +519,24 @@ class JointSpaceExpert:
         self._integral_xy  = np.zeros(2, np.float64)
         self._integral_max = 0.006   # 固定 6mm 上限 (简单可控)
 
-        self._v_max_xy_descent = 0.20  # 原始值
-        self._v_max_z_descent  = -0.015  # 原始值 (-0.02 略降)
-        self._v_max_yaw_descent= 0.2
-
-        # Z 软门控 — 原始值
-        self._z_hard_gate      = 0.015   # 15mm: 完全停 z
-        self._z_soft_gate_full = 0.005   # 5mm: 全速下降
-        self._z_gate_vel       = 0.015   # payload 速度门控
-        self._z_gate_yaw       = 0.05
+        # Z 软门控 — 从 config 读取, 保持原始默认值 (v14.2)
+        # 训练时可通过 config["descent_rl"] 放宽门控, 让 RL 探索期间 z 也能下降
+        # 测试时保持原始严格值 (15mm/5mm) 确保精度
+        _descent_cfg = config.get("descent_rl", {})
+        self._v_max_xy_descent = float(_descent_cfg.get("base_v_max_xy", 0.20))
+        self._v_max_z_descent  = -abs(float(_descent_cfg.get("base_v_max_z", 0.020)))
+        self._v_max_yaw_descent= float(_descent_cfg.get("base_v_max_yaw", 0.2))
+        self._z_hard_gate      = float(_descent_cfg.get("z_hard_gate",      0.015))
+        self._z_soft_gate_full = float(_descent_cfg.get("z_soft_gate_full", 0.005))
+        self._z_gate_vel       = float(_descent_cfg.get("z_gate_vel",       0.015))
+        self._z_gate_yaw       = float(_descent_cfg.get("z_gate_yaw",       0.05))
+        self._z_trickle_enabled = bool(_descent_cfg.get("z_trickle_enabled", True))
+        self._z_trickle_xy_gate = float(_descent_cfg.get("z_trickle_xy_gate", 0.080))
+        self._z_min_speed_frac  = float(_descent_cfg.get("z_min_speed_frac", 0.25))
+        self._z_vel_slowdown    = float(_descent_cfg.get("z_vel_slowdown", 0.70))
+        self._z_yaw_slowdown    = float(_descent_cfg.get("z_yaw_slowdown", 0.70))
+        self._z_near_slowdown_margin = float(_descent_cfg.get(
+            "z_near_slowdown_margin", 0.040))
 
         # z 到位判定
         _rope_L    = config.get("controller", {}).get("L", 0.5)
@@ -718,21 +727,30 @@ class JointSpaceExpert:
             self._ee_yaw += self._ee_yaw_vel * dt
 
             # ── Z 软门控下降 ──────────────────────────────────────────────
-            if self._z_reached or in_settling:
+            z_above_target = max(0.0, pl_z - self._target_payload_z)
+            if self._z_reached or in_settling or z_above_target <= 0.0:
                 target_v_z = 0.0
             else:
                 pl_speed = float(np.linalg.norm(pl_vel_xy))
                 if xy_err_norm >= self._z_hard_gate:
                     z_speed_frac = 0.0
+                    if (self._z_trickle_enabled and
+                            xy_err_norm < self._z_trickle_xy_gate):
+                        span = max(self._z_trickle_xy_gate - self._z_hard_gate, 1e-6)
+                        taper = 1.0 - (xy_err_norm - self._z_hard_gate) / span
+                        z_speed_frac = self._z_min_speed_frac * np.clip(taper, 0.0, 1.0)
                 elif xy_err_norm <= self._z_soft_gate_full:
                     z_speed_frac = 1.0
                 else:
                     z_speed_frac = 1.0 - ((xy_err_norm - self._z_soft_gate_full) /
                                           (self._z_hard_gate - self._z_soft_gate_full))
                 if pl_speed >= self._z_gate_vel:
-                    z_speed_frac *= 0.4
+                    z_speed_frac *= self._z_vel_slowdown
                 if abs(yaw_err) >= self._z_gate_yaw:
-                    z_speed_frac *= 0.5
+                    z_speed_frac *= self._z_yaw_slowdown
+                if z_above_target < self._z_near_slowdown_margin:
+                    z_speed_frac *= max(0.25, z_above_target / max(
+                        self._z_near_slowdown_margin, 1e-6))
                 target_v_z = self._v_max_z_descent * z_speed_frac
 
             self._ee_vel[2] = 0.7 * self._ee_vel[2] + 0.3 * target_v_z

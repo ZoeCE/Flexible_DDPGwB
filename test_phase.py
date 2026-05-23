@@ -40,6 +40,7 @@ from controller import JointSpaceExpert
 from phase_agent import (
     PPOPhaseAgent, SACPhaseAgent,
     build_lift_obs, build_cruise_obs, build_descent_obs,
+    build_wind_obs, CableEncoder,
 )
 from phase_reward import (
     compute_lift_reward, compute_cruise_reward, compute_descent_reward,
@@ -64,6 +65,9 @@ def build_config(args):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["sim"]["render"] = args.render
     config["train"]["gpu_id"] = args.gpu
+    # Keep the trained descent z-gating in evaluation. Strict controller defaults
+    # can lock z at high payload height when the learned residual keeps XY just
+    # outside the old 15mm hard gate.
     if args.obstacles is not None:
         config["scene"]["n_obstacles"] = max(int(args.obstacles),
                                               config["scene"]["n_obstacles"])
@@ -390,8 +394,20 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
-                p_obs, prev_tilt, prev_yaw = build_phase_obs(
-                    phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw)
+                # [v14.0] 构建 obs: (core, cable_raw, wind, tilt, yaw)
+                _wobs = build_wind_obs(env,
+                    float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
+                base_dq_for_obs = None
+                if phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
+                    try:
+                        base_dq_for_obs = expert.compute_delta_q_target(
+                            obs, current_q.astype(np.float64))
+                    except Exception:
+                        base_dq_for_obs = np.zeros(7, dtype=np.float32)
+                core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
+                    phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
+                    wind_obs=_wobs, base_action=base_dq_for_obs)
+                p_obs = agent.encode_obs(core, cable_raw, _wobs)
                 norm_obs = agent.normalize_obs(p_obs, update=False)
                 norm_obs = _add_obs_noise(norm_obs, obs_noise)
 
@@ -443,7 +459,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 elif phase == "descent":
                     if bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
                         delta_q, _ = _apply_descent_pid_residual(
-                            expert, action, obs, env, config, current_q)
+                            expert, action, obs, env, config, current_q,
+                            pid_dq=base_dq_for_obs)
                     else:
                         _vmax_z_d = float(config.get("ee_control", {}).get(
                             "vel_max_z_descent", 0.03))
@@ -459,7 +476,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                                      rl_action=(action if agent is not None else None))
 
             reward, r_done, r_success, r_info = REWARD_FNS[phase](
-                env, next_obs, config, rstate)
+                env, next_obs, config, rstate,
+                rl_action=(action if agent is not None else None))
 
             ep_reward += reward; ep_steps += 1
 
@@ -524,7 +542,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
         sys_stdout_saved = sys.stdout
         sys.stdout = open(os.devnull, 'w')
         try:
-            obs, planned_path = reset_for_phase(env, "lift", config)
+            obs, planned_path = reset_for_phase(env, "cruise", config)
         finally:
             sys.stdout.close(); sys.stdout = sys_stdout_saved
         if obs is None: continue
@@ -543,6 +561,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
         _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
         _pl_yaw = float(R.from_matrix(_pl_mat).as_euler('xyz')[2])
         z_pid.reset(_pl_z, _pl_yaw)
+        for _agent in agents.values():
+            if _agent is not None and hasattr(_agent, 'reset_history'):
+                _agent.reset_history()
 
         start_xy  = env.default_start_xy.copy()
         target_xy = env.target_pos.copy()
@@ -592,8 +613,20 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
-                p_obs, prev_tilt, prev_yaw = build_phase_obs(
-                    current_phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw)
+                # [v14.0] 构建 obs
+                _wobs = build_wind_obs(env,
+                    float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
+                base_dq_for_obs = None
+                if current_phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
+                    try:
+                        base_dq_for_obs = expert.compute_delta_q_target(
+                            obs, current_q.astype(np.float64))
+                    except Exception:
+                        base_dq_for_obs = np.zeros(7, dtype=np.float32)
+                core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
+                    current_phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
+                    wind_obs=_wobs, base_action=base_dq_for_obs)
+                p_obs = agent.encode_obs(core, cable_raw, _wobs)
                 norm_obs = agent.normalize_obs(p_obs, update=False)
                 norm_obs = _add_obs_noise(norm_obs, obs_noise)
 
@@ -642,7 +675,8 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 elif current_phase == "descent":
                     if bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
                         delta_q, _ = _apply_descent_pid_residual(
-                            expert, action, obs, env, config, current_q)
+                            expert, action, obs, env, config, current_q,
+                            pid_dq=base_dq_for_obs)
                     else:
                         _vmax_z_d = float(config.get("ee_control", {}).get(
                             "vel_max_z_descent", 0.03))
@@ -660,7 +694,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                                                    rl_action=_rl_a)
 
             reward, r_done, r_success, r_info = REWARD_FNS[current_phase](
-                env, next_obs, config, rstate)
+                env, next_obs, config, rstate, rl_action=_rl_a)
 
             ep_reward += reward
             phase_rewards[current_phase] += reward
@@ -677,8 +711,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                     term_reason = r_info.get("termination", "insertion_success")
                     obs = next_obs; break
 
-            if current_phase == "descent" and phase_steps["descent"] >= 200:
-                term_reason = "descent_timeout_200"; break
+            descent_max_steps = int(config.get("descent_rl", {}).get("max_steps", 300))
+            if current_phase == "descent" and phase_steps["descent"] >= descent_max_steps:
+                term_reason = f"descent_timeout_{descent_max_steps}"; break
 
             if r_info.get("termination"):
                 term_reason = r_info["termination"]
@@ -698,14 +733,14 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             "phase_success":   phase_success.copy(),
             "stability":       stab_all.summary(),
             "phase_stability": {p: phase_stab[p].summary()
-                                for p in ["lift", "cruise", "descent"]},
+                                for p in ["cruise", "descent"]},
             "wind_force":      wind_force,
         })
         mark = "✅" if final_success else "❌"
         term_short = (term_reason or "timeout").split(":")[0]
         phases_str = " → ".join([
             f"{'✅' if phase_success[p] else '❌'}{p[0].upper()}"
-            for p in ["lift", "cruise", "descent"]])
+            for p in ["cruise", "descent"]])
         print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
               f"Steps:{ep_steps:3d} | {phases_str} | {term_short} | "
               f"{stab_all.print_line()}")
@@ -735,7 +770,7 @@ def print_summary(results, mode_name):
     print(f"  平均步数:  {avg_s:.1f}")
     print(f"  终止原因:  {dict(terms)}")
     if results and "phase_success" in results[0]:
-        for p in ["lift", "cruise", "descent"]:
+        for p in ["cruise", "descent"]:
             p_sr = np.mean([r["phase_success"].get(p, False) for r in results])
             p_r  = np.mean([r["phase_rewards"].get(p, 0)    for r in results])
             p_s  = np.mean([r["phase_steps"].get(p, 0)      for r in results])
@@ -760,7 +795,7 @@ def print_summary(results, mode_name):
 
     _stab_block([r.get("stability") for r in results], "全过程稳定性")
     if results and "phase_stability" in results[0]:
-        for p in ["lift", "cruise", "descent"]:
+        for p in ["cruise", "descent"]:
             p_stabs = [r["phase_stability"].get(p) for r in results
                        if r.get("phase_stability")]
             _stab_block(p_stabs, f"{p} 阶段稳定性")
@@ -865,7 +900,7 @@ def main():
             wind_force=args.wind_force, wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
             force_noise=args.force_noise)
-        print_summary(results, f"Pipeline-{args.lift_algo}_{args.cruise_algo}_{args.descent_algo}")
+        print_summary(results, f"Pipeline-{args.cruise_algo}_{args.descent_algo}")
     else:
         if args.algo == "expert":
             agent = None

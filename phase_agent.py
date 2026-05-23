@@ -86,6 +86,81 @@ class ObsHistoryBuffer:
 
 
 # ==============================================================================
+# [v14.0] Cable Encoder — 压缩 240 维绳索 obs 到低维隐特征
+# ==============================================================================
+
+class CableEncoder(nn.Module):
+    """
+    将 240 维原始绳索段状态压缩为低维特征向量.
+
+    架构: LayerNorm → Linear(240, hidden) → ReLU → Linear(hidden, output)
+    训练: 与 actor/critic 一起端到端训练 (梯度从 PPO loss 回传)
+
+    目的:
+      1. 防止 240 维 raw cable obs 淹没其他 20-40 维的关键信号
+      2. 让网络学到绳索状态的紧凑表示 (类似 autoencoder 的 encoder 部分)
+      3. 降低 actor/critic 输入维度, 减少过拟合
+    """
+    def __init__(self, raw_dim=240, hidden_dim=128, output_dim=32,
+                 n_layers=2, normalize_input=True):
+        super().__init__()
+        self.raw_dim = raw_dim
+        self.output_dim = output_dim
+        self.normalize_input = normalize_input
+
+        if normalize_input:
+            self.input_norm = nn.LayerNorm(raw_dim)
+        else:
+            self.input_norm = nn.Identity()
+
+        layers = []
+        d_in = raw_dim
+        for i in range(n_layers):
+            d_out = hidden_dim if i < n_layers - 1 else output_dim
+            lin = nn.Linear(d_in, d_out)
+            orthogonal_init(lin, gain=np.sqrt(2) if i < n_layers - 1 else 1.0)
+            layers.append(lin)
+            if i < n_layers - 1:
+                layers.append(nn.ReLU())
+            d_in = d_out
+        self.encoder = nn.Sequential(*layers)
+
+    def forward(self, cable_raw):
+        """
+        Args:
+            cable_raw: (batch, 240) or (batch, seq_len, 240)
+        Returns:
+            cable_feat: (batch, output_dim) or (batch, seq_len, output_dim)
+        """
+        normed = self.input_norm(cable_raw)
+        return self.encoder(normed)
+
+
+def build_wind_obs(env, wind_force_max=2.0):
+    """
+    [v14.0] 构建 3 维风力观测: [force_norm, cos(dir), sin(dir)]
+
+    从 env 的内部状态读取当前风力和方向.
+    如果是测试恒定风 (_test_wind_mode), 读取测试风力.
+    否则读取随机游走风力状态.
+    """
+    try:
+        if hasattr(env, 'get_wind_state'):
+            wf, wd = env.get_wind_state()
+        elif getattr(env, '_test_wind_mode', False):
+            wf = float(getattr(env, '_test_wind_force', 0.0))
+            wd = float(getattr(env, '_test_wind_dir', 0.0))
+        else:
+            wf = float(getattr(env, 'wind_F', 0.0))
+            wd = float(getattr(env, 'wind_theta', 0.0))
+    except Exception:
+        wf, wd = 0.0, 0.0
+
+    force_norm = min(wf / max(wind_force_max, 1e-6), 1.0)
+    return np.array([force_norm, np.cos(wd), np.sin(wd)], dtype=np.float32)
+
+
+# ==============================================================================
 # 观测索引
 # ==============================================================================
 OBS_EE_X, OBS_EE_Y = 0, 1
@@ -107,7 +182,12 @@ OBS_CABLE_TOTAL     = 4 * 10 * 6   # = 240
 # 观测构建 (与原版完全一致)
 # ==============================================================================
 
-def build_lift_obs(env_obs, env, start_xy, prev_tilt=0.0, prev_yaw=0.0):
+def build_lift_obs(env_obs, env, start_xy, prev_tilt=0.0, prev_yaw=0.0,
+                   wind_obs=None):
+    """[v14.0] 返回 (core_obs, cable_raw, wind_obs, tilt, yaw).
+    core_obs: 非绳索部分; cable_raw: 240 维绳索原始数据; wind_obs: 3 维风力.
+    调用方负责把 cable_raw 通过 CableEncoder 编码后与 core_obs + wind_obs concat.
+    """
     obs = env_obs; dt = getattr(env, 'dt', 0.1)
     z_cruise = float(env.config["planning"]["payload_z_cruise"])
     ee_pos = np.array([obs[OBS_EE_X], obs[OBS_EE_Y], obs[OBS_EE_Z]])
@@ -118,17 +198,23 @@ def build_lift_obs(env_obs, env, start_xy, prev_tilt=0.0, prev_yaw=0.0):
     tilt = float(obs[OBS_TILT]); yaw = float(obs[OBS_YAW])
     tilt_rate = (tilt - prev_tilt) / dt; yaw_rate = (yaw - prev_yaw) / dt
     z_error = float(pl_pos[2] - z_cruise)
-    # [v12.3] 绳索每段状态 (240 维): 4 根 × 10 段 × (rel_pos + lin_vel)
-    cable_state = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
+    # [v14.0] 绳索 raw 数据单独提取 (不再直接 concat, 由 CableEncoder 压缩)
+    cable_raw = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
         if len(obs) >= OBS_CABLE_START + OBS_CABLE_TOTAL \
         else np.zeros(OBS_CABLE_TOTAL, np.float32)
-    return np.concatenate([ee_pos, ee_vel, pl_pos, pl_vel, offset,
+    # [v14.0] wind obs
+    if wind_obs is None:
+        wind_obs = np.zeros(3, np.float32)
+    # core obs (不含 cable 和 wind)
+    core_obs = np.concatenate([ee_pos, ee_vel, pl_pos, pl_vel, offset,
                            [tilt, yaw, tilt_rate, yaw_rate],
-                           start_xy[:2], [z_cruise], [z_error],
-                           cable_state]).astype(np.float32), tilt, yaw
+                           start_xy[:2], [z_cruise], [z_error]]).astype(np.float32)
+    return core_obs, cable_raw, wind_obs, tilt, yaw
 
 
-def build_cruise_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0):
+def build_cruise_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0,
+                     wind_obs=None):
+    """[v14.0] 返回 (core_obs, cable_raw, wind_obs, tilt, yaw)."""
     obs = env_obs; dt = getattr(env, 'dt', 0.1); n_obs_max = env.n_obstacles
     ee_xy = np.array([obs[OBS_EE_X], obs[OBS_EE_Y]])
     ee_vxy = np.array([obs[OBS_EE_VX], obs[OBS_EE_VY]])
@@ -143,19 +229,37 @@ def build_cruise_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0):
     z_lock = float(env.config.get("cruise_rl", {}).get("z_lock_height", 0.25))
     pl_z = float(obs[OBS_PL_Z]); pl_vz = float(obs[OBS_PL_VZ]); ee_z = float(obs[OBS_EE_Z])
     z_error = pl_z - z_lock; z_dev_norm = np.clip(z_error / 0.10, -1.0, 1.0)
-    # [v12.3] 绳索每段状态 (240 维)
-    cable_state = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
+    # [v14.0] 绳索 raw 数据单独提取
+    cable_raw = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
         if len(obs) >= OBS_CABLE_START + OBS_CABLE_TOTAL \
         else np.zeros(OBS_CABLE_TOTAL, np.float32)
-    return np.concatenate([
+    if wind_obs is None:
+        wind_obs = np.zeros(3, np.float32)
+    core_obs = np.concatenate([
         ee_xy, ee_vxy, pl_xy, pl_vxy, offset_xy,
         [tilt, yaw, tilt_rate, yaw_rate], target_xy, [dist],
         obs_data, joint_q, [pl_z, pl_vz, ee_z, z_error, z_dev_norm],
-        cable_state,
-    ]).astype(np.float32), tilt, yaw
+    ]).astype(np.float32)
+    return core_obs, cable_raw, wind_obs, tilt, yaw
 
 
-def build_descent_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0):
+def _normalize_base_dq(base_action, env):
+    """Normalize a 7D base-controller delta_q for residual-policy observations."""
+    if base_action is None:
+        return np.zeros(7, np.float32)
+    base = np.asarray(base_action, dtype=np.float32).reshape(-1)
+    if base.size < 7:
+        base = np.pad(base, (0, 7 - base.size))
+    dq_max = np.asarray(
+        env.config.get("space", {}).get("dq_max", [0.12] * 7),
+        dtype=np.float32)
+    dq_max = np.maximum(dq_max[:7], 1e-6)
+    return np.clip(base[:7] / dq_max, -1.5, 1.5).astype(np.float32)
+
+
+def build_descent_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0,
+                      wind_obs=None, base_action=None):
+    """[v14.0] 返回 (core_obs, cable_raw, wind_obs, tilt, yaw)."""
     obs = env_obs; dt = getattr(env, 'dt', 0.1)
     target_pz = float(env.config["insertion"]["target_payload_z"])
     ee_pos = np.array([obs[OBS_EE_X], obs[OBS_EE_Y], obs[OBS_EE_Z]])
@@ -167,18 +271,39 @@ def build_descent_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0):
     tilt_rate = (tilt - prev_tilt) / dt; yaw_rate = (yaw - prev_yaw) / dt
     pl_target_xy_err = pl_pos[:2] - target_xy
     z_error = float(pl_pos[2] - target_pz)
-    # [v12.3] rebar_err 用固定索引 (旧版用 obs[-4:], 加 cable_obs 后会错位)
     rebar_err = obs[OBS_REBAR_ERR_START:OBS_REBAR_ERR_START+4].copy()
-    # [v12.3] 绳索每段状态 (240 维)
-    cable_state = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
+    ins_cfg = env.config.get("insertion", {})
+    xy_tol = float(ins_cfg.get("xy_tolerance_train_end",
+                               ins_cfg.get("xy_tolerance", 0.005)))
+    z_tol = float(ins_cfg.get("success_z_tolerance", 0.020))
+    tilt_tol = float(ins_cfg.get("tilt_tolerance_train_end",
+                                 ins_cfg.get("tilt_tolerance", 0.05)))
+    yaw_tol = float(ins_cfg.get("yaw_tolerance_train_end",
+                                ins_cfg.get("yaw_tolerance", 0.08)))
+    max_steps = float(env.config.get("descent_rl", {}).get("max_steps", 300))
+    step_frac = np.clip(float(getattr(env, "current_step", 0)) /
+                        max(max_steps, 1.0), 0.0, 1.0)
+    insertion_state = np.array([
+        np.clip(np.linalg.norm(pl_target_xy_err) / max(xy_tol, 1e-6), 0.0, 5.0),
+        np.clip(abs(z_error) / max(z_tol, 1e-6), 0.0, 5.0),
+        np.clip(abs(tilt) / max(tilt_tol, 1e-6), 0.0, 5.0),
+        np.clip(abs(yaw) / max(yaw_tol, 1e-6), 0.0, 5.0),
+        step_frac,
+    ], dtype=np.float32)
+    # [v14.0] 绳索 raw 数据单独提取
+    cable_raw = obs[OBS_CABLE_START:OBS_CABLE_START+OBS_CABLE_TOTAL].copy() \
         if len(obs) >= OBS_CABLE_START + OBS_CABLE_TOTAL \
         else np.zeros(OBS_CABLE_TOTAL, np.float32)
-    return np.concatenate([
+    if wind_obs is None:
+        wind_obs = np.zeros(3, np.float32)
+    base_dq_norm = _normalize_base_dq(base_action, env)
+    core_obs = np.concatenate([
         ee_pos, ee_vel, pl_pos, pl_vel, offset,
         [tilt, yaw, tilt_rate, yaw_rate], target_xy, [target_pz],
-        pl_target_xy_err, [z_error], rebar_err,
-        cable_state,
-    ]).astype(np.float32), tilt, yaw
+        pl_target_xy_err, [z_error], rebar_err, insertion_state,
+        base_dq_norm,
+    ]).astype(np.float32)
+    return core_obs, cable_raw, wind_obs, tilt, yaw
 
 
 # ==============================================================================
@@ -327,7 +452,8 @@ class HEREpisodeRecorder:
     - reward 用一个轻量近似: 重新计算 r_xy_align (差分) 和加入 success_bonus,
       其他项 (swing, tilt, yaw, z_descent, step) 保持原值
     """
-    # build_descent_obs 中 target_xy 占据 obs 的某些索引位
+    # build_descent_obs 中 target_xy 占据 obs 的某些索引位.
+    # v15 在 core 末尾追加 base_dq_norm(7), 这些索引仍保持不变.
     # 根据 build_descent_obs 拼接顺序:
     #   ee_pos(3) + ee_vel(3) + pl_pos(3) + pl_vel(3) + offset(3) +
     #   [tilt, yaw, tilt_rate, yaw_rate] (4) + target_xy(2) + [target_pz](1) +
@@ -447,23 +573,30 @@ class HEREpisodeRecorder:
 
 
 class SequenceRolloutBuffer:
-    def __init__(self, n_steps, obs_dim, action_dim, seq_len, device):
+    def __init__(self, n_steps, obs_dim, action_dim, seq_len, device,
+                 cable_raw_dim=240):
         self.n_steps = n_steps; self.obs_dim = obs_dim
         self.action_dim = action_dim; self.seq_len = seq_len
-        self.device = device; self.clear()
+        self.device = device
+        self._cable_raw_dim = cable_raw_dim  # [v14.1]
+        self.clear()
     def clear(self):
         self.obs_seqs   = np.zeros((self.n_steps, self.seq_len, self.obs_dim), np.float32)
         self.actions    = np.zeros((self.n_steps, self.action_dim), np.float32)
         self.rewards    = np.zeros(self.n_steps, np.float32)
         self.dones      = np.zeros(self.n_steps, np.float32)
         self.values     = np.zeros(self.n_steps, np.float32)
+        self.next_values= np.full(self.n_steps, np.nan, np.float32)
+        self.env_ids    = np.full(self.n_steps, -1, np.int32)
         self.log_probs  = np.zeros(self.n_steps, np.float32)
         self.advantages = np.zeros(self.n_steps, np.float32)
         self.returns    = np.zeros(self.n_steps, np.float32)
+        # [v14.1] 存 cable_raw 序列供 PPO update 时 re-encode
+        self.cable_raw_seqs = np.zeros(
+            (self.n_steps, self.seq_len, self._cable_raw_dim), np.float32)
         self.ptr = 0; self.full = False
-    def add(self, obs_seq, action, reward, done, value, log_prob):
-        # [v11.1 vec fix] vec 模式 n_envs 个 worker 同一 outer step 都会写入,
-        # 可能在某个 worker 的写入中越过 n_steps 上限. 防御性检查: 满则跳过.
+    def add(self, obs_seq, action, reward, done, value, log_prob,
+            cable_raw_seq=None, next_value=None, env_id=-1):
         if self.ptr >= self.n_steps:
             self.full = True
             return False
@@ -471,10 +604,29 @@ class SequenceRolloutBuffer:
         self.actions[i] = action
         self.rewards[i] = reward; self.dones[i] = float(done)
         self.values[i] = value; self.log_probs[i] = log_prob
+        if next_value is not None:
+            self.next_values[i] = float(next_value)
+        self.env_ids[i] = int(env_id)
+        if cable_raw_seq is not None:
+            self.cable_raw_seqs[i] = cable_raw_seq
         self.ptr += 1
         if self.ptr == self.n_steps: self.full = True
         return True
     def compute_returns_and_advantages(self, last_value, gamma, gae_lambda):
+        if np.all(np.isfinite(self.next_values)) and np.all(self.env_ids >= 0):
+            last_gae_by_env = {}
+            for t in reversed(range(self.n_steps)):
+                eid = int(self.env_ids[t])
+                non_terminal = 1.0 - self.dones[t]
+                delta = (self.rewards[t] +
+                         gamma * self.next_values[t] * non_terminal -
+                         self.values[t])
+                carry = last_gae_by_env.get(eid, 0.0)
+                adv = delta + gamma * gae_lambda * non_terminal * carry
+                self.advantages[t] = adv
+                last_gae_by_env[eid] = adv
+            self.returns = self.advantages + self.values
+            return
         last_gae = 0.0
         for t in reversed(range(self.n_steps)):
             next_val = last_value if t == self.n_steps-1 else self.values[t+1]
@@ -494,35 +646,62 @@ class SequenceRolloutBuffer:
                    np_to_tensor(self.actions[idx], self.device),
                    np_to_tensor(self.returns[idx], self.device).view(-1, 1),
                    np_to_tensor(adv[idx], self.device),
-                   np_to_tensor(self.log_probs[idx], self.device))
+                   np_to_tensor(self.log_probs[idx], self.device),
+                   np_to_tensor(self.cable_raw_seqs[idx], self.device))  # [v14.1]
 
 
 class RolloutBuffer:
-    def __init__(self, n_steps, obs_dim, action_dim, device):
+    def __init__(self, n_steps, obs_dim, action_dim, device,
+                 cable_raw_dim=240):
         self.n_steps = n_steps; self.obs_dim = obs_dim
-        self.action_dim = action_dim; self.device = device; self.clear()
+        self.action_dim = action_dim; self.device = device
+        self._cable_raw_dim = cable_raw_dim  # [v14.1]
+        self.clear()
     def clear(self):
         self.obs        = np.zeros((self.n_steps, self.obs_dim), np.float32)
         self.actions    = np.zeros((self.n_steps, self.action_dim), np.float32)
         self.rewards    = np.zeros(self.n_steps, np.float32)
         self.dones      = np.zeros(self.n_steps, np.float32)
         self.values     = np.zeros(self.n_steps, np.float32)
+        self.next_values= np.full(self.n_steps, np.nan, np.float32)
+        self.env_ids    = np.full(self.n_steps, -1, np.int32)
         self.log_probs  = np.zeros(self.n_steps, np.float32)
         self.advantages = np.zeros(self.n_steps, np.float32)
         self.returns    = np.zeros(self.n_steps, np.float32)
+        self.cable_raws = np.zeros(
+            (self.n_steps, self._cable_raw_dim), np.float32)  # [v14.1]
         self.ptr = 0; self.full = False
-    def add(self, obs, action, reward, done, value, log_prob):
-        # [v11.1 vec fix] 同 SequenceRolloutBuffer, 防御性 full 检查
+    def add(self, obs, action, reward, done, value, log_prob,
+            cable_raw=None, next_value=None, env_id=-1):
         if self.ptr >= self.n_steps:
             self.full = True
             return False
         i = self.ptr; self.obs[i] = obs; self.actions[i] = action
         self.rewards[i] = reward
         self.dones[i] = float(done); self.values[i] = value; self.log_probs[i] = log_prob
+        if next_value is not None:
+            self.next_values[i] = float(next_value)
+        self.env_ids[i] = int(env_id)
+        if cable_raw is not None:
+            self.cable_raws[i] = cable_raw
         self.ptr += 1
         if self.ptr == self.n_steps: self.full = True
         return True
     def compute_returns_and_advantages(self, last_value, gamma, gae_lambda):
+        if np.all(np.isfinite(self.next_values)) and np.all(self.env_ids >= 0):
+            last_gae_by_env = {}
+            for t in reversed(range(self.n_steps)):
+                eid = int(self.env_ids[t])
+                non_terminal = 1.0 - self.dones[t]
+                delta = (self.rewards[t] +
+                         gamma * self.next_values[t] * non_terminal -
+                         self.values[t])
+                carry = last_gae_by_env.get(eid, 0.0)
+                adv = delta + gamma * gae_lambda * non_terminal * carry
+                self.advantages[t] = adv
+                last_gae_by_env[eid] = adv
+            self.returns = self.advantages + self.values
+            return
         last_gae = 0.0
         for t in reversed(range(self.n_steps)):
             next_val = last_value if t == self.n_steps-1 else self.values[t+1]
@@ -542,7 +721,8 @@ class RolloutBuffer:
                    np_to_tensor(self.actions[idx], self.device),
                    np_to_tensor(self.returns[idx], self.device).view(-1, 1),
                    np_to_tensor(adv[idx], self.device),
-                   np_to_tensor(self.log_probs[idx], self.device))
+                   np_to_tensor(self.log_probs[idx], self.device),
+                   np_to_tensor(self.cable_raws[idx], self.device))  # [v14.1]
 
 
 # ==============================================================================
@@ -578,10 +758,17 @@ class PPOPhaseAgent:
         self.seq_len = int(cfg_ppo.get("seq_len", 8))
         lstm_dim = int(cfg_ppo.get("lstm_dim", 128))
 
-        self.entropy_coef_start = float(cfg_ppo.get("entropy_coef_start",
-                                       cfg_ppo.get("entropy_coef", 0.05)))
-        self.entropy_coef_end = float(cfg_ppo.get("entropy_coef_end", 0.005))
-        self.entropy_coef_anneal_steps = int(cfg_ppo.get("entropy_coef_anneal_steps", 600_000))
+        # [v14.2a] phase-specific entropy annealing (descent 需要更快退火)
+        _ent_start_key = f"{phase_name}_entropy_coef_start"
+        _ent_end_key   = f"{phase_name}_entropy_coef_end"
+        _ent_steps_key = f"{phase_name}_entropy_coef_anneal_steps"
+        self.entropy_coef_start = float(phase_cfg.get(
+            _ent_start_key, cfg_ppo.get("entropy_coef_start",
+                                         cfg_ppo.get("entropy_coef", 0.05))))
+        self.entropy_coef_end = float(phase_cfg.get(
+            _ent_end_key, cfg_ppo.get("entropy_coef_end", 0.005)))
+        self.entropy_coef_anneal_steps = int(phase_cfg.get(
+            _ent_steps_key, cfg_ppo.get("entropy_coef_anneal_steps", 600_000)))
         self.entropy_coef = self.entropy_coef_start
         self.use_obs_norm = bool(cfg_ppo["use_obs_norm"])
         self.obs_norm = RunningMeanStd(
@@ -611,8 +798,10 @@ class PPOPhaseAgent:
         _use_nmpc_base = (phase_name == "cruise" and bool(cr_cfg.get("use_nmpc_base", False)))
 
         if self.action_dim == 3:
-            axy = float(phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 0.5)))
-            az  = float(phase_cfg.get("acc_max_z",  ee_cfg.get("acc_max_z",  1.0)))
+            axy = float(phase_cfg.get("residual_acc_max_xy",
+                        phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 0.5))))
+            az  = float(phase_cfg.get("residual_acc_max_z",
+                        phase_cfg.get("acc_max_z",  ee_cfg.get("acc_max_z",  1.0))))
             action_scale = [axy, axy, az]
         elif _use_nmpc_base:
             # [v8] action_scale = residual_acc_max_xy_rl
@@ -623,37 +812,69 @@ class PPOPhaseAgent:
                         ee_cfg.get("acc_max_xy", 0.60)))
             action_scale = [axy, axy]
 
+        # ── log_std 参数: 支持 phase-specific override ──────────────────────
+        _ls_init_key = f"{phase_name}_log_std_init"
+        _ls_max_key  = f"{phase_name}_log_std_max"
+        _log_std_init = float(phase_cfg.get(
+            _ls_init_key, cfg_ppo.get("log_std_init", -0.5)))
+        _log_std_min  = float(cfg_ppo.get("log_std_min", -3.0))
+        _log_std_max  = float(phase_cfg.get(
+            _ls_max_key, cfg_ppo.get("log_std_max", 0.0)))
+
         # ── 网络构建 ──────────────────────────────────────────────────────────
         if self.use_lstm:
             self.actor = LSTMPhaseActor(
                 self.obs_dim, self.action_dim, action_scale,
                 hidden_dim=int(cfg_ppo["hidden_dim"]), lstm_dim=lstm_dim,
                 n_layers=2, seq_len=self.seq_len,
-                log_std_init=float(cfg_ppo["log_std_init"]),
-                log_std_min=float(cfg_ppo["log_std_min"]),
-                log_std_max=float(cfg_ppo["log_std_max"])).to(self.device)
+                log_std_init=_log_std_init,
+                log_std_min=_log_std_min,
+                log_std_max=_log_std_max).to(self.device)
             self.critic = LSTMPhaseCritic(
                 self.obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
                 lstm_dim=lstm_dim, n_layers=2, seq_len=self.seq_len).to(self.device)
             self.buffer = SequenceRolloutBuffer(
-                self.n_steps, self.obs_dim, self.action_dim, self.seq_len, self.device)
+                self.n_steps, self.obs_dim, self.action_dim, self.seq_len, self.device,
+                cable_raw_dim=240)  # [v14.1]
         else:
             self.actor = PhaseActor(
                 self.obs_dim, self.action_dim, action_scale,
                 hidden_dim=int(cfg_ppo["hidden_dim"]),
                 n_layers=int(cfg_ppo["n_layers"]),
-                log_std_init=float(cfg_ppo["log_std_init"]),
-                log_std_min=float(cfg_ppo["log_std_min"]),
-                log_std_max=float(cfg_ppo["log_std_max"])).to(self.device)
+                log_std_init=_log_std_init,
+                log_std_min=_log_std_min,
+                log_std_max=_log_std_max).to(self.device)
             self.critic = PhaseCritic(
                 self.obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
                 n_layers=int(cfg_ppo["n_layers"])).to(self.device)
             self.buffer = RolloutBuffer(
-                self.n_steps, self.obs_dim, self.action_dim, self.device)
+                self.n_steps, self.obs_dim, self.action_dim, self.device,
+                cable_raw_dim=240)  # [v14.1]
 
         self.obs_history = ObsHistoryBuffer(self.obs_dim, self.seq_len)
         self._lr_actor  = float(cfg_ppo["lr_actor"])
         self._lr_critic = float(cfg_ppo["lr_critic"])
+
+        # ── [v14.0] CableEncoder — 压缩 240 维 cable obs ─────────────────────
+        ce_cfg = config.get("cable_encoder", {})
+        self._cable_raw_dim = int(ce_cfg.get("raw_dim", 240))
+        self._cable_out_dim = int(ce_cfg.get("output_dim", 32))
+        self._wind_dim = 3
+        self.cable_encoder = CableEncoder(
+            raw_dim=self._cable_raw_dim,
+            hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
+            output_dim=self._cable_out_dim,
+            n_layers=int(ce_cfg.get("n_layers", 2)),
+            normalize_input=bool(ce_cfg.get("normalize_input", True)),
+        ).to(self.device)
+        # [v14.2] 冻结 CableEncoder (随机投影)
+        # v14.1 尝试解冻端到端训练, 但导致 approx_kl 极端尖峰 (>2.0)
+        # 原因: PPO update 时 encoder 参数变化导致 obs re-encode 与 collect 不一致
+        # 冻结的随机投影已足够解决 240 维淹没问题, 且训练完全稳定
+        for p in self.cable_encoder.parameters():
+            p.requires_grad = False
+        self.cable_encoder.eval()
+
         self.opt_actor  = torch.optim.Adam(self.actor.parameters(),  lr=self._lr_actor,  eps=1e-5)
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=self._lr_critic, eps=1e-5)
         self.total_steps = 0; self._last_result = PPO_ZERO
@@ -680,6 +901,26 @@ class PPOPhaseAgent:
               f"std≈{math.exp(init_val):.3f}")
 
     # ── 标准接口 ──────────────────────────────────────────────────────────────
+
+    @torch.no_grad()
+    def encode_obs(self, core_obs, cable_raw, wind_obs):
+        """[v14.0] 将 (core, cable_raw, wind) 编码合并为最终 obs.
+
+        CableEncoder 将 240 维 cable 压缩到 32 维, 然后与 core + wind concat.
+        这在 inference 阶段调用 (no_grad), 结果存入 buffer.
+
+        Args:
+            core_obs: np.array, 非绳索部分 (20-40 维)
+            cable_raw: np.array, 240 维绳索原始数据
+            wind_obs: np.array, 3 维风力观测
+        Returns:
+            final_obs: np.array, shape (obs_dim,)
+        """
+        cable_t = torch.from_numpy(
+            cable_raw.reshape(1, -1).astype(np.float32)).to(self.device)
+        cable_feat = self.cable_encoder(cable_t).cpu().numpy().flatten()
+        return np.concatenate([core_obs, cable_feat, wind_obs]).astype(np.float32)
+
     def normalize_obs(self, obs, update=True):
         if self._freeze_obs_norm: update = False
         if self.use_obs_norm:
@@ -687,7 +928,22 @@ class PPOPhaseAgent:
             return self.obs_norm.normalize(obs)
         return obs.astype(np.float32)
 
-    def reset_history(self): self.obs_history.reset()
+    def reset_history(self):
+        self.obs_history.reset()
+        # [v14.1] cable_raw 历史 (LSTM 模式下存最近 seq_len 步的 cable_raw)
+        self._cable_raw_history = deque(maxlen=self.seq_len)
+
+    def make_obs_history(self):
+        return ObsHistoryBuffer(self.obs_dim, self.seq_len)
+
+    def make_cable_history(self):
+        return deque(maxlen=self.seq_len)
+
+    def _get_cable_raw_sequence_from(self, cable_history):
+        seq = list(cable_history)
+        while len(seq) < self.seq_len:
+            seq.insert(0, np.zeros(240, dtype=np.float32))
+        return np.asarray(seq, dtype=np.float32)
 
     @torch.no_grad()
     def act(self, norm_obs, deterministic=False):
@@ -705,6 +961,23 @@ class PPOPhaseAgent:
             return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
 
     @torch.no_grad()
+    def act_with_history(self, norm_obs, obs_history, deterministic=False):
+        """PPO inference with caller-owned history, used by vectorized envs."""
+        if obs_history is None:
+            return self.act(norm_obs, deterministic=deterministic)
+        obs_history.push(norm_obs)
+        if self.use_lstm:
+            obs_seq = obs_history.get_sequence()
+            s = np_to_tensor(obs_seq, self.device).unsqueeze(0)
+            action, log_prob, _, _ = self.actor.get_action(s, deterministic=deterministic)
+            value = self.critic(s)
+            return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
+        s = np_to_tensor(norm_obs.reshape(1, -1), self.device)
+        action, log_prob, _ = self.actor.get_action(s, deterministic=deterministic)
+        value = self.critic(s)
+        return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
+
+    @torch.no_grad()
     def get_value_for_state(self, norm_obs):
         if self.use_lstm:
             obs_seq = self.obs_history.get_sequence()
@@ -714,14 +987,58 @@ class PPOPhaseAgent:
             s = np_to_tensor(norm_obs.reshape(1, -1), self.device)
             return self.critic(s).cpu().item()
 
+    @torch.no_grad()
+    def get_value_for_obs_sequence(self, obs_seq):
+        s = np_to_tensor(np.asarray(obs_seq, np.float32), self.device).unsqueeze(0)
+        return self.critic(s).cpu().item()
+
     def get_log_std_per_dim(self): return self.actor.get_log_std_per_dim()
 
-    def add_to_buffer(self, norm_obs, action, reward, done, value, log_prob):
+    def push_cable_raw(self, cable_raw):
+        """[v14.1] 每 step 存 cable_raw, 与 obs_history 同步."""
+        if not hasattr(self, '_cable_raw_history'):
+            self._cable_raw_history = deque(maxlen=self.seq_len)
+        self._cable_raw_history.append(cable_raw.copy())
+
+    def _get_cable_raw_sequence(self):
+        """[v14.1] 获取最近 seq_len 步的 cable_raw 序列."""
+        if not hasattr(self, '_cable_raw_history'):
+            return np.zeros((self.seq_len, 240), dtype=np.float32)
+        seq = list(self._cable_raw_history)
+        while len(seq) < self.seq_len:
+            seq.insert(0, np.zeros(240, dtype=np.float32))
+        return np.array(seq, dtype=np.float32)
+
+    def add_to_buffer(self, norm_obs, action, reward, done, value, log_prob,
+                      cable_raw=None):
+        """[v14.1] 新增 cable_raw 参数, 存入 buffer 供 update 时 re-encode."""
         if self.use_lstm:
             obs_seq = self.obs_history.get_sequence()
-            self.buffer.add(obs_seq, action, reward, done, value, log_prob)
+            cable_raw_seq = self._get_cable_raw_sequence()
+            self.buffer.add(obs_seq, action, reward, done, value, log_prob,
+                            cable_raw_seq=cable_raw_seq)
         else:
-            self.buffer.add(norm_obs, action, reward, done, value, log_prob)
+            self.buffer.add(norm_obs, action, reward, done, value, log_prob,
+                            cable_raw=cable_raw)
+
+    def add_to_buffer_with_history(self, norm_obs, action, reward, done, value,
+                                   log_prob, obs_history=None,
+                                   cable_history=None, cable_raw=None,
+                                   next_value=None, env_id=-1):
+        if obs_history is None:
+            return self.add_to_buffer(norm_obs, action, reward, done, value,
+                                      log_prob, cable_raw=cable_raw)
+        if self.use_lstm:
+            obs_seq = obs_history.get_sequence()
+            cable_seq = (self._get_cable_raw_sequence_from(cable_history)
+                         if cable_history is not None else None)
+            self.buffer.add(obs_seq, action, reward, done, value, log_prob,
+                            cable_raw_seq=cable_seq,
+                            next_value=next_value, env_id=env_id)
+        else:
+            self.buffer.add(norm_obs, action, reward, done, value, log_prob,
+                            cable_raw=cable_raw,
+                            next_value=next_value, env_id=env_id)
 
     def ingest_her_transitions(self, relabeled_list):
         """[v11 Path 2] 把 HER 重标的 transitions 加入 rollout buffer.
@@ -803,16 +1120,21 @@ class PPOPhaseAgent:
         self._update_entropy_coef(global_ts=global_ts)
         total_pl = total_vl = total_el = total_kl = total_cf = 0.0
         n_updates = 0; stop_early = False
+
         for epoch in range(self.n_epochs):
             if stop_early: break
             for batch in self.buffer.get_minibatches(self.batch_size, self.norm_adv):
-                obs_b, act_b, ret_b, adv_b, old_lp_b = batch
+                obs_b, act_b, ret_b, adv_b, old_lp_b, _cable_b = batch
+                # [v14.2] encoder 冻结, obs_b 中的 cable_feat 已经是正确的
+                # _cable_b 不使用 (保留 buffer 接口兼容性)
+
                 value = self.critic(obs_b)
                 value_loss = F.huber_loss(value, ret_b)
                 self.opt_critic.zero_grad()
                 (self.value_loss_coef * value_loss).backward()
                 nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
                 self.opt_critic.step()
+
                 new_lp, entropy = self.actor.evaluate_actions(obs_b, act_b)
                 ratio = (new_lp - old_lp_b).exp()
                 surr1 = ratio * adv_b
@@ -847,7 +1169,9 @@ class PPOPhaseAgent:
             "opt_actor": self.opt_actor.state_dict(), "opt_critic": self.opt_critic.state_dict(),
             "total_steps": self.total_steps,
             "obs_norm": self.obs_norm.state_dict(), "phase_name": self.phase_name,
-            "entropy_coef": self.entropy_coef, "use_lstm": self.use_lstm}, path)
+            "entropy_coef": self.entropy_coef, "use_lstm": self.use_lstm,
+            "cable_encoder": self.cable_encoder.state_dict(),  # [v14.0]
+        }, path)
 
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
@@ -856,6 +1180,9 @@ class PPOPhaseAgent:
         if "opt_critic" in ck: self.opt_critic.load_state_dict(ck["opt_critic"])
         self.total_steps = ck.get("total_steps", 0)
         if "obs_norm" in ck: self.obs_norm.load_state_dict(ck["obs_norm"])
+        # [v14.0] cable encoder 加载 (保持 frozen 投影一致性)
+        if "cable_encoder" in ck:
+            self.cable_encoder.load_state_dict(ck["cable_encoder"])
 
 
 # ==============================================================================
@@ -1019,8 +1346,10 @@ class SACPhaseAgent:
         _use_nmpc_base = (phase_name == "cruise" and bool(cr_cfg.get("use_nmpc_base", False)))
 
         if self.action_dim == 3:
-            axy = float(phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 2.0)))
-            az  = float(phase_cfg.get("acc_max_z",  ee_cfg.get("acc_max_z",  3.0)))
+            axy = float(phase_cfg.get("residual_acc_max_xy",
+                        phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 2.0))))
+            az  = float(phase_cfg.get("residual_acc_max_z",
+                        phase_cfg.get("acc_max_z",  ee_cfg.get("acc_max_z",  3.0))))
             action_scale = [axy, axy, az]
         elif _use_nmpc_base:
             # [v11 Path 1] cruise SAC 默认值与 PPO 对齐 (0.25→0.08)
@@ -1066,6 +1395,20 @@ class SACPhaseAgent:
             self._use_her = False
         self.total_steps = 0; self._last_result = SAC_ZERO
 
+        # ── [v14.2] CableEncoder for SAC (冻结随机投影) ─────────────────────
+        ce_cfg = config.get("cable_encoder", {})
+        self._cable_raw_dim = int(ce_cfg.get("raw_dim", 240))
+        self._cable_out_dim = int(ce_cfg.get("output_dim", 32))
+        self._wind_dim = 3
+        self.cable_encoder = CableEncoder(
+            raw_dim=self._cable_raw_dim,
+            hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
+            output_dim=self._cable_out_dim,
+        ).to(self.device)
+        for p in self.cable_encoder.parameters():
+            p.requires_grad = False
+        self.cable_encoder.eval()
+
         # ── [v11 Path 1] Cruise SAC 残差: 输出层零初始化, 与 PPO 一致 ───────────
         # SAC 在 cruise 上的优势: off-policy + auto α 自动调整 entropy,
         # 天然规避 PPO 的 entropy collapse / 死局问题.
@@ -1090,6 +1433,14 @@ class SACPhaseAgent:
 
     @property
     def alpha(self): return self.log_alpha.exp().item()
+
+    @torch.no_grad()
+    def encode_obs(self, core_obs, cable_raw, wind_obs):
+        """[v14.0] Same as PPOPhaseAgent.encode_obs."""
+        cable_t = torch.from_numpy(
+            cable_raw.reshape(1, -1).astype(np.float32)).to(self.device)
+        cable_feat = self.cable_encoder(cable_t).cpu().numpy().flatten()
+        return np.concatenate([core_obs, cable_feat, wind_obs]).astype(np.float32)
 
     def normalize_obs(self, obs, update=True):
         if self._freeze_obs_norm: update = False
@@ -1194,7 +1545,8 @@ class SACPhaseAgent:
             "opt_alpha": self.opt_alpha.state_dict(),
             "total_steps": self.total_steps,
             "obs_norm": self.obs_norm.state_dict(),
-            "phase_name": self.phase_name}, path)
+            "phase_name": self.phase_name,
+            "cable_encoder": self.cable_encoder.state_dict()}, path)  # [v14.0]
 
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
@@ -1230,3 +1582,5 @@ class SACPhaseAgent:
         self.total_steps = ck.get("total_steps", 0)
         if "obs_norm" in ck:
             self.obs_norm.load_state_dict(ck["obs_norm"])
+        if "cable_encoder" in ck:  # [v14.0]
+            self.cable_encoder.load_state_dict(ck["cable_encoder"])
