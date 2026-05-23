@@ -7,21 +7,25 @@
 ## 一、快速开始
 
 ```bash
-# 训练 (2 阶段, 不再有独立 lift)
-python train_phase.py --phase cruise  --algo ppo --n-envs 8 --timesteps 2500000
-python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000
+# 训练 (显式指定新 log-dir, 避免覆盖当前成功 ckpt)
+python train_phase.py --phase cruise  --algo ppo --n-envs 8 --timesteps 2500000 --log-dir saves/cruise_ppo_next
+python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000 --log-dir saves/descent_ppo_next
 
 # 测试单段
-python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 20
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 20
+python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo_next/ckpt_best.pt --episodes 20
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo_next/ckpt_best.pt --episodes 20
 
 # 测试完整流水线 (cruise → descent)
 python test_phase.py --phase pipeline \
-    --cruise-ckpt saves/cruise_ppo/best.pt \
-    --descent-ckpt saves/descent_ppo/best.pt \
+    --cruise-ckpt saves/cruise_ppo_next/ckpt_best.pt \
+    --descent-ckpt saves/descent_ppo_next/ckpt_best.pt \
     --cruise-algo ppo --descent-algo ppo \
     --episodes 30
 ```
+
+**Checkpoint 保护**: 当前成功的 descent checkpoint 保留在 `saves/descent_ppo/`
+中。下一次训练默认使用 `saves/descent_ppo_next/`; 除非明确要覆盖,
+不要把 `--log-dir` 指回 `saves/descent_ppo`.
 
 **注意**: `--phase lift` 仍被接受, 但会自动重定向到 `cruise`(并打印提示)。
 旧脚本无需立即修改, 但建议尽快迁移。
@@ -182,19 +186,20 @@ PPO 为主算法. SAC 仍可用 (`--algo sac`).
 
 ```bash
 # Step 1: 训练 cruise (合并的抬升+平移段)
-python train_phase.py --phase cruise --algo ppo --n-envs 8 --timesteps 2500000
+python train_phase.py --phase cruise --algo ppo --n-envs 8 --timesteps 2500000 --log-dir saves/cruise_ppo_next
 
 # Step 2: 训练 descent
-python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000
+# 注意: 不要写入 saves/descent_ppo, 该目录保留当前成功 ckpt.
+python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000 --log-dir saves/descent_ppo_next
 
 # Step 3: 测试单段 SR + 细粒度指标
-python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 30
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_latest.pt --episodes 30 --render
+python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo_next/ckpt_best.pt --episodes 30
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo_next/ckpt_latest.pt --episodes 30 --render
 
 # Step 4: 测试 pipeline (cruise → descent)
 python test_phase.py --phase pipeline \
-    --cruise-ckpt saves/cruise_ppo/best.pt \
-    --descent-ckpt saves/descent_ppo/best.pt \
+    --cruise-ckpt saves/cruise_ppo_next/ckpt_best.pt \
+    --descent-ckpt saves/descent_ppo_next/ckpt_best.pt \
     --cruise-algo ppo --descent-algo ppo \
     --episodes 50 \
     --wind-force 1.5
@@ -208,8 +213,8 @@ python test_phase.py --phase cruise --algo expert --episodes 30
 python test_phase.py --phase descent --algo expert --episodes 30
 
 # 跑 RL 训练后的版本
-python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 30
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 30
+python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo_next/ckpt_best.pt --episodes 30
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo_next/ckpt_best.pt --episodes 30
 ```
 
 对比 `stab/cruise/max_angle`, `integral_ke_mJs` 等指标 →
@@ -221,8 +226,8 @@ python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt
 # 不同风力下测试 (sim2real gap 评估)
 for wind in 0.0 0.5 1.0 1.5 2.0; do
     python test_phase.py --phase pipeline \
-        --cruise-ckpt saves/cruise_ppo/best.pt \
-        --descent-ckpt saves/descent_ppo/best.pt \
+        --cruise-ckpt saves/cruise_ppo_next/ckpt_best.pt \
+        --descent-ckpt saves/descent_ppo_next/ckpt_best.pt \
         --cruise-algo ppo --descent-algo ppo \
         --episodes 20 --wind-force $wind
 done

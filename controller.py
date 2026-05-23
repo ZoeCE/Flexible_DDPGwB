@@ -200,24 +200,73 @@ class NMPCController4D:
 
 class NMPCTrajectoryTracker:
     def __init__(self, dt=0.1, N=25, L=0.445,
+                 u_max_xy=0.8, u_max_z=2.0, u_max_yaw=2.0,
                  arrival_threshold_xy=0.05, arrival_threshold_z=0.05,
-                 z_cruise=0.2):
-        self.mpc = NMPCController4D(dt=dt, N=N, L=L)
+                 z_cruise=0.2, cruise_ref_dist=0.10,
+                 terminal_hover_radius=0.06,
+                 terminal_hover_z_tol=0.04,
+                 terminal_hover_acc_max=0.18,
+                 terminal_hover_kp=0.7,
+                 terminal_hover_kd_payload=1.2,
+                 terminal_hover_kd_ee=0.4,
+                 terminal_hover_swing_kp=0.25,
+                 action_smoothing_alpha=0.45):
+        self.mpc = NMPCController4D(dt=dt, N=N, L=L,
+                                    u_max_xy=u_max_xy,
+                                    u_max_z=u_max_z,
+                                    u_max_yaw=u_max_yaw)
         self.path = None
         self.current_idx = 0
         self.arrival_threshold_xy = arrival_threshold_xy
         self.arrival_threshold_z  = arrival_threshold_z
+        self._cruise_ref_dist = float(cruise_ref_dist)
+        self._terminal_hover_radius = float(terminal_hover_radius)
+        self._terminal_hover_z_tol = float(terminal_hover_z_tol)
+        self._terminal_hover_acc_max = float(terminal_hover_acc_max)
+        self._terminal_hover_kp = float(terminal_hover_kp)
+        self._terminal_hover_kd_payload = float(terminal_hover_kd_payload)
+        self._terminal_hover_kd_ee = float(terminal_hover_kd_ee)
+        self._terminal_hover_swing_kp = float(terminal_hover_swing_kp)
+        self._action_smoothing_alpha = float(action_smoothing_alpha)
+        self._last_action_4d = None
         self.estimated_L = L
         self.z_cruise = z_cruise
         self._is_descending = False
+        self._first_cruise_idx = None
+        self._descent_start_idx = None
 
     def set_path(self, path):
         if path is None or len(path) == 0:
-            self.path = None; self.current_idx = 0; return
+            self.path = None; self.current_idx = 0
+            self._first_cruise_idx = None
+            self._descent_start_idx = None
+            self._last_action_4d = None
+            return
         self.path = np.array(path, dtype=np.float64)
         self.current_idx = 0
         self._is_descending = False
+        self._first_cruise_idx = None
+        self._descent_start_idx = None
+        self._last_action_4d = None
+        for i, wp in enumerate(self.path):
+            wp_z = float(wp[2]) if len(wp) >= 3 else self.z_cruise
+            if self._first_cruise_idx is None and wp_z >= self.z_cruise - 0.005:
+                self._first_cruise_idx = i
+            elif (self._first_cruise_idx is not None and
+                  wp_z < self.z_cruise - 0.01):
+                self._descent_start_idx = i
+                break
         self.mpc.last_sol = None; self.mpc.last_az = 0.0
+
+    def _smooth_action(self, action):
+        action = np.asarray(action, dtype=np.float64)
+        alpha = float(np.clip(self._action_smoothing_alpha, 0.0, 1.0))
+        if self._last_action_4d is None or alpha >= 0.999:
+            smoothed = action
+        else:
+            smoothed = alpha * action + (1.0 - alpha) * self._last_action_4d
+        self._last_action_4d = smoothed.copy()
+        return smoothed
 
     def compute_ee_acceleration(self, obs, target_yaw=0.0):
         if self.path is None:
@@ -243,7 +292,9 @@ class NMPCTrajectoryTracker:
         dist_xy = np.linalg.norm(curr_pl_xy - wp3[:2])
         dist_z  = abs(pl_z - wp3[2])
 
-        is_current_descent_wp = (wp3[2] < self.z_cruise - 0.01)
+        is_current_descent_wp = (
+            self._descent_start_idx is not None and
+            self.current_idx >= self._descent_start_idx)
 
         # ── 航点推进（仅单步推进，不跳跃） ──
         if is_current_descent_wp:
@@ -264,7 +315,9 @@ class NMPCTrajectoryTracker:
         # 原逻辑: pl_z > z_cruise+30mm 时退出下降 → 摆动时 payload 升高会反复触发 settling+积分清零
         if not self._is_descending:
             in_cruise_height   = (pl_z > self.z_cruise - 0.05)
-            target_is_desc_wp  = (wp3[2] < self.z_cruise - 0.01)
+            target_is_desc_wp  = (
+                self._descent_start_idx is not None and
+                self.current_idx >= self._descent_start_idx)
             if in_cruise_height and target_is_desc_wp:
                 self._is_descending = True
         # 不再有 else 退出逻辑: 进入下降后锁定, 避免摆动引起的模式切换
@@ -284,11 +337,23 @@ class NMPCTrajectoryTracker:
         # ══════════════════════════════════════════════════════════════
         ref_xy = wp3[:2].copy()
         ref_z  = wp3[2]
+        cruise_last_idx = ((self._descent_start_idx - 1)
+                           if self._descent_start_idx is not None
+                           else len(self.path) - 1)
+        cruise_last_idx = int(np.clip(cruise_last_idx, 0, len(self.path) - 1))
+        terminal_wp = self.path[cruise_last_idx]
+        terminal_xy = np.array([terminal_wp[0], terminal_wp[1]], dtype=np.float64)
+        terminal_z = float(terminal_wp[2]) if len(terminal_wp) >= 3 else self.z_cruise
 
-        if not self._is_descending and self.current_idx < len(self.path) - 1:
+        can_use_cruise_lookahead = (
+            self._first_cruise_idx is None or
+            self.current_idx >= self._first_cruise_idx)
+        if (not self._is_descending and
+                can_use_cruise_lookahead and
+                self.current_idx < len(self.path) - 1):
             # 沿路径向前取固定弧长距离处的点作为参考
             # [OPT] 增大前瞻距离, 让 NMPC 有更长预览窗口, 减少弯道急转
-            cruise_ref_dist = 0.10  # 0.06→0.10, 沿路径前方 10cm 处作为 NMPC 参考
+            cruise_ref_dist = float(getattr(self, "_cruise_ref_dist", 0.10))
             accum_dist = 0.0
             ref_idx = self.current_idx
             prev_pt = wp3[:2].copy()
@@ -298,8 +363,11 @@ class NMPCTrajectoryTracker:
                 next_pt = np.array([next_wp[0], next_wp[1]])
                 next_z  = next_wp[2] if len(next_wp) >= 3 else 0.3
 
-                # 如果下一个是下降航点，停止向前延伸
-                if next_z < self.z_cruise - 0.01:
+                # 如果下一个是真正下降段航点，停止向前延伸。
+                # lift 航点也低于 z_cruise，不能被误判成 descent。
+                if (self._descent_start_idx is not None and
+                        k >= self._descent_start_idx and
+                        next_z < self.z_cruise - 0.01):
                     break
 
                 seg_len = np.linalg.norm(next_pt - prev_pt)
@@ -320,6 +388,36 @@ class NMPCTrajectoryTracker:
                 ref_xy = np.array([last_cruise[0], last_cruise[1]])
                 ref_z  = last_cruise[2] if len(last_cruise) >= 3 else 0.3
 
+        terminal_hover = (
+            not self._is_descending and
+            can_use_cruise_lookahead and
+            float(np.linalg.norm(curr_pl_xy - terminal_xy)) <
+                self._terminal_hover_radius and
+            abs(pl_z - terminal_z) < self._terminal_hover_z_tol)
+        if terminal_hover:
+            pl_vel_xy = np.array([pl_vx, pl_vy], dtype=np.float64)
+            ee_vel_xy = np.array([ee_vx, ee_vy], dtype=np.float64)
+            ee_xy = np.array([ee_x, ee_y], dtype=np.float64)
+            swing_xy = curr_pl_xy - ee_xy
+            rel_vel_xy = pl_vel_xy - ee_vel_xy
+            acc_xy = (
+                self._terminal_hover_kp * (terminal_xy - curr_pl_xy)
+                + self._terminal_hover_kd_payload * rel_vel_xy
+                - self._terminal_hover_kd_ee * ee_vel_xy
+                + self._terminal_hover_swing_kp * swing_xy)
+            acc_norm = float(np.linalg.norm(acc_xy))
+            if acc_norm > self._terminal_hover_acc_max and acc_norm > 1e-9:
+                acc_xy *= self._terminal_hover_acc_max / acc_norm
+
+            ee_z_ref = terminal_z + self.estimated_L
+            acc_z = np.clip(0.9 * (ee_z_ref - ee_z) - 0.8 * ee_vz,
+                            -0.15, 0.15)
+            yaw_err = target_yaw - ee_yaw
+            acc_yaw = np.clip(0.4 * yaw_err - 0.8 * ee_yaw_v, -0.5, 0.5)
+            return self._smooth_action(
+                np.array([acc_xy[0], acc_xy[1], acc_z, acc_yaw],
+                         dtype=np.float64))
+
         state_12d = np.array([
             ee_x, ee_y, ee_z, ee_yaw,
             ee_vx, ee_vy, ee_vz, ee_yaw_v,
@@ -329,7 +427,7 @@ class NMPCTrajectoryTracker:
         compensated_z = ref_z + (self.estimated_L - self.mpc.L)
         P_ref = np.array([ref_xy[0], ref_xy[1], compensated_z, target_yaw],
                          dtype=np.float64)
-        return self.mpc.get_action(state_12d, P_ref)
+        return self._smooth_action(self.mpc.get_action(state_12d, P_ref))
 
 
 # ==============================================================================
@@ -466,9 +564,24 @@ class JointSpaceExpert:
             dt=ctrl_cfg["dt"],
             N=ctrl_cfg.get("N", 25),
             L=ctrl_cfg["L"],
+            u_max_xy=ctrl_cfg.get("u_max_xy", 0.8),
+            u_max_z=ctrl_cfg.get("u_max_z", 2.0),
+            u_max_yaw=ctrl_cfg.get("u_max_yaw", 2.0),
             arrival_threshold_xy=ctrl_cfg["arrival_threshold_xy"],
             arrival_threshold_z=ctrl_cfg["arrival_threshold_z"],
             z_cruise=self.z_cruise,
+            cruise_ref_dist=ctrl_cfg.get("cruise_ref_dist", 0.10),
+            terminal_hover_radius=ctrl_cfg.get("terminal_hover_radius", 0.06),
+            terminal_hover_z_tol=ctrl_cfg.get("terminal_hover_z_tol", 0.04),
+            terminal_hover_acc_max=ctrl_cfg.get("terminal_hover_acc_max", 0.18),
+            terminal_hover_kp=ctrl_cfg.get("terminal_hover_kp", 0.7),
+            terminal_hover_kd_payload=ctrl_cfg.get(
+                "terminal_hover_kd_payload", 1.2),
+            terminal_hover_kd_ee=ctrl_cfg.get("terminal_hover_kd_ee", 0.4),
+            terminal_hover_swing_kp=ctrl_cfg.get(
+                "terminal_hover_swing_kp", 0.25),
+            action_smoothing_alpha=ctrl_cfg.get(
+                "action_smoothing_alpha", 0.45),
         )
         self.ik_solver = ik_solver
         self.dt = ctrl_cfg["dt"]
@@ -488,9 +601,10 @@ class JointSpaceExpert:
 
         # 巡航段参数
         # [OPT] 降低锚定强度减少位置拖拽, 提高速度一致性
-        self._v_max_xy_normal  = 0.15       # 0.18→0.15, 更慢更稳
-        self._v_max_z_normal   = 0.2
-        self._anchor_alpha_normal  = 0.10   # 0.15→0.10, 减少积分器与真实位置的拖拽冲突
+        _ee_cfg = config.get("ee_control", {})
+        self._v_max_xy_normal = float(_ee_cfg.get("vel_max_xy", 0.15))
+        self._v_max_z_normal = float(_ee_cfg.get("vel_max_z", 0.20))
+        self._anchor_alpha_normal = float(_ee_cfg.get("anchor_alpha", 0.10))
 
         # =========================================================
         # 下降段：精准插入控制器 (v9 — 最小修改原则)

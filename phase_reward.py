@@ -847,19 +847,26 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
     on_target = (abs(payload_z - target_pz) < z_tol and
                  dtf < xy_tol and
                  tilt < tilt_tol and abs_yaw < yaw_tol)
+    floor_contact_success = False
+    if bool(cfg_ins.get("success_by_floor_contact", False)) and on_target:
+        try:
+            floor_contact_success = bool(env._check_prefab_floor_contact())
+        except Exception:
+            floor_contact_success = False
 
     rstate.insertion_hold_counter = (rstate.insertion_hold_counter + 1) if on_target else 0
 
-    if rstate.insertion_hold_counter >= hold_steps:
+    if floor_contact_success or rstate.insertion_hold_counter >= hold_steps:
         r_bonus = float(rcfg["success_bonus"])
         reward += r_bonus
         if tracker:
             tracker.add("success_bonus", r_bonus)
         success = True; done = True
+        suffix = ",floor_contact=1" if floor_contact_success else ""
         info["termination"] = (
             f"insertion_success:z={payload_z*1000:.0f}mm,"
             f"dtf={dtf*1000:.1f}mm,tilt={tilt:.3f},yaw={abs_yaw:.3f},"
-            f"xy_tol={xy_tol*1000:.1f}mm")
+            f"xy_tol={xy_tol*1000:.1f}mm{suffix}")
         return reward, done, success, info
 
     def _failure_miss_penalty():

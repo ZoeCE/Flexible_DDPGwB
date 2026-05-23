@@ -74,6 +74,104 @@ def build_config(args):
     if args.obstacles is not None:
         config["scene"]["n_obstacles"] = max(int(args.obstacles),
                                               config["scene"]["n_obstacles"])
+    if getattr(args, "phase", None) == "descent":
+        insert_target_z = float(getattr(args, "insert_target_z", 0.10))
+        insert_depth_min = float(getattr(args, "insert_depth_min", 0.025))
+        physical_target_z = float(getattr(args, "physical_insert_target_z", 0.090))
+        config["insertion"]["target_payload_z"] = insert_target_z
+        config["planning"]["target_z_descent"] = insert_target_z
+        config["insertion"]["physical_insert_depth_min"] = insert_depth_min
+        config["insertion"]["physical_insert_target_z"] = physical_target_z
+        config["insertion"]["success_by_floor_contact"] = True
+    if getattr(args, "phase", None) == "pipeline":
+        # Pipeline test policy: lift + translation are pure NMPC. Descent keeps
+        # the trained 100mm alignment target, then a short PID finishing move
+        # continues downward only after alignment is already achieved.
+        insert_target_z = float(getattr(args, "pipeline_insert_target_z", 0.10))
+        insert_depth_min = float(getattr(args, "pipeline_insert_depth_min", 0.025))
+        physical_target_z = float(getattr(
+            args, "pipeline_physical_insert_target_z", 0.090))
+        config["insertion"]["target_payload_z"] = insert_target_z
+        config["planning"]["target_z_descent"] = insert_target_z
+        config["insertion"]["physical_insert_depth_min"] = insert_depth_min
+        config["insertion"]["physical_insert_target_z"] = physical_target_z
+        config["insertion"]["success_by_floor_contact"] = True
+        pipeline_cruise_z = float(getattr(args, "pipeline_cruise_z", 0.25))
+        config["planning"]["payload_z_cruise"] = pipeline_cruise_z
+        config["cruise_rl"]["z_lock_height"] = pipeline_cruise_z
+        config["cruise_rl"]["target_z_cruise"] = pipeline_cruise_z
+        config["planning"]["disable_descent_segment"] = True
+        # Match the handoff state to the standalone descent reset:
+        # payload starts near target XY at planning.payload_z_cruise.
+        descent_xy_range = float(config.get("descent_rl", {}).get(
+            "init_xy_range", 0.030))
+        descent_z_range = float(config.get("descent_rl", {}).get(
+            "init_z_range", 0.005))
+        descent_handoff_xy = max(min(descent_xy_range, 0.020), 0.005)
+        config["phase_transition"]["cruise_to_descent_xy_dist"] = min(
+            float(config["phase_transition"].get(
+                "cruise_to_descent_xy_dist", descent_handoff_xy)),
+            descent_handoff_xy)
+        config["phase_transition"]["cruise_to_descent_z_tol"] = max(
+            0.020, descent_z_range * 4.0)
+        config["phase_transition"]["cruise_to_descent_payload_vel_max"] = min(
+            float(config["phase_transition"].get(
+                "cruise_to_descent_payload_vel_max", 0.25)),
+            0.12)
+        config["phase_transition"]["cruise_to_descent_swing_vel_max"] = min(
+            float(config["phase_transition"].get(
+                "cruise_to_descent_swing_vel_max", 0.20)),
+            0.12)
+        config["phase_transition"]["cruise_to_descent_fallback_xy_dist"] = (
+            config["phase_transition"]["cruise_to_descent_xy_dist"])
+        config["phase_transition"]["cruise_to_descent_fallback_swing_max"] = (
+            config["phase_transition"]["cruise_to_descent_swing_vel_max"])
+        config["phase_transition"]["cruise_to_descent_min_z"] = max(
+            0.0, pipeline_cruise_z - max(0.010, descent_z_range * 2.0))
+        config["phase_transition"]["cruise_to_descent_safe_xy_dist"] = max(
+            descent_handoff_xy * 1.25, 0.025)
+        config["phase_transition"]["cruise_to_descent_safe_tilt_max"] = 0.20
+        config["phase_transition"]["cruise_to_descent_safe_swing_vel_max"] = 0.30
+        config["phase_transition"]["cruise_to_descent_safe_payload_vel_max"] = 0.25
+
+        # The default 8cm waypoint z threshold can advance from lift to cruise
+        # while the payload is still around 0.18-0.20m. Tighten it for pipeline
+        # so NMPC actually reaches cruise height before horizontal transfer.
+        config["controller"]["arrival_threshold_z"] = min(
+            float(config["controller"].get("arrival_threshold_z", 0.08)),
+            0.015)
+        config["controller"]["arrival_threshold_xy"] = min(
+            float(config["controller"].get("arrival_threshold_xy", 0.08)),
+            descent_handoff_xy)
+        config["controller"]["cruise_ref_dist"] = min(
+            float(config["controller"].get("cruise_ref_dist", 0.10)),
+            0.04)
+        config["controller"]["u_max_xy"] = min(
+            float(config["controller"].get("u_max_xy", 0.8)), 0.45)
+        config["controller"]["u_max_z"] = min(
+            float(config["controller"].get("u_max_z", 2.0)), 1.2)
+        config["controller"]["terminal_hover_radius"] = 0.08
+        config["controller"]["terminal_hover_z_tol"] = 0.04
+        config["controller"]["terminal_hover_acc_max"] = 0.10
+        config["controller"]["terminal_hover_kp"] = 0.45
+        config["controller"]["terminal_hover_kd_payload"] = 1.6
+        config["controller"]["terminal_hover_kd_ee"] = 0.5
+        config["controller"]["terminal_hover_swing_kp"] = 0.15
+        config["controller"]["action_smoothing_alpha"] = 0.35
+        config["ee_control"]["vel_max_xy"] = min(
+            float(config["ee_control"].get("vel_max_xy", 0.15)), 0.10)
+        config["ee_control"]["vel_max_z"] = min(
+            float(config["ee_control"].get("vel_max_z", 0.20)), 0.12)
+        config["planning"]["num_cruise_target_hover_steps"] = max(
+            int(config["planning"].get("num_cruise_target_hover_steps", 0)),
+            20)
+
+        cruise_steps = int(config.get("cruise_rl", {}).get("max_steps", 700))
+        descent_steps = int(config.get("descent_rl", {}).get("max_steps", 300))
+        pipeline_steps = cruise_steps + descent_steps + 50
+        config.setdefault("pipeline", {})["max_steps"] = pipeline_steps
+        config["sim"]["max_steps"] = max(int(config["sim"]["max_steps"]),
+                                          pipeline_steps)
     return config
 
 
@@ -281,6 +379,14 @@ def check_physical_insertion(env, config):
     ok_xy   = dtf < xy_tol
     ok_tilt = tilt < tilt_tol
     ok_yaw  = abs_yaw < yaw_tol
+    insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
+    min_insert_depth = float(cfg_ins.get(
+        "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
+    ok_insert = insert_depth >= min_insert_depth
+    floor_contact = _check_payload_floor_contact(env, config)
+    ok_contact_success = (
+        bool(cfg_ins.get("success_by_floor_contact", False)) and
+        floor_contact)
 
     detail = (f"z={payload_z*1000:.1f}mm(±{z_tol*1000:.0f}) "
               f"dtf={dtf*1000:.1f}mm(<{xy_tol*1000:.0f}) "
@@ -290,7 +396,155 @@ def check_physical_insertion(env, config):
               f"{'✅' if ok_xy else '❌'}xy "
               f"{'✅' if ok_tilt else '❌'}tilt "
               f"{'✅' if ok_yaw else '❌'}yaw]")
-    return (ok_z and ok_xy and ok_tilt and ok_yaw), detail
+    detail += (f" insert={insert_depth*1000:.1f}mm"
+               f"(>={min_insert_depth*1000:.0f}) "
+               f"[{'OK' if ok_insert else 'NO'} insert]")
+    detail += f" floor={'OK' if floor_contact else 'NO'}"
+    return (ok_z and ok_xy and ok_tilt and ok_yaw and
+            (ok_insert or ok_contact_success)), detail
+
+
+def _cruise_handoff_status(state, config, step=0, max_steps=500, env=None):
+    pt = config["phase_transition"]
+    if env is not None and hasattr(env, 'target_pos'):
+        target_xy = np.array(env.target_pos[:2])
+    else:
+        target_xy = np.array(config["task"]["default_target_xy"])
+
+    _rcfg_c = config["cruise_rl"]["reward"]
+    z_lock = float(config["cruise_rl"].get("z_lock_height", 0.25))
+    z_success_tol = float(pt.get("cruise_to_descent_z_tol", z_lock * 0.24))
+    xy_strict = float(pt.get(
+        "cruise_to_descent_xy_dist",
+        _rcfg_c.get("success_radius", 0.12)))
+    tilt_strict = float(pt.get(
+        "cruise_to_descent_tilt_max",
+        _rcfg_c.get("success_tilt_max", 0.20)))
+    swing_strict = float(pt.get(
+        "cruise_to_descent_swing_vel_max",
+        _rcfg_c.get("success_swing_vel_max", 0.30)))
+    vel_strict = float(pt.get(
+        "cruise_to_descent_payload_vel_max",
+        _rcfg_c.get("success_payload_vel_max", 0.35)))
+
+    payload_z = float(state.get("payload_z", state.get("pl_z", 0.0)))
+    dtf = float(np.linalg.norm(state["pl_xy"] - target_xy))
+    tilt = float(state["tilt"])
+    swing_vel = float(state["swing_vel"])
+    pl_vel = float(state["pl_vel"])
+
+    strict_ok = (
+        dtf < xy_strict and
+        abs(payload_z - z_lock) < z_success_tol and
+        tilt < tilt_strict and
+        swing_vel < swing_strict and
+        pl_vel < vel_strict)
+    if strict_ok:
+        detail = (f"strict dtf={dtf*1000:.1f}mm z={payload_z*1000:.1f}mm "
+                  f"tilt={tilt:.3f} swing={swing_vel:.3f} plV={pl_vel:.3f}")
+        return True, "strict", detail
+
+    safe_min_z = float(pt.get("cruise_to_descent_min_z",
+                              max(0.20, z_lock - 0.06)))
+    safe_xy = float(pt.get(
+        "cruise_to_descent_safe_xy_dist",
+        max(xy_strict * 2.0, 0.08)))
+    safe_tilt = float(pt.get(
+        "cruise_to_descent_safe_tilt_max",
+        max(tilt_strict, 0.35)))
+    safe_swing = float(pt.get(
+        "cruise_to_descent_safe_swing_vel_max",
+        max(swing_strict, 0.45)))
+    safe_vel = float(pt.get(
+        "cruise_to_descent_safe_payload_vel_max",
+        max(vel_strict, 0.50)))
+    safe_ok = (
+        dtf < safe_xy and
+        payload_z >= safe_min_z and
+        tilt < safe_tilt and
+        swing_vel < safe_swing and
+        pl_vel < safe_vel)
+    if safe_ok:
+        detail = (f"safe dtf={dtf*1000:.1f}mm(<{safe_xy*1000:.0f}) "
+                  f"z={payload_z*1000:.1f}mm(>={safe_min_z*1000:.0f}) "
+                  f"tilt={tilt:.3f} swing={swing_vel:.3f} plV={pl_vel:.3f}")
+        return True, "safe", detail
+
+    detail = (f"wait dtf={dtf*1000:.1f}mm strict<{xy_strict*1000:.0f}/"
+              f"safe<{safe_xy*1000:.0f}, z={payload_z*1000:.1f}mm "
+              f"target={z_lock*1000:.0f}, min_z={safe_min_z*1000:.0f}, "
+              f"tilt={tilt:.3f}, swing={swing_vel:.3f}, plV={pl_vel:.3f}")
+    return False, "wait", detail
+
+
+def _estimate_rebar_insertion_depth(env, config):
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+
+    socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+    socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+    hole_depth = float(cfg_pref.get("socket_hole_depth", 0.06))
+    rebar_half_h = float(cfg_tgt.get("rebar_half_height", 0.01))
+
+    payload_z = float(env.data.body('prefab').xpos[2])
+    try:
+        target_base_z = float(env.data.body('target').xpos[2])
+    except Exception:
+        target_base_z = 0.0
+
+    rebar_top_z = target_base_z + 2.0 * rebar_half_h
+    socket_bottom_z = payload_z - socket_half_z
+    raw_depth = rebar_top_z - socket_bottom_z
+    return float(np.clip(raw_depth, 0.0, max(hole_depth, 0.0))), hole_depth
+
+
+def _check_payload_floor_contact(env, config):
+    if hasattr(env, "_check_prefab_floor_contact"):
+        try:
+            if bool(env._check_prefab_floor_contact()):
+                return True
+        except Exception:
+            pass
+
+    try:
+        cfg_pref = config.get("prefab", {})
+        socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+        socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+        z_tol = float(config.get("insertion", {}).get(
+            "floor_contact_z_tolerance", 0.008))
+        payload_z = float(env.data.body('prefab').xpos[2])
+        return payload_z <= socket_half_z + z_tol
+    except Exception:
+        return False
+
+
+def _get_physical_insert_target_z(config):
+    cfg_ins = config.get("insertion", {})
+    if "physical_insert_target_z" in cfg_ins:
+        return float(cfg_ins["physical_insert_target_z"])
+
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+    socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+    socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+    rebar_half_h = float(cfg_tgt.get("rebar_half_height", 0.01))
+    min_depth = float(cfg_ins.get("physical_insert_depth_min", 0.025))
+    # target body is placed at z=0 in generate_scene_and_trajectory.
+    return max(0.02, 2.0 * rebar_half_h + socket_half_z - min_depth - 0.005)
+
+
+def _activate_physical_insert_finish(expert, config):
+    if expert is None:
+        return None
+    final_z = _get_physical_insert_target_z(config)
+    expert._target_payload_z = float(final_z)
+    expert._z_reached_thresh = float(final_z)
+    expert._z_reached = False
+    expert._final_hold_counter = 0
+    expert._contact_detected = False
+    if hasattr(expert, "tracker"):
+        expert.tracker._is_descending = True
+    return final_z
 
 
 def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None):
@@ -318,18 +572,31 @@ def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None
         )
 
     elif phase == "cruise":
+        ok, _, _ = _cruise_handoff_status(
+            state, config, step=step, max_steps=max_steps, env=env)
+        return ok
         # [v13.1] train (compute_cruise_reward) 和 test_pipeline (此函数) 使用一致的判定:
         # 读相同 config keys (cruise_rl.reward 中的 success_*).
         # 用户反馈 "确保 train 和 test 的标准一致".
+        # For pipeline handoff, prefer the stricter phase_transition gates so
+        # PID only takes over once the payload is actually above the target.
         _rcfg_c  = config["cruise_rl"]["reward"]
         z_lock   = float(config["cruise_rl"].get("z_lock_height", 0.25))
-        z_tol_frac    = float(_rcfg_c.get("z_success_tol_frac", 0.40))
-        z_success_tol = z_lock * z_tol_frac
-        success_radius = float(_rcfg_c.get("success_radius", 0.12))
+        z_success_tol = float(pt.get("cruise_to_descent_z_tol",
+                                     z_lock * 0.24))
+        success_radius = float(pt.get(
+            "cruise_to_descent_xy_dist",
+            _rcfg_c.get("success_radius", 0.12)))
         # success_* keys 比 cruise_to_descent_* 宽松 (按 v13.1 设计):
-        tilt_max   = float(_rcfg_c.get("success_tilt_max",         0.20))
-        swing_max  = float(_rcfg_c.get("success_swing_vel_max",    0.30))
-        vel_max    = float(_rcfg_c.get("success_payload_vel_max",  0.35))
+        tilt_max   = float(pt.get(
+            "cruise_to_descent_tilt_max",
+            _rcfg_c.get("success_tilt_max", 0.20)))
+        swing_max  = float(pt.get(
+            "cruise_to_descent_swing_vel_max",
+            _rcfg_c.get("success_swing_vel_max", 0.30)))
+        vel_max    = float(pt.get(
+            "cruise_to_descent_payload_vel_max",
+            _rcfg_c.get("success_payload_vel_max", 0.35)))
 
         payload_z = float(state.get("payload_z", state.get("pl_z", 0.0)))
         dtf = float(np.linalg.norm(state["pl_xy"] - target_xy))
@@ -348,7 +615,9 @@ def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None
         fallback_swing = float(pt.get("cruise_to_descent_fallback_swing_max", 0.30))
         if (step >= int(max_steps * fallback_frac) and
                 dtf < fallback_xy and
+                abs(payload_z - z_lock) < z_success_tol and
                 state["swing_vel"] < fallback_swing and
+                state["pl_vel"] < vel_max and
                 state["tilt"] < tilt_max):
             return True
         return False
@@ -382,6 +651,26 @@ def _truncate_path_for_lift(planned_path, config):
             reached_cruise_z = True
         else:
             break
+    if not keep_idx:
+        return pp[:1].copy()
+    return pp[keep_idx].copy()
+
+
+def _truncate_path_for_pipeline_cruise(planned_path, config):
+    """Keep lift + cruise waypoints only; remove descent waypoints."""
+    if planned_path is None or len(planned_path) == 0:
+        return planned_path
+    pp = np.asarray(planned_path, dtype=np.float64)
+    z_cruise = float(config.get("planning", {}).get("payload_z_cruise", 0.25))
+    keep_idx = []
+    reached_cruise_z = False
+    for i, wp in enumerate(pp):
+        wp_z = float(wp[2]) if len(wp) >= 3 else z_cruise
+        if reached_cruise_z and wp_z < z_cruise - 0.01:
+            break
+        keep_idx.append(i)
+        if wp_z >= z_cruise - 0.005:
+            reached_cruise_z = True
     if not keep_idx:
         return pp[:1].copy()
     return pp[keep_idx].copy()
@@ -475,6 +764,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
 
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         term_reason = None
+        physical_finish_active = False
         stab_metrics = StabilityMetrics()
 
         max_steps = int(config[f"{phase}_rl"]["max_steps"])
@@ -578,12 +868,32 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     phys_ok, phys_detail = check_physical_insertion(env, config)
                     ep_success = phys_ok
                     mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
-                    if verbose:
+                    if verbose and (phys_ok or not physical_finish_active):
                         print(f"    [{mark_str}] {phys_detail}")
                 else:
                     ep_success = True
-                term_reason = r_info.get("termination", "success")
-                if phase != "descent" or ep_success:
+                if phase == "descent" and not ep_success:
+                    if not physical_finish_active:
+                        final_z = _activate_physical_insert_finish(expert, config)
+                        if verbose and final_z is not None:
+                            print(f"    [physical insert finish] PID target_z={final_z*1000:.1f}mm")
+                        physical_finish_active = True
+                    r_done = False
+                    r_success = False
+                    r_info = dict(r_info)
+                    r_info.pop("termination", None)
+                    term_reason = "reward_success_waiting_physical_insert"
+                else:
+                    term_reason = r_info.get("termination", "success")
+                    obs = next_obs; break
+
+            if phase == "descent" and physical_finish_active and not ep_success:
+                phys_ok, phys_detail = check_physical_insertion(env, config)
+                if phys_ok:
+                    ep_success = True
+                    term_reason = "physical_insertion_success"
+                    if verbose:
+                        print(f"    [✅ 物理插入成功] {phys_detail}")
                     obs = next_obs; break
 
             if r_info.get("termination"):
@@ -636,6 +946,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
     swing_d = SwingDampingController(config)
     _cruise_nmpc_base = bool(config.get("cruise_rl", {}).get("use_nmpc_base", True))
     _cruise_max = int(config["cruise_rl"]["max_steps"])
+    _descent_max = int(config.get("descent_rl", {}).get("max_steps", 300))
+    _pipeline_max = int(config.get("pipeline", {}).get(
+        "max_steps", _cruise_max + _descent_max + 50))
 
     results = []
     ep_count = 0; attempt = 0
@@ -656,9 +969,10 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
         expert.reset(obs, current_q, env=env)
         if planned_path is not None:
             # [v13.0] 完整 path (lift+cruise+descent), cruise 段 NMPC 自处理 lift→cruise 边界
-            expert.set_path(planned_path)
+            cruise_path = _truncate_path_for_pipeline_cruise(planned_path, config)
+            expert.set_path(cruise_path)
             pl_pos_init = env.data.body('prefab').xpos.copy()
-            _advance_expert_to_nearest_wp(expert, planned_path, pl_pos_init)
+            _advance_expert_to_nearest_wp(expert, cruise_path, pl_pos_init)
         ee_ctrl.reset(env._get_ee_pos(), current_q)
         _pl_z   = float(env.data.body('prefab').xpos[2])
         _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
@@ -684,20 +998,26 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
 
         ep_reward = 0.0; ep_steps = 0
         final_success = False; term_reason = None
+        physical_finish_active = False
         stab_all = StabilityMetrics()
         phase_stab = {p: StabilityMetrics() for p in ["cruise", "descent"]}
 
-        for step in range(config["sim"]["max_steps"]):
+        for step in range(_pipeline_max):
             current_q = env.data.qpos[:7].copy().astype(np.float32)
             payload_pos = env.data.body('prefab').xpos.copy()
 
             state = get_phase_state(env, obs, start_xy=start_xy, config=config)
 
             # ── 阶段切换 [v13.0] 只有 cruise→descent ─────────────────────────
-            if (current_phase == "cruise" and
-                  check_phase_transition("cruise", state, config,
-                                         step=phase_steps["cruise"],
-                                         max_steps=_cruise_max, env=env)):
+            _handoff_ok = False
+            _handoff_mode = "wait"
+            _handoff_detail = ""
+            if current_phase == "cruise":
+                _handoff_ok, _handoff_mode, _handoff_detail = (
+                    _cruise_handoff_status(
+                        state, config, step=phase_steps["cruise"],
+                        max_steps=_cruise_max, env=env))
+            if current_phase == "cruise" and _handoff_ok:
                 phase_success["cruise"] = True
                 current_phase = "descent"
                 rstate = REWARD_STATES["descent"]()
@@ -706,13 +1026,36 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 rstate.current_xy_tol = float(config["insertion"].get(
                     "xy_tolerance_train_end", 0.005))
                 rstate.current_descent_level = 99; rstate.descent_n_levels = 1
+                expert.reset(obs, current_q, env=env)
+                if planned_path is not None:
+                    expert.set_path(planned_path)
+                    _advance_expert_to_nearest_wp(expert, planned_path, payload_pos)
+                expert.tracker._is_descending = True
                 ee_ctrl.reset(env._get_ee_pos(), current_q)
+                prev_tilt, prev_yaw = 0.0, 0.0
+                desc_agent = agents.get("descent")
+                if desc_agent is not None and hasattr(desc_agent, 'reset_history'):
+                    desc_agent.reset_history()
                 _dtf_sw = np.linalg.norm(state["pl_xy"] - env.target_pos)
-                print(f"    [pipeline s{step}] Cruise→Descent ✅  "
-                      f"dtf={_dtf_sw*1000:.1f}mm")
+                _target_pz = float(config["insertion"].get(
+                    "target_payload_z", 0.10))
+                _handoff_xy = float(config.get("phase_transition", {}).get(
+                    "cruise_to_descent_safe_xy_dist", 0.020))
+                _z_cruise = float(config.get("planning", {}).get(
+                    "payload_z_cruise", 0.25))
+                print(f"    [pipeline s{step}] NMPC->PID+RL "
+                      f"({_handoff_mode}) {_handoff_detail} "
+                      f"dtf={_dtf_sw*1000:.1f}mm "
+                      f"(<= {_handoff_xy*1000:.0f}) "
+                      f"z={state['payload_z']*1000:.1f}mm "
+                      f"(target {_z_cruise*1000:.0f}) "
+                      f"insert_z={_target_pz*1000:.1f}mm")
 
             # ── 动作计算 ──────────────────────────────────────────────────────
-            agent = agents.get(current_phase)
+            # Lift + translation are pure NMPC; residual RL is only used after
+            # the pipeline has handed off to descent.
+            agent = agents.get(current_phase) if current_phase == "descent" else None
+            action = None
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
@@ -804,17 +1147,107 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             phase_steps[current_phase] += 1
             ep_steps += 1
 
+            if current_phase == "cruise" and (r_success or r_done):
+                obs = next_obs
+                state_after = get_phase_state(
+                    env, obs, start_xy=start_xy, config=config)
+                can_handoff, handoff_mode, handoff_detail = (
+                    _cruise_handoff_status(
+                        state_after, config, step=phase_steps["cruise"],
+                        max_steps=_cruise_max, env=env))
+                if can_handoff:
+                    phase_success["cruise"] = True
+                    current_phase = "descent"
+                    rstate = REWARD_STATES["descent"]()
+                    if hasattr(rstate, 'total_steps_global'):
+                        rstate.total_steps_global = 10_000_000
+                    rstate.current_xy_tol = float(config["insertion"].get(
+                        "xy_tolerance_train_end", 0.005))
+                    rstate.current_descent_level = 99; rstate.descent_n_levels = 1
+
+                    current_q_after = env.data.qpos[:7].copy().astype(np.float32)
+                    payload_pos_after = env.data.body('prefab').xpos.copy()
+                    expert.reset(obs, current_q_after, env=env)
+                    if planned_path is not None:
+                        expert.set_path(planned_path)
+                        _advance_expert_to_nearest_wp(
+                            expert, planned_path, payload_pos_after)
+                    expert.tracker._is_descending = True
+                    ee_ctrl.reset(env._get_ee_pos(), current_q_after)
+                    prev_tilt, prev_yaw = 0.0, 0.0
+                    desc_agent = agents.get("descent")
+                    if desc_agent is not None and hasattr(desc_agent, 'reset_history'):
+                        desc_agent.reset_history()
+
+                    _dtf_sw = np.linalg.norm(state_after["pl_xy"] - env.target_pos)
+                    _target_pz = float(config["insertion"].get(
+                        "target_payload_z", 0.10))
+                    _handoff_xy = float(config.get("phase_transition", {}).get(
+                        "cruise_to_descent_safe_xy_dist", 0.020))
+                    _z_cruise = float(config.get("planning", {}).get(
+                        "payload_z_cruise", 0.25))
+                    print(f"    [pipeline s{step}] NMPC->PID+RL "
+                          f"({handoff_mode}) {handoff_detail} "
+                          f"dtf={_dtf_sw*1000:.1f}mm "
+                          f"(<= {_handoff_xy*1000:.0f}) "
+                          f"z={state_after['payload_z']*1000:.1f}mm "
+                          f"(target {_z_cruise*1000:.0f}) "
+                          f"insert_z={_target_pz*1000:.1f}mm")
+                    continue
+
+                # Single-phase cruise reward is intentionally loose. In the
+                # pipeline it is only a progress signal; keep NMPC cruising
+                # until the strict descent-init-matched handoff gate is met.
+                if r_done and not r_success:
+                    term_reason = (
+                        f"{r_info.get('termination', 'cruise_done')};"
+                        f"handoff={handoff_detail}")
+                    break
+                _dtf_wait = np.linalg.norm(state_after["pl_xy"] - env.target_pos)
+                if phase_steps["cruise"] >= _cruise_max:
+                    term_reason = (
+                        f"cruise_handoff_timeout:dtf={_dtf_wait*1000:.1f}mm,"
+                        f"z={state_after['payload_z']*1000:.1f}mm;"
+                        f"handoff={handoff_detail}")
+                    break
+                if env_info.get("nan_detected", False):
+                    term_reason = "nan_detected"
+                    break
+                term_reason = None
+                continue
+
             if r_success and current_phase == "descent":
                 phys_ok, phys_detail = check_physical_insertion(env, config)
                 mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
-                print(f"    [{mark_str}] {phys_detail}")
+                if phys_ok or not physical_finish_active:
+                    print(f"    [{mark_str}] {phys_detail}")
                 if phys_ok:
                     final_success = True
                     phase_success["descent"] = True
                     term_reason = r_info.get("termination", "insertion_success")
                     obs = next_obs; break
+                else:
+                    if not physical_finish_active:
+                        final_z = _activate_physical_insert_finish(expert, config)
+                        if final_z is not None:
+                            print(f"    [physical insert finish] PID target_z={final_z*1000:.1f}mm")
+                        physical_finish_active = True
+                    r_done = False
+                    r_success = False
+                    r_info = dict(r_info)
+                    r_info.pop("termination", None)
+                    term_reason = "reward_success_waiting_physical_insert"
 
-            descent_max_steps = int(config.get("descent_rl", {}).get("max_steps", 300))
+            if current_phase == "descent" and physical_finish_active and not final_success:
+                phys_ok, phys_detail = check_physical_insertion(env, config)
+                if phys_ok:
+                    final_success = True
+                    phase_success["descent"] = True
+                    term_reason = "physical_insertion_success"
+                    print(f"    [✅ 物理插入成功] {phys_detail}")
+                    obs = next_obs; break
+
+            descent_max_steps = _descent_max
             if current_phase == "descent" and phase_steps["descent"] >= descent_max_steps:
                 term_reason = f"descent_timeout_{descent_max_steps}"; break
 
@@ -1089,14 +1522,28 @@ def main():
     parser.add_argument("--seed", type=int, default=21)
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--gpu", type=int, default=0)
+    parser.add_argument("--insert-target-z", type=float, default=0.10,
+                        help="Descent only: trained alignment target payload COM z (m)")
+    parser.add_argument("--insert-depth-min", type=float, default=0.025,
+                        help="Descent only: minimum visible rebar insertion depth (m)")
+    parser.add_argument("--physical-insert-target-z", type=float, default=0.090,
+                        help="Descent only: PID finishing target z after alignment success (m)")
 
     # pipeline 模式 [v13.0] 只有 2 个 ckpt
     parser.add_argument("--cruise-ckpt",  type=str, default=None)
     parser.add_argument("--descent-ckpt", type=str, default=None)
-    parser.add_argument("--cruise-algo",  type=str, default="ppo",
+    parser.add_argument("--cruise-algo",  type=str, default="expert",
                         choices=["ppo", "sac", "expert"])
     parser.add_argument("--descent-algo", type=str, default="ppo",
                         choices=["ppo", "sac", "expert"])
+    parser.add_argument("--pipeline-insert-target-z", type=float, default=0.10,
+                        help="Pipeline only: trained alignment target payload COM z (m)")
+    parser.add_argument("--pipeline-insert-depth-min", type=float, default=0.025,
+                        help="Pipeline only: minimum visible rebar insertion depth (m)")
+    parser.add_argument("--pipeline-physical-insert-target-z", type=float, default=0.090,
+                        help="Pipeline only: PID finishing target z after alignment success (m)")
+    parser.add_argument("--pipeline-cruise-z", type=float, default=0.25,
+                        help="Pipeline only: NMPC terminal payload z above the rebars (m)")
     # 兼容: 旧 --lift-ckpt 参数仍允许, 但会被映射成 cruise-ckpt
     parser.add_argument("--lift-ckpt",    type=str, default=None,
                         help="[v13.0 兼容] 自动映射到 --cruise-ckpt")
@@ -1175,25 +1622,28 @@ def main():
 
     if args.phase == "pipeline":
         # [v13.0] 只 2 阶段: cruise (合并 lift+cruise) + descent
-        agents = {}
-        for p, p_algo, p_ckpt in [
-            ("cruise",  args.cruise_algo,  args.cruise_ckpt),
-            ("descent", args.descent_algo, args.descent_ckpt),
-        ]:
-            if p_algo == "expert":
-                agents[p] = None
-            else:
-                if p_ckpt is None:
-                    print(f"[Error] --{p}-ckpt 必须指定 ({p_algo} 模式)"); return
-                agents[p] = load_agent(p, p_algo, p_ckpt, config)
-                print(f"[{p.upper()}] 加载: {p_ckpt} ({p_algo})")
+        agents = {"cruise": None}
+        print("[CRUISE] pipeline uses pure NMPC/expert control "
+              "(lift + translation)")
+        if args.cruise_ckpt is not None or args.cruise_algo != "expert":
+            print("[CRUISE] --cruise-ckpt/--cruise-algo is ignored in pipeline")
+
+        if args.descent_algo == "expert":
+            agents["descent"] = None
+            print("[DESCENT] PID expert control (no residual RL)")
+        else:
+            if args.descent_ckpt is None:
+                print(f"[Error] --descent-ckpt 必须指定 ({args.descent_algo} 模式)"); return
+            agents["descent"] = load_agent("descent", args.descent_algo,
+                                           args.descent_ckpt, config)
+            print(f"[DESCENT] 加载: {args.descent_ckpt} ({args.descent_algo})")
         results = test_pipeline(
             env, agents, expert, ee_ctrl, config,
             n_episodes=args.episodes,
             wind_force=args.wind_force, wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
             force_noise=args.force_noise)
-        print_summary(results, f"Pipeline-{args.cruise_algo}_{args.descent_algo}")
+        print_summary(results, f"Pipeline-NMPC_{args.descent_algo}")
     else:
         eval_cur_init = None
         if args.phase == "descent":

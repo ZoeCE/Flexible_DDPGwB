@@ -680,9 +680,12 @@ class CableRobotEnvWithObstacles:
             path_3d.append([float(start_xy[0]),float(start_xy[1]),float(z)])
         for pt in path_2d[1:]:
             path_3d.append([float(pt[0]),float(pt[1]),float(z_cruise)])
-        for z in np.linspace(z_cruise,scene_plan_config["target_z_descent"],
-                             scene_plan_config["num_descent_steps"]+1)[1:]:
-            path_3d.append([float(target_xy[0]),float(target_xy[1]),float(z)])
+        for _ in range(int(scene_plan_config.get("num_cruise_target_hover_steps", 0))):
+            path_3d.append([float(target_xy[0]),float(target_xy[1]),float(z_cruise)])
+        if not bool(scene_plan_config.get("disable_descent_segment", False)):
+            for z in np.linspace(z_cruise,scene_plan_config["target_z_descent"],
+                                 scene_plan_config["num_descent_steps"]+1)[1:]:
+                path_3d.append([float(target_xy[0]),float(target_xy[1]),float(z)])
         path_3d=np.array(path_3d)
 
         xml=base_xml_content
@@ -1162,18 +1165,23 @@ class CableRobotEnvWithObstacles:
         on_target = (abs(payload_z - target_pz) < z_tol and
                      dtf < xy_tol and
                      tilt < tilt_tol and abs_yaw < yaw_tol)
+        floor_contact_success = (
+            bool(cfg_ins.get("success_by_floor_contact", False)) and
+            on_target and
+            self._check_prefab_floor_contact())
 
         if on_target:
             self._insertion_hold_counter += 1
         else:
             self._insertion_hold_counter = 0
 
-        if self._insertion_hold_counter >= hold_steps:
+        if floor_contact_success or self._insertion_hold_counter >= hold_steps:
             reward += cfg_rwd.get("success_bonus", 50.0)
             success = True; done = True
+            suffix = ",floor_contact=1" if floor_contact_success else ""
             self._termination_reason = (
                 f"success:z={payload_z*1000:.0f}mm,dtf={dtf*1000:.1f}mm,"
-                f"tilt={tilt:.3f},yaw={abs_yaw:.3f}")
+                f"tilt={tilt:.3f},yaw={abs_yaw:.3f}{suffix}")
             return reward, done, success, is_collision
 
         max_steps = self.config["sim"]["max_steps"]
