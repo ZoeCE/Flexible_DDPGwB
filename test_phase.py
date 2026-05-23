@@ -30,6 +30,9 @@ import os
 import sys
 import copy
 import argparse
+import csv
+import json
+import time
 import numpy as np
 import torch
 from collections import Counter
@@ -103,11 +106,14 @@ def apply_perturbations(env, wind_force, wind_dir, force_noise):
         _wd = float(wind_dir) if wind_dir is not None else float(np.random.uniform(0, 2*np.pi))
         env.set_wind_force(float(wind_force), _wd)
     else:
-        # 显式关闭风力
-        if hasattr(env, '_test_wind_mode'):
-            env._test_wind_mode = False
-        if hasattr(env, 'data') and hasattr(env, 'prefab_body_id'):
-            env.data.xfrc_applied[env.prefab_body_id, :3] = [0.0, 0.0, 0.0]
+        if hasattr(env, 'clear_wind_force'):
+            env.clear_wind_force()
+        else:
+            # 显式关闭风力
+            if hasattr(env, '_test_wind_mode'):
+                env._test_wind_mode = False
+            if hasattr(env, 'data') and hasattr(env, 'prefab_body_id'):
+                env.data.xfrc_applied[env.prefab_body_id, :3] = [0.0, 0.0, 0.0]
 
 
 def _add_obs_noise(norm_obs, sigma):
@@ -118,6 +124,71 @@ def _add_obs_noise(norm_obs, sigma):
 def _add_act_noise(dq, sigma):
     if sigma <= 0: return dq
     return dq + np.random.normal(0, sigma, dq.shape).astype(dq.dtype)
+
+
+def get_descent_eval_init(config, level="max"):
+    levels = list(config.get("curriculum", {}).get("descent_levels", []))
+    if not levels:
+        dcfg = config.get("descent_rl", {})
+        return {
+            "xy_range": float(dcfg.get("init_xy_range", 0.030)),
+            "vel_range": float(dcfg.get("init_vel_range", 0.030)),
+            "tilt_range": float(dcfg.get("init_tilt_range", 0.010)),
+            "xy_tol": float(config.get("insertion", {}).get(
+                "xy_tolerance_train_end", 0.005)),
+            "level_idx": 0,
+            "wind_max": 0.0,
+        }
+    if level == "max":
+        idx = len(levels) - 1
+    else:
+        idx = int(level)
+        idx = max(0, min(idx, len(levels) - 1))
+    lv = levels[idx]
+    return {
+        "xy_range": float(lv.get("init_xy", 0.030)),
+        "vel_range": float(lv.get("init_vel", 0.030)),
+        "tilt_range": float(lv.get("init_tilt", 0.010)),
+        "xy_tol": float(lv.get("xy_tol", config.get("insertion", {}).get(
+            "xy_tolerance_train_end", 0.005))),
+        "level_idx": idx,
+        "wind_max": float(lv.get("wind_max", 0.0)),
+    }
+
+
+def print_curriculum_hardest_task(config):
+    task = get_descent_eval_init(config, "max")
+    ins = config["insertion"]
+    print("\n[Descent curriculum hardest task]")
+    print(f"  wind_max: {task['wind_max']:.3f} N, sampled uniformly per episode")
+    print(f"  init_xy: +/-{task['xy_range']*1000:.1f} mm")
+    print(f"  init_payload_xy_vel: +/-{task['vel_range']:.3f} m/s")
+    print(f"  init_tilt_noise: +/-{task['tilt_range']:.3f} rad")
+    print(f"  success_xy_tol: {task['xy_tol']*1000:.1f} mm")
+    print(f"  target_payload_z: {float(ins.get('target_payload_z', 0.10))*1000:.0f} mm")
+    print(f"  z_tol/tilt_tol/yaw_tol: "
+          f"{float(ins.get('success_z_tolerance', 0.020))*1000:.0f} mm / "
+          f"{float(ins.get('tilt_tolerance', 0.05)):.3f} rad / "
+          f"{float(ins.get('yaw_tolerance', 0.08)):.3f} rad")
+
+
+def print_descent_eval_settings(config, eval_init):
+    dcfg = config.get("descent_rl", {})
+    ecfg = config.get("ee_control", {})
+    print("\n[Descent train/test control settings]")
+    print(f"  pid_residual_mode: {bool(dcfg.get('pid_residual_mode', True))}")
+    print(f"  residual_dq_scale: {float(dcfg.get('residual_dq_scale', 0.0)):.3f}")
+    print(f"  residual_acc_max_xy/z: "
+          f"{float(dcfg.get('residual_acc_max_xy', 0.0)):.3f} / "
+          f"{float(dcfg.get('residual_acc_max_z', 0.0)):.3f}")
+    print(f"  base vel_max_z_descent: "
+          f"{float(ecfg.get('vel_max_z_descent', 0.03)):.3f} m/s")
+    print(f"  max_steps: {int(dcfg.get('max_steps', 300))}")
+    print(f"  eval init: level={int(eval_init['level_idx'])}, "
+          f"xy=+/-{float(eval_init['xy_range'])*1000:.1f}mm, "
+          f"vel=+/-{float(eval_init['vel_range']):.3f}m/s, "
+          f"tilt=+/-{float(eval_init['tilt_range']):.3f}rad, "
+          f"xy_tol={float(eval_init['xy_tol'])*1000:.1f}mm")
 
 
 # ==============================================================================
@@ -323,7 +394,10 @@ def _truncate_path_for_lift(planned_path, config):
 def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                       n_episodes=20, deterministic=True,
                       wind_force=0.0, wind_dir=None,
-                      obs_noise=0.0, act_noise=0.0, force_noise=0.0):
+                      obs_noise=0.0, act_noise=0.0, force_noise=0.0,
+                      eval_cur_init=None, wind_force_sampler=None,
+                      wind_dir_sampler=None, reset_seed_sampler=None,
+                      verbose=True, progress_every=0, progress_prefix=""):
     """测试单个阶段, 支持噪声/风力扰动。"""
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
@@ -339,12 +413,25 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
 
     while ep_count < n_episodes and attempt < n_episodes * 5:
         attempt += 1
-        obs, planned_path = reset_for_phase(env, phase, config)
+        reset_kw = {}
+        if phase == "descent" and eval_cur_init is not None:
+            reset_kw = {
+                "override_init_xy_range": eval_cur_init["xy_range"],
+                "override_init_vel_range": eval_cur_init["vel_range"],
+                "override_init_tilt_range": eval_cur_init["tilt_range"],
+            }
+        if reset_seed_sampler is not None:
+            reset_kw["rng_seed"] = int(reset_seed_sampler(ep_count))
+        obs, planned_path = reset_for_phase(env, phase, config, **reset_kw)
         if obs is None:
             continue
 
         # ── 施加扰动 ──────────────────────────────────────────────────────────
-        apply_perturbations(env, wind_force, wind_dir, force_noise)
+        ep_wind_force = (float(wind_force_sampler(ep_count))
+                         if wind_force_sampler is not None else float(wind_force))
+        ep_wind_dir = (float(wind_dir_sampler(ep_count))
+                       if wind_dir_sampler is not None else wind_dir)
+        apply_perturbations(env, ep_wind_force, ep_wind_dir, force_noise)
 
         current_q = env.data.qpos[:7].copy()
         expert.reset(obs, current_q, env=env)
@@ -375,17 +462,22 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             rstate.start_xy = env.data.body('prefab').xpos[:2].copy()
         if phase == "descent":
             # 测试用严格判定: xy_tol = config 中的 train_end 值
-            rstate.current_xy_tol = float(config["insertion"].get(
-                "xy_tolerance_train_end", 0.005))
-            rstate.current_descent_level = 99   # 不限速
-            rstate.descent_n_levels = 1
+            if eval_cur_init is not None:
+                rstate.current_xy_tol = float(eval_cur_init["xy_tol"])
+                rstate.current_descent_level = int(eval_cur_init["level_idx"])
+                rstate.descent_n_levels = max(1, len(config.get(
+                    "curriculum", {}).get("descent_levels", [])))
+            else:
+                rstate.current_xy_tol = float(config["insertion"].get(
+                    "xy_tolerance_train_end", 0.005))
+                rstate.current_descent_level = 99
+                rstate.descent_n_levels = 1
 
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         term_reason = None
         stab_metrics = StabilityMetrics()
 
-        max_steps = (200 if phase == "descent"
-                     else int(config[f"{phase}_rl"]["max_steps"]))
+        max_steps = int(config[f"{phase}_rl"]["max_steps"])
 
         for step in range(max_steps):
             current_q = env.data.qpos[:7].copy().astype(np.float32)
@@ -486,7 +578,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     phys_ok, phys_detail = check_physical_insertion(env, config)
                     ep_success = phys_ok
                     mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
-                    print(f"    [{mark_str}] {phys_detail}")
+                    if verbose:
+                        print(f"    [{mark_str}] {phys_detail}")
                 else:
                     ep_success = True
                 term_reason = r_info.get("termination", "success")
@@ -506,12 +599,22 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             "success":     ep_success,
             "termination": term_reason or "timeout",
             "stability":   stab_metrics.summary(),
-            "wind_force":  wind_force,
+            "wind_force":  ep_wind_force,
+            "wind_dir":    ep_wind_dir,
         })
-        mark = "✅" if ep_success else "❌"
-        term_short = (term_reason or "timeout").split(":")[0]
-        print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | Steps:{ep_steps:3d} | "
-              f"{term_short} | {stab_metrics.print_line()}")
+        if verbose:
+            mark = "✅" if ep_success else "❌"
+            term_short = (term_reason or "timeout").split(":")[0]
+            print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
+                  f"Steps:{ep_steps:3d} | W:{ep_wind_force:.3f}N | "
+                  f"{term_short} | {stab_metrics.print_line()}")
+        elif progress_every and (ep_count % progress_every == 0 or
+                                 ep_count == n_episodes):
+            sr_now = float(np.mean([r["success"] for r in results])) if results else 0.0
+            avg_steps_now = float(np.mean([r["steps"] for r in results])) if results else 0.0
+            print(f"{progress_prefix} progress {ep_count}/{n_episodes} "
+                  f"SR={sr_now*100:.1f}% avg_steps={avg_steps_now:.1f}",
+                  flush=True)
 
     return results
 
@@ -802,6 +905,172 @@ def print_summary(results, mode_name):
     print()
 
 
+def summarize_results(results):
+    if not results:
+        return {}
+    terms = Counter((r["termination"] or "unknown").split(":")[0]
+                    for r in results)
+    summary = {
+        "episodes": len(results),
+        "success_rate": float(np.mean([r["success"] for r in results])),
+        "avg_reward": float(np.mean([r["reward"] for r in results])),
+        "avg_steps": float(np.mean([r["steps"] for r in results])),
+        "termination_counts": dict(terms),
+    }
+    stab_keys = [
+        "avg_ke_mJ", "p95_ke_mJ", "max_ke_mJ", "rms_ke_mJ",
+        "integral_ke_mJs", "avg_angle", "p95_angle", "max_angle",
+        "rms_angle", "avg_acc", "max_acc", "pl_vel_peak", "pl_vel_rms",
+        "cable_ke_peak", "cable_ke_avg", "cable_ke_integral",
+        "rl_action_mag_mean", "rl_action_mag_peak",
+    ]
+    stabs = [r.get("stability") or {} for r in results]
+    for key in stab_keys:
+        vals = [float(s[key]) for s in stabs if key in s]
+        if vals:
+            summary[key] = float(np.mean(vals))
+    return summary
+
+
+def parse_wind_bins(spec):
+    bins = []
+    for raw in str(spec).split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "-" not in raw:
+            val = float(raw)
+            bins.append((val, val))
+        else:
+            lo, hi = raw.split("-", 1)
+            bins.append((float(lo), float(hi)))
+    if not bins:
+        raise ValueError("No valid wind bins provided")
+    return bins
+
+
+def run_wind_benchmark(args, config):
+    if args.phase != "descent":
+        raise ValueError("--compare-wind-bins currently targets --phase descent")
+    if args.ckpt is None:
+        raise ValueError("--ckpt is required for Residual RL benchmark")
+    if args.algo == "expert":
+        raise ValueError("--compare-wind-bins requires --algo ppo or --algo sac")
+
+    config["sim"]["render"] = False
+    eval_init = get_descent_eval_init(config, args.eval_curriculum_level)
+    bins = parse_wind_bins(args.wind_bins)
+    episodes_per_bin = int(args.episodes_per_bin)
+    if episodes_per_bin <= 0:
+        raise ValueError("--episodes-per-bin must be positive")
+    out_path = args.benchmark_out or os.path.join(
+        "test_results",
+        f"descent_wind_benchmark_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    print_curriculum_hardest_task(config)
+    print_descent_eval_settings(config, eval_init)
+    print(f"\n[Benchmark] wind bins={bins}, episodes_per_bin={episodes_per_bin}")
+    print(f"[Benchmark] output={out_path}\n", flush=True)
+
+    rows = []
+    for bin_id, (lo, hi) in enumerate(bins):
+        case_seed = int(args.seed) + 1009 * bin_id
+        rng = np.random.default_rng(case_seed)
+        if hi <= lo:
+            wind_forces = np.full(episodes_per_bin, float(lo), dtype=np.float64)
+        else:
+            wind_forces = rng.uniform(float(lo), float(hi), episodes_per_bin)
+        wind_dirs = rng.uniform(0.0, 2.0 * np.pi, episodes_per_bin)
+        reset_seeds = rng.integers(0, np.iinfo(np.int32).max,
+                                   episodes_per_bin, dtype=np.int64)
+
+        for mode in ("expert", "residual_rl"):
+            np.random.seed(case_seed)
+            try:
+                torch.manual_seed(case_seed)
+            except Exception:
+                pass
+            t_mode = time.perf_counter()
+            print(f"[Benchmark] preparing bin {bin_id+1}/{len(bins)} "
+                  f"{lo:.3f}-{hi:.3f}N | {mode} ...", flush=True)
+            t0 = time.perf_counter()
+            env = CableRobotEnvWithObstacles(config=config)
+            try:
+                print(f"[Benchmark] env ready in {time.perf_counter()-t0:.1f}s",
+                      flush=True)
+                if hasattr(env, 'set_curriculum_n_obstacles'):
+                    env.set_curriculum_n_obstacles(config["scene"]["n_obstacles"])
+                expert = JointSpaceExpert(config, env.ik_solver)
+                ee_ctrl = EEAccController(config, env.ik_solver)
+                print("[Benchmark] controllers ready", flush=True)
+                agent = None
+                if mode == "residual_rl":
+                    t0 = time.perf_counter()
+                    agent = load_agent("descent", args.algo, args.ckpt, config)
+                    print(f"[Benchmark] ckpt loaded in {time.perf_counter()-t0:.1f}s",
+                          flush=True)
+
+                print(f"[Benchmark] running bin {bin_id+1}/{len(bins)} "
+                      f"{lo:.3f}-{hi:.3f}N | {mode} ...", flush=True)
+                prog_every = int(getattr(args, "benchmark_progress_every", 32))
+                if prog_every <= 0:
+                    prog_every = 0
+                results = test_single_phase(
+                    env, agent, expert, ee_ctrl, "descent", config,
+                    n_episodes=episodes_per_bin,
+                    wind_force_sampler=lambda k, wf=wind_forces: wf[k],
+                    wind_dir_sampler=lambda k, wd=wind_dirs: wd[k],
+                    reset_seed_sampler=lambda k, rs=reset_seeds: rs[k],
+                    obs_noise=args.obs_noise, act_noise=args.act_noise,
+                    force_noise=args.force_noise,
+                    eval_cur_init=eval_init,
+                    verbose=False,
+                    progress_every=prog_every,
+                    progress_prefix=(f"  bin {bin_id+1}/{len(bins)} {mode}"))
+            finally:
+                env.close()
+
+            summary = summarize_results(results)
+            row = {
+                "bin_id": bin_id,
+                "wind_low": float(lo),
+                "wind_high": float(hi),
+                "mode": mode,
+                **summary,
+                "termination_counts": json.dumps(
+                    summary.get("termination_counts", {}),
+                    ensure_ascii=False, sort_keys=True),
+            }
+            rows.append(row)
+            print(f"  -> SR={summary.get('success_rate', 0)*100:.1f}% "
+                  f"steps={summary.get('avg_steps', 0):.1f} "
+                  f"KE={summary.get('avg_ke_mJ', 0):.1f}mJ "
+                  f"p95KE={summary.get('p95_ke_mJ', 0):.1f}mJ "
+                  f"elapsed={time.perf_counter()-t_mode:.1f}s",
+                  flush=True)
+
+    fieldnames = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print("\n[Benchmark Summary]")
+    for row in rows:
+        print(f"  bin {row['bin_id']} {row['wind_low']:.3f}-{row['wind_high']:.3f}N "
+              f"{row['mode']:>11s}: SR={row['success_rate']*100:5.1f}% "
+              f"steps={row['avg_steps']:6.1f} "
+              f"avgKE={row.get('avg_ke_mJ', 0):6.1f}mJ "
+              f"p95KE={row.get('p95_ke_mJ', 0):6.1f}mJ "
+              f"plV_rms={row.get('pl_vel_rms', 0):.3f}")
+    print(f"\nSaved benchmark CSV: {out_path}")
+
+
 # ==============================================================================
 # 入口
 # ==============================================================================
@@ -846,8 +1115,28 @@ def main():
                         help="执行噪声标准差 (加到 delta_q, rad/step)")
     parser.add_argument("--force-noise", type=float, default=0.0,
                         help="环境噪声力标准差 (N, 加在 payload 上)")
+    parser.add_argument("--eval-curriculum-level", type=str, default="max",
+                        help="descent eval init level: 'max' or a numeric curriculum level")
+    parser.add_argument("--compare-wind-bins", action="store_true",
+                        help="run expert vs Residual RL descent benchmark over wind bins")
+    parser.add_argument("--episodes-per-bin", type=int, default=512,
+                        help="episodes per wind bin for --compare-wind-bins")
+    parser.add_argument("--wind-bins", type=str,
+                        default="0.00-0.02,0.02-0.05,0.05-0.10,0.10-0.20,0.20-0.35",
+                        help="comma separated wind bins in N, e.g. 0-0.02,0.02-0.05")
+    parser.add_argument("--benchmark-out", type=str, default=None,
+                        help="CSV output path for --compare-wind-bins")
+    parser.add_argument("--benchmark-progress-every", type=int, default=32,
+                        help="print benchmark progress every N episodes; 0 disables it")
+    parser.add_argument("--quiet", action="store_true",
+                        help="suppress per-episode logs in single-phase tests")
 
     args = parser.parse_args()
+    np.random.seed(int(args.seed))
+    try:
+        torch.manual_seed(int(args.seed))
+    except Exception:
+        pass
 
     # [v13.0] lift 重定向到 cruise
     if args.phase == "lift":
@@ -862,6 +1151,10 @@ def main():
 
     config = build_config(args)
     config["scene"]["seed"] = args.seed
+
+    if args.compare_wind_bins:
+        run_wind_benchmark(args, config)
+        return
 
     if args.obstacles is not None:
         test_n_obs = min(int(args.obstacles), config["scene"]["n_obstacles"])
@@ -902,6 +1195,13 @@ def main():
             force_noise=args.force_noise)
         print_summary(results, f"Pipeline-{args.cruise_algo}_{args.descent_algo}")
     else:
+        eval_cur_init = None
+        if args.phase == "descent":
+            eval_cur_init = get_descent_eval_init(
+                config, args.eval_curriculum_level)
+            print_curriculum_hardest_task(config)
+            print_descent_eval_settings(config, eval_cur_init)
+
         if args.algo == "expert":
             agent = None
         else:
@@ -914,7 +1214,9 @@ def main():
             n_episodes=args.episodes,
             wind_force=args.wind_force, wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
-            force_noise=args.force_noise)
+            force_noise=args.force_noise,
+            eval_cur_init=eval_cur_init,
+            verbose=not args.quiet)
         print_summary(results, f"{args.phase}-{args.algo}")
 
     env.close()

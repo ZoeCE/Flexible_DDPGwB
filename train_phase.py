@@ -390,7 +390,8 @@ def _sync_env_internal_state(env):
 def reset_for_phase(env, phase, config,
                     override_init_xy_range=None,
                     override_init_vel_range=None,
-                    override_init_tilt_range=None):
+                    override_init_tilt_range=None,
+                    rng_seed=None):
     """统一三阶段物理初始化 (移除 cruise_dist_curriculum, ORCA)。"""
     max_xml_retries = 5
     obs = None; planned_path = None
@@ -416,7 +417,7 @@ def reset_for_phase(env, phase, config,
         return None, None
 
     phase_cfg = config.get(f"{phase}_rl", {})
-    rng = np.random.default_rng()
+    rng = np.random.default_rng(rng_seed)
 
     if phase == "lift":
         _xy_range  = override_init_xy_range if override_init_xy_range is not None \

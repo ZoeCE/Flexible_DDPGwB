@@ -189,7 +189,7 @@ python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000
 
 # Step 3: 测试单段 SR + 细粒度指标
 python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/best.pt --episodes 30
-python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/best.pt --episodes 30
+python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_latest.pt --episodes 30 --render
 
 # Step 4: 测试 pipeline (cruise → descent)
 python test_phase.py --phase pipeline \
