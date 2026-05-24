@@ -186,14 +186,14 @@ PPO 为主算法. SAC 仍可用 (`--algo sac`).
 
 ```bash
 # Step 1: 训练 cruise (合并的抬升+平移段)
-python train_phase.py --phase cruise --algo ppo --n-envs 8 --timesteps 2500000 --log-dir saves/cruise_ppo_next
+python train_phase.py --phase cruise --algo ppo --n-envs 8 --timesteps 2500000 --log-dir saves/cruise_ppo
 
 # Step 2: 训练 descent
 # 注意: 不要写入 saves/descent_ppo, 该目录保留当前成功 ckpt.
 python train_phase.py --phase descent --algo ppo --n-envs 8 --timesteps 3000000 --log-dir saves/descent_ppo_next
 
 # Step 3: 测试单段 SR + 细粒度指标
-python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo_next/ckpt_best.pt --episodes 30
+python test_phase.py --phase cruise  --algo ppo --ckpt saves/cruise_ppo/ckpt_best.pt --episodes 30
 python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo_next/ckpt_latest.pt --episodes 30 --render
 
 # Step 4: 测试 pipeline (cruise → descent)

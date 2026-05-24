@@ -212,8 +212,26 @@ def build_lift_obs(env_obs, env, start_xy, prev_tilt=0.0, prev_yaw=0.0,
     return core_obs, cable_raw, wind_obs, tilt, yaw
 
 
+def _normalize_nmpc_action(base_action, env):
+    """Normalize a 4D NMPC EE acceleration action for residual observations."""
+    if base_action is None:
+        return np.zeros(4, np.float32)
+    base = np.asarray(base_action, dtype=np.float32).reshape(-1)
+    if base.size < 4:
+        base = np.pad(base, (0, 4 - base.size))
+    ctrl_cfg = env.config.get("controller", {})
+    scale = np.array([
+        float(ctrl_cfg.get("u_max_xy", 0.8)),
+        float(ctrl_cfg.get("u_max_xy", 0.8)),
+        float(ctrl_cfg.get("u_max_z", 2.0)),
+        float(ctrl_cfg.get("u_max_yaw", 2.0)),
+    ], dtype=np.float32)
+    scale = np.maximum(scale, 1e-6)
+    return np.clip(base[:4] / scale, -1.5, 1.5).astype(np.float32)
+
+
 def build_cruise_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0,
-                     wind_obs=None):
+                     wind_obs=None, base_action=None):
     """[v14.0] 返回 (core_obs, cable_raw, wind_obs, tilt, yaw)."""
     obs = env_obs; dt = getattr(env, 'dt', 0.1); n_obs_max = env.n_obstacles
     ee_xy = np.array([obs[OBS_EE_X], obs[OBS_EE_Y]])
@@ -235,10 +253,14 @@ def build_cruise_obs(env_obs, env, target_xy, prev_tilt=0.0, prev_yaw=0.0,
         else np.zeros(OBS_CABLE_TOTAL, np.float32)
     if wind_obs is None:
         wind_obs = np.zeros(3, np.float32)
+    base_nmpc_norm = _normalize_nmpc_action(base_action, env)
+    include_base = bool(env.config.get("cruise_rl", {}).get(
+        "include_nmpc_action_obs", True))
     core_obs = np.concatenate([
         ee_xy, ee_vxy, pl_xy, pl_vxy, offset_xy,
         [tilt, yaw, tilt_rate, yaw_rate], target_xy, [dist],
         obs_data, joint_q, [pl_z, pl_vz, ee_z, z_error, z_dev_norm],
+        base_nmpc_norm if include_base else np.zeros(0, np.float32),
     ]).astype(np.float32)
     return core_obs, cable_raw, wind_obs, tilt, yaw
 
@@ -796,8 +818,14 @@ class PPOPhaseAgent:
         ee_cfg = config.get("ee_control", {})
         cr_cfg = config.get("cruise_rl", {})
         _use_nmpc_base = (phase_name == "cruise" and bool(cr_cfg.get("use_nmpc_base", False)))
+        _nmpc_residual = (phase_name == "cruise" and
+                          bool(cr_cfg.get("nmpc_residual_mode", _use_nmpc_base)))
 
-        if self.action_dim == 3:
+        if self.action_dim == 3 and _nmpc_residual:
+            axy = float(cr_cfg.get("residual_acc_max_xy_rl", 0.08))
+            az = float(cr_cfg.get("residual_acc_max_z_rl", 0.10))
+            action_scale = [axy, axy, az]
+        elif self.action_dim == 3:
             axy = float(phase_cfg.get("residual_acc_max_xy",
                         phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 0.5))))
             az  = float(phase_cfg.get("residual_acc_max_z",
@@ -1344,8 +1372,14 @@ class SACPhaseAgent:
         ee_cfg = config.get("ee_control", {})
         cr_cfg = config.get("cruise_rl", {})
         _use_nmpc_base = (phase_name == "cruise" and bool(cr_cfg.get("use_nmpc_base", False)))
+        _nmpc_residual = (phase_name == "cruise" and
+                          bool(cr_cfg.get("nmpc_residual_mode", _use_nmpc_base)))
 
-        if self.action_dim == 3:
+        if self.action_dim == 3 and _nmpc_residual:
+            axy = float(cr_cfg.get("residual_acc_max_xy_rl", 0.08))
+            az = float(cr_cfg.get("residual_acc_max_z_rl", 0.10))
+            action_scale = [axy, axy, az]
+        elif self.action_dim == 3:
             axy = float(phase_cfg.get("residual_acc_max_xy",
                         phase_cfg.get("acc_max_xy", ee_cfg.get("acc_max_xy", 2.0))))
             az  = float(phase_cfg.get("residual_acc_max_z",

@@ -68,6 +68,8 @@ def build_config(args):
     config = copy.deepcopy(DEFAULT_CONFIG)
     config["sim"]["render"] = args.render
     config["train"]["gpu_id"] = args.gpu
+    config.setdefault("test", {})["wait_for_space_start"] = bool(
+        getattr(args, "wait_for_space", False))
     # Keep the trained descent z-gating in evaluation. Strict controller defaults
     # can lock z at high payload height when the learned residual keeps XY just
     # outside the old 15mm hard gate.
@@ -134,37 +136,11 @@ def build_config(args):
         config["phase_transition"]["cruise_to_descent_safe_swing_vel_max"] = 0.30
         config["phase_transition"]["cruise_to_descent_safe_payload_vel_max"] = 0.25
 
-        # The default 8cm waypoint z threshold can advance from lift to cruise
-        # while the payload is still around 0.18-0.20m. Tighten it for pipeline
-        # so NMPC actually reaches cruise height before horizontal transfer.
-        config["controller"]["arrival_threshold_z"] = min(
-            float(config["controller"].get("arrival_threshold_z", 0.08)),
-            0.015)
-        config["controller"]["arrival_threshold_xy"] = min(
-            float(config["controller"].get("arrival_threshold_xy", 0.08)),
-            descent_handoff_xy)
-        config["controller"]["cruise_ref_dist"] = min(
-            float(config["controller"].get("cruise_ref_dist", 0.10)),
-            0.04)
-        config["controller"]["u_max_xy"] = min(
-            float(config["controller"].get("u_max_xy", 0.8)), 0.45)
-        config["controller"]["u_max_z"] = min(
-            float(config["controller"].get("u_max_z", 2.0)), 1.2)
-        config["controller"]["terminal_hover_radius"] = 0.08
-        config["controller"]["terminal_hover_z_tol"] = 0.04
-        config["controller"]["terminal_hover_acc_max"] = 0.10
-        config["controller"]["terminal_hover_kp"] = 0.45
-        config["controller"]["terminal_hover_kd_payload"] = 1.6
-        config["controller"]["terminal_hover_kd_ee"] = 0.5
-        config["controller"]["terminal_hover_swing_kp"] = 0.15
-        config["controller"]["action_smoothing_alpha"] = 0.35
-        config["ee_control"]["vel_max_xy"] = min(
-            float(config["ee_control"].get("vel_max_xy", 0.15)), 0.10)
-        config["ee_control"]["vel_max_z"] = min(
-            float(config["ee_control"].get("vel_max_z", 0.20)), 0.12)
-        config["planning"]["num_cruise_target_hover_steps"] = max(
-            int(config["planning"].get("num_cruise_target_hover_steps", 0)),
-            20)
+        # Keep pipeline cruise NMPC identical to standalone
+        # `--phase cruise --algo expert`. Only insertion/descent targets and
+        # handoff gates are adjusted above; controller/ee_control/planning
+        # tracking parameters must not be overridden here, otherwise the same
+        # expert enters a different control regime in pipeline tests.
 
         cruise_steps = int(config.get("cruise_rl", {}).get("max_steps", 700))
         descent_steps = int(config.get("descent_rl", {}).get("max_steps", 300))
@@ -173,6 +149,63 @@ def build_config(args):
         config["sim"]["max_steps"] = max(int(config["sim"]["max_steps"]),
                                           pipeline_steps)
     return config
+
+
+def install_space_start_callback(env, enabled):
+    """Install a passive-viewer space-key callback for render-start gating."""
+    if not enabled:
+        return
+    env._wait_start_key_pressed = False
+    prev_cb = getattr(env, "_key_callback", None)
+
+    def _key_callback(keycode):
+        if prev_cb is not None:
+            try:
+                prev_cb(keycode)
+            except Exception:
+                pass
+        if int(keycode) == 32:  # GLFW KEY_SPACE
+            env._wait_start_key_pressed = True
+
+    env._key_callback = _key_callback
+
+
+def wait_for_space_start(env, config, label="episode"):
+    """Pause rendered tests after initialization until Space is pressed."""
+    if not bool(config.get("test", {}).get("wait_for_space_start", False)):
+        return
+    if not getattr(env, "render_mode", False) or getattr(env, "viewer", None) is None:
+        return
+
+    env._wait_start_key_pressed = False
+    try:
+        env.viewer.sync()
+    except Exception:
+        return
+
+    print("\n" + "=" * 60)
+    print(f"  {label} 初始化完成，点击 MuJoCo 渲染窗口后按 [Space] 开始执行")
+    print("=" * 60)
+
+    while not bool(getattr(env, "_wait_start_key_pressed", False)):
+        viewer = getattr(env, "viewer", None)
+        if viewer is None:
+            break
+        is_running = getattr(viewer, "is_running", None)
+        if callable(is_running):
+            try:
+                if not is_running():
+                    break
+            except Exception:
+                pass
+        try:
+            viewer.sync()
+        except Exception:
+            break
+        time.sleep(0.03)
+
+    env._wait_start_key_pressed = False
+    print("  开始执行\n")
 
 
 def load_agent(phase, algo, ckpt_path, config):
@@ -690,12 +723,16 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
     """测试单个阶段, 支持噪声/风力扰动。"""
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
-                             _apply_descent_pid_residual)
+                             _apply_descent_pid_residual,
+                             clip_cruise_residual, get_last_nmpc_action)
 
     z_pid   = CruiseZYawPID(config)          if phase == "cruise" else None
     swing_d = SwingDampingController(config) if phase == "cruise" else None
     _cruise_nmpc_base = (phase == "cruise" and
         bool(config.get("cruise_rl", {}).get("use_nmpc_base", True)))
+    _cruise_nmpc_residual = (phase == "cruise" and
+        bool(config.get("cruise_rl", {}).get(
+            "nmpc_residual_mode", _cruise_nmpc_base)))
 
     results = []
     ep_count = 0; attempt = 0
@@ -740,6 +777,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             z_pid.reset(_pl_z, _pl_yaw)
         if agent is not None and hasattr(agent, 'reset_history'):
             agent.reset_history()
+        wait_for_space_start(env, config, label=f"{phase} Ep {ep_count + 1}")
 
         start_xy = env.default_start_xy.copy()
         target_xy = env.target_pos.copy()
@@ -772,6 +810,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         for step in range(max_steps):
             current_q = env.data.qpos[:7].copy().astype(np.float32)
             payload_pos = env.data.body('prefab').xpos.copy()
+            _cruise_reward_base = None
+            _cruise_reward_action = None
 
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
@@ -786,6 +826,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                             obs, current_q.astype(np.float64))
                     except Exception:
                         base_dq_for_obs = np.zeros(7, dtype=np.float32)
+                elif phase == "cruise" and _cruise_nmpc_residual:
+                    base_dq_for_obs = get_last_nmpc_action(expert)
                 core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
                     phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
                     wind_obs=_wobs, base_action=base_dq_for_obs)
@@ -800,7 +842,14 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     action = result
 
                 real_ee = env._get_ee_pos()
-                if phase == "cruise" and z_pid is not None:
+                if phase == "cruise" and _cruise_nmpc_residual:
+                    _res3 = clip_cruise_residual(action, config)
+                    delta_q = expert.compute_delta_q_target(
+                        obs, current_q.astype(np.float64),
+                        residual_acc=_res3)
+                    _cruise_reward_base = get_last_nmpc_action(expert)
+                    _cruise_reward_action = _res3
+                elif phase == "cruise" and z_pid is not None:
                     _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
                     _pl_vz = float(env.data.qvel[_dof_idx + 2])
                     _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
@@ -824,6 +873,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                             _ba = np.array([float(_a4[0]), float(_a4[1])], np.float32)
                         except Exception:
                             _ba = np.zeros(2, np.float32)
+                        _cruise_reward_base = np.array(
+                            [_ba[0], _ba[1], 0.0, 0.0], dtype=np.float32)
                         _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
                         _cm = _ba + np.clip(action[:2], -_rm, _rm)
                         _am = float(config["cruise_rl"].get("residual_acc_max_xy", 0.80))
@@ -857,9 +908,18 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             stab_metrics.update_step(next_obs, config, env=env,
                                      rl_action=(action if agent is not None else None))
 
-            reward, r_done, r_success, r_info = REWARD_FNS[phase](
-                env, next_obs, config, rstate,
-                rl_action=(action if agent is not None else None))
+            setattr(rstate, "phase_step", int(ep_steps))
+            if phase == "cruise":
+                reward, r_done, r_success, r_info = compute_cruise_reward(
+                    env, next_obs, config, rstate,
+                    rl_action=(_cruise_reward_action
+                               if _cruise_reward_action is not None
+                               else (action if agent is not None else None)),
+                    base_action=_cruise_reward_base)
+            else:
+                reward, r_done, r_success, r_info = REWARD_FNS[phase](
+                    env, next_obs, config, rstate,
+                    rl_action=(action if agent is not None else None))
 
             ep_reward += reward; ep_steps += 1
 
@@ -940,11 +1000,14 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
     """测试完整 3 阶段流水线。"""
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
-                             _apply_descent_pid_residual)
+                             _apply_descent_pid_residual,
+                             clip_cruise_residual, get_last_nmpc_action)
 
     z_pid   = CruiseZYawPID(config)
     swing_d = SwingDampingController(config)
     _cruise_nmpc_base = bool(config.get("cruise_rl", {}).get("use_nmpc_base", True))
+    _cruise_nmpc_residual = bool(config.get("cruise_rl", {}).get(
+        "nmpc_residual_mode", _cruise_nmpc_base))
     _cruise_max = int(config["cruise_rl"]["max_steps"])
     _descent_max = int(config.get("descent_rl", {}).get("max_steps", 300))
     _pipeline_max = int(config.get("pipeline", {}).get(
@@ -981,6 +1044,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
         for _agent in agents.values():
             if _agent is not None and hasattr(_agent, 'reset_history'):
                 _agent.reset_history()
+        wait_for_space_start(env, config, label=f"pipeline Ep {ep_count + 1}")
 
         start_xy  = env.default_start_xy.copy()
         target_xy = env.target_pos.copy()
@@ -1052,10 +1116,12 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                       f"insert_z={_target_pz*1000:.1f}mm")
 
             # ── 动作计算 ──────────────────────────────────────────────────────
-            # Lift + translation are pure NMPC; residual RL is only used after
-            # the pipeline has handed off to descent.
-            agent = agents.get(current_phase) if current_phase == "descent" else None
+            # Cruise can optionally use NMPC + residual RL; descent keeps the
+            # PID + residual RL path.
+            agent = agents.get(current_phase)
             action = None
+            _cruise_reward_base = None
+            _cruise_reward_action = None
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
@@ -1063,7 +1129,9 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 _wobs = build_wind_obs(env,
                     float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
                 base_dq_for_obs = None
-                if current_phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
+                if current_phase == "cruise" and _cruise_nmpc_residual:
+                    base_dq_for_obs = get_last_nmpc_action(expert)
+                elif current_phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
                     try:
                         base_dq_for_obs = expert.compute_delta_q_target(
                             obs, current_q.astype(np.float64))
@@ -1081,43 +1149,53 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 real_ee = env._get_ee_pos()
 
                 if current_phase == "cruise":
-                    _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
-                    _pl_vz = float(env.data.qvel[_dof_idx + 2])
-                    _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
-                    _pl_euler = R.from_matrix(_pl_mat).as_euler('xyz')
-                    _pl_yaw = float(_pl_euler[2])
-                    _pl_yr = float(env.data.qvel[_dof_idx + 5]) \
-                        if _dof_idx + 5 < len(env.data.qvel) else 0.0
-                    _z_corr, _tgt_yaw, _falling = z_pid.compute(
-                        float(payload_pos[2]), _pl_vz, _pl_yaw, _pl_yr)
-                    if _falling:
-                        term_reason = f"ground_collision:z={payload_pos[2]:.3f}"
-                        break
-                    if swing_d is not None:
-                        swing_d.compute(payload_pos, real_ee,
-                            env.data.qvel[_dof_idx:_dof_idx+3].copy(),
-                            getattr(env, '_ee_vel_cache', np.zeros(3)))
-                    if _cruise_nmpc_base:
-                        try:
-                            _a4 = expert.tracker.compute_ee_acceleration(obs,
-                                target_yaw=_tgt_yaw)
-                            _ba = np.array([float(_a4[0]), float(_a4[1])], np.float32)
-                        except Exception:
-                            _ba = np.zeros(2, np.float32)
-                        _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
-                        _cm = _ba + np.clip(action[:2], -_rm, _rm)
-                        _am = float(config["cruise_rl"].get("residual_acc_max_xy", 0.80))
-                        _cn = float(np.linalg.norm(_cm))
-                        if _cn > _am: _cm = _cm / _cn * _am
-                        acc_3d = np.array([_cm[0], _cm[1], 0.0])
+                    if _cruise_nmpc_residual:
+                        _res3 = clip_cruise_residual(action, config)
+                        delta_q = expert.compute_delta_q_target(
+                            obs, current_q.astype(np.float64),
+                            residual_acc=_res3)
+                        _cruise_reward_base = get_last_nmpc_action(expert)
+                        _cruise_reward_action = _res3
                     else:
-                        acc_3d = np.array([action[0], action[1], 0.0])
-                    z_lock = float(config["cruise_rl"]["z_lock_height"])
-                    delta_q = ee_ctrl.compute_delta_q(
-                        acc_3d, current_q, real_ee,
-                        lock_z=True, z_lock_height=z_lock,
-                        z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
-                        base_acc_xy=None, residual_mode=False)
+                        _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
+                        _pl_vz = float(env.data.qvel[_dof_idx + 2])
+                        _pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+                        _pl_euler = R.from_matrix(_pl_mat).as_euler('xyz')
+                        _pl_yaw = float(_pl_euler[2])
+                        _pl_yr = float(env.data.qvel[_dof_idx + 5]) \
+                            if _dof_idx + 5 < len(env.data.qvel) else 0.0
+                        _z_corr, _tgt_yaw, _falling = z_pid.compute(
+                            float(payload_pos[2]), _pl_vz, _pl_yaw, _pl_yr)
+                        if _falling:
+                            term_reason = f"ground_collision:z={payload_pos[2]:.3f}"
+                            break
+                        if swing_d is not None:
+                            swing_d.compute(payload_pos, real_ee,
+                                env.data.qvel[_dof_idx:_dof_idx+3].copy(),
+                                getattr(env, '_ee_vel_cache', np.zeros(3)))
+                        if _cruise_nmpc_base:
+                            try:
+                                _a4 = expert.tracker.compute_ee_acceleration(obs,
+                                    target_yaw=_tgt_yaw)
+                                _ba = np.array([float(_a4[0]), float(_a4[1])], np.float32)
+                            except Exception:
+                                _ba = np.zeros(2, np.float32)
+                            _cruise_reward_base = np.array(
+                                [_ba[0], _ba[1], 0.0, 0.0], dtype=np.float32)
+                            _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.25))
+                            _cm = _ba + np.clip(action[:2], -_rm, _rm)
+                            _am = float(config["cruise_rl"].get("residual_acc_max_xy", 0.80))
+                            _cn = float(np.linalg.norm(_cm))
+                            if _cn > _am: _cm = _cm / _cn * _am
+                            acc_3d = np.array([_cm[0], _cm[1], 0.0])
+                        else:
+                            acc_3d = np.array([action[0], action[1], 0.0])
+                        z_lock = float(config["cruise_rl"]["z_lock_height"])
+                        delta_q = ee_ctrl.compute_delta_q(
+                            acc_3d, current_q, real_ee,
+                            lock_z=True, z_lock_height=z_lock,
+                            z_pid_correction=_z_corr, target_yaw=_tgt_yaw,
+                            base_acc_xy=None, residual_mode=False)
                 elif current_phase == "descent":
                     if bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
                         delta_q, _ = _apply_descent_pid_residual(
@@ -1139,8 +1217,16 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             phase_stab[current_phase].update_step(next_obs, config, env=env,
                                                    rl_action=_rl_a)
 
-            reward, r_done, r_success, r_info = REWARD_FNS[current_phase](
-                env, next_obs, config, rstate, rl_action=_rl_a)
+            setattr(rstate, "phase_step", int(phase_steps[current_phase]))
+            if current_phase == "cruise":
+                reward, r_done, r_success, r_info = compute_cruise_reward(
+                    env, next_obs, config, rstate,
+                    rl_action=(_cruise_reward_action
+                               if _cruise_reward_action is not None else _rl_a),
+                    base_action=_cruise_reward_base)
+            else:
+                reward, r_done, r_success, r_info = REWARD_FNS[current_phase](
+                    env, next_obs, config, rstate, rl_action=_rl_a)
 
             ep_reward += reward
             phase_rewards[current_phase] += reward
@@ -1521,6 +1607,8 @@ def main():
     parser.add_argument("--obstacles", type=int, default=None)
     parser.add_argument("--seed", type=int, default=21)
     parser.add_argument("--render", action="store_true")
+    parser.add_argument("--wait-for-space", action="store_true",
+                        help="render only: pause after each episode reset until Space is pressed in the MuJoCo viewer")
     parser.add_argument("--gpu", type=int, default=0)
     parser.add_argument("--insert-target-z", type=float, default=0.10,
                         help="Descent only: trained alignment target payload COM z (m)")
@@ -1609,6 +1697,11 @@ def main():
         test_n_obs = config["scene"]["n_obstacles"]
 
     env = CableRobotEnvWithObstacles(config=config)
+    install_space_start_callback(
+        env,
+        bool(args.wait_for_space and args.render and not args.compare_wind_bins))
+    if args.wait_for_space and not args.render:
+        print("[wait-for-space] 未开启 --render，等待空格设置已忽略")
     if hasattr(env, 'set_curriculum_n_obstacles'):
         env.set_curriculum_n_obstacles(test_n_obs)
     expert  = JointSpaceExpert(config, env.ik_solver)
@@ -1623,10 +1716,15 @@ def main():
     if args.phase == "pipeline":
         # [v13.0] 只 2 阶段: cruise (合并 lift+cruise) + descent
         agents = {"cruise": None}
-        print("[CRUISE] pipeline uses pure NMPC/expert control "
-              "(lift + translation)")
-        if args.cruise_ckpt is not None or args.cruise_algo != "expert":
-            print("[CRUISE] --cruise-ckpt/--cruise-algo is ignored in pipeline")
+        if args.cruise_algo == "expert":
+            print("[CRUISE] pure NMPC/expert control (no residual RL)")
+        else:
+            if args.cruise_ckpt is None:
+                print(f"[Error] --cruise-ckpt 必须指定 ({args.cruise_algo} 模式)"); return
+            agents["cruise"] = load_agent("cruise", args.cruise_algo,
+                                          args.cruise_ckpt, config)
+            print(f"[CRUISE] 加载 NMPC residual: "
+                  f"{args.cruise_ckpt} ({args.cruise_algo})")
 
         if args.descent_algo == "expert":
             agents["descent"] = None
@@ -1643,7 +1741,9 @@ def main():
             wind_force=args.wind_force, wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
             force_noise=args.force_noise)
-        print_summary(results, f"Pipeline-NMPC_{args.descent_algo}")
+        print_summary(
+            results,
+            f"Pipeline-cruise_{args.cruise_algo}-descent_{args.descent_algo}")
     else:
         eval_cur_init = None
         if args.phase == "descent":

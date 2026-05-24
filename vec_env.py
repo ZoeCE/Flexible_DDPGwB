@@ -114,7 +114,9 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
 
     # Import worker-side helpers (lazy, 在 subprocess 内部)
     from train_phase import (build_phase_obs, _add_act_noise,
-                             _apply_descent_pid_residual, reset_for_phase,
+                             _apply_descent_pid_residual,
+                             clip_cruise_residual, get_last_nmpc_action,
+                             reset_for_phase,
                              _advance_expert_to_nearest_wp as _advance_expert_to_nearest_wp_local,
                              _truncate_path_for_lift as _truncate_path_for_lift_local)
     from phase_reward import (compute_lift_reward, compute_cruise_reward,
@@ -220,6 +222,10 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                         if _dof_idx + 5 < len(env.data.qvel) else 0.0
                     _z_cruise = float(config["cruise_rl"].get("target_z_cruise", 0.25))
                     _is_lift_phase = float(_pl_pos[2]) < _z_cruise - 0.03
+                    if bool(config.get("cruise_rl", {}).get(
+                            "nmpc_residual_mode",
+                            config.get("cruise_rl", {}).get("use_nmpc_base", False))):
+                        _is_lift_phase = True
 
                     if not _is_lift_phase:
                         _z_corr, _tgt_yaw, _falling = z_pid.compute(
@@ -249,6 +255,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                         _z_corr, _tgt_yaw = 0.0, 0.0
 
                     _rl_arr = np.asarray(rl_act, np.float32)
+                    _cruise_reward_base = get_last_nmpc_action(expert)
+                    _cruise_reward_action = _rl_arr
 
                     if _is_lift_phase:
                         # Lift 模式: expert.compute_delta_q_target + 3D residual
@@ -260,6 +268,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                             float(np.clip(_rl_arr[2], -_rm_z,  _rm_z)) if len(_rl_arr) > 2 else 0.0,
                         ], np.float64)
                         dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
+                        _cruise_reward_base = get_last_nmpc_action(expert)
+                        _cruise_reward_action = _res3
                     else:
                         # Cruise 模式: NMPC + xy 残差 + lock_z
                         _use_nmpc = bool(config.get("cruise_rl", {}).get("use_nmpc_base", False))
@@ -269,6 +279,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                                 _base = np.array([float(_a4[0]), float(_a4[1])], np.float32)
                             except Exception:
                                 _base = np.zeros(2, np.float32)
+                            _cruise_reward_base = np.array(
+                                [_base[0], _base[1], 0.0, 0.0], dtype=np.float32)
                             _res_max = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
                             _rl_clip = np.clip(_rl_arr[:2], -_res_max, _res_max)
                             _comb = _base + _rl_clip
@@ -289,7 +301,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                     # [v13.0] rl_action 传完整 3D
                     reward, done, success, ri = compute_cruise_reward(
                         env, no2, config, rstate, tracker=tracker,
-                        rl_action=_rl_arr)
+                        rl_action=_cruise_reward_action,
+                        base_action=_cruise_reward_base)
                     term_reason = ri.get('termination', 'running')
 
                 elif phase == "descent":
@@ -339,6 +352,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                             no2, _cq_next.astype(np.float64))
                     except Exception:
                         _base_next = np.zeros(7, dtype=np.float32)
+                elif phase == "cruise":
+                    _base_next = get_last_nmpc_action(expert)
                 _core_next, _cable_next, _wobs_next, new_tilt, new_yaw = build_phase_obs(
                     phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs_next,
                     base_action=_base_next)
@@ -385,6 +400,10 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                             np.asarray(eo, np.float32), _cq_b.astype(np.float64))
                     except Exception:
                         _base_b = np.zeros(7, dtype=np.float32)
+                elif phase_b == "cruise" and bool(config.get("cruise_rl", {}).get(
+                        "nmpc_residual_mode", config.get("cruise_rl", {}).get(
+                            "use_nmpc_base", False))):
+                    _base_b = get_last_nmpc_action(expert)
                 core, cable_raw, _wobs, t, y = build_phase_obs(
                     phase_b, eo, env, sxy_b, txy_b, pt_b, py_b,
                     wind_obs=_wobs, base_action=_base_b)
@@ -555,7 +574,7 @@ class DummyVecEnv:
     def build_phase_obs_remote(self, idx, phase, env_obs, start_xy,
                                target_xy, prev_tilt, prev_yaw):
         """[v14.0] 主进程调用 build_phase_obs (DummyVecEnv 直接调本地 env)."""
-        from train_phase import build_phase_obs
+        from train_phase import build_phase_obs, get_last_nmpc_action
         from phase_agent import build_wind_obs
         env = self.envs[idx]
         ctrls = self.controllers_list[idx]
@@ -570,6 +589,10 @@ class DummyVecEnv:
                     np.asarray(env_obs, np.float32), _cq.astype(np.float64))
             except Exception:
                 _base = np.zeros(7, dtype=np.float32)
+        elif phase == "cruise" and bool(config.get("cruise_rl", {}).get(
+                "nmpc_residual_mode", config.get("cruise_rl", {}).get(
+                    "use_nmpc_base", False))):
+            _base = get_last_nmpc_action(ctrls["expert"])
         core, cable_raw, _wobs, t, y = build_phase_obs(
             phase, env_obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
             wind_obs=_wobs, base_action=_base)
@@ -592,7 +615,8 @@ class DummyVecEnv:
 def _run_rl_step_inline(env, controllers, config, payload):
     """共享逻辑: DummyVecEnv.rl_step 直接调用; SubprocVecEnv worker 也内联同样的代码."""
     from train_phase import (build_phase_obs, _add_act_noise,
-                             _apply_descent_pid_residual)
+                             _apply_descent_pid_residual,
+                             clip_cruise_residual, get_last_nmpc_action)
     from phase_reward import (compute_lift_reward, compute_cruise_reward,
                               compute_descent_reward, RewardComponentTracker)
     from scipy.spatial.transform import Rotation as R
@@ -617,7 +641,20 @@ def _run_rl_step_inline(env, controllers, config, payload):
     ree = env._get_ee_pos()
     tracker = RewardComponentTracker(phase)
 
-    if phase == "cruise":
+    if phase == "cruise" and bool(config.get("cruise_rl", {}).get(
+            "nmpc_residual_mode",
+            config.get("cruise_rl", {}).get("use_nmpc_base", False))):
+        _res3 = clip_cruise_residual(rl_act, config)
+        dq = expert.compute_delta_q_target(
+            obs, cq.astype(np.float64), residual_acc=_res3)
+        _cruise_reward_base = get_last_nmpc_action(expert)
+        dq = _add_act_noise(dq, act_noise)
+        no2, _, _, _, ei = env.step(dq)
+        reward, done, success, ri = compute_cruise_reward(
+            env, no2, config, rstate, tracker=tracker, rl_action=_res3,
+            base_action=_cruise_reward_base)
+
+    elif phase == "cruise":
         _pl_pos  = env.data.body('prefab').xpos
         _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
         _pl_vz   = float(env.data.qvel[_dof_idx + 2])
@@ -644,12 +681,15 @@ def _run_rl_step_inline(env, controllers, config, payload):
             _ee_vel  = getattr(env, '_ee_vel_cache', np.zeros(3))
             swing_d.compute(_pl_pos, ree, _pl_vel, _ee_vel)
         _use_nmpc = bool(config.get("cruise_rl", {}).get("use_nmpc_base", False))
+        _cruise_reward_base = get_last_nmpc_action(expert)
         if _use_nmpc:
             try:
                 _a4 = expert.tracker.compute_ee_acceleration(obs, target_yaw=_tgt_yaw)
                 _base = np.array([float(_a4[0]), float(_a4[1])], np.float32)
             except Exception:
                 _base = np.zeros(2, np.float32)
+            _cruise_reward_base = np.array(
+                [_base[0], _base[1], 0.0, 0.0], dtype=np.float32)
             _res_max = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
             _rl_clip = np.clip(rl_act[:2], -_res_max, _res_max)
             _comb = _base + _rl_clip
@@ -668,7 +708,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
         no2, _, _, _, ei = env.step(dq)
         # [v11.2] rl_action 用于 action_magnitude_penalty + smoothness
         reward, done, success, ri = compute_cruise_reward(
-            env, no2, config, rstate, tracker=tracker, rl_action=rl_act[:2])
+            env, no2, config, rstate, tracker=tracker, rl_action=rl_act[:2],
+            base_action=_cruise_reward_base)
     elif phase == "descent":
         dq, _pid_dq = _apply_descent_pid_residual(
             expert, rl_act, obs, env, config, cq,
@@ -711,6 +752,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
                 no2, _cq_d.astype(np.float64))
         except Exception:
             _base_d = np.zeros(7, dtype=np.float32)
+    elif phase == "cruise":
+        _base_d = get_last_nmpc_action(expert)
     _core_d, _cable_d, _wobs_d, new_tilt, new_yaw = build_phase_obs(
         phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs_d,
         base_action=_base_d)

@@ -65,7 +65,11 @@ OBS_YAW        = 30   # payload yaw
 class NMPCController4D:
     def __init__(self, dt=0.1, N=25,
                  L=0.445,
-                 u_max_xy=0.8, u_max_z=2.0, u_max_yaw=2.0):
+                 u_max_xy=0.8, u_max_z=2.0, u_max_yaw=2.0,
+                 q_payload_xy=500.0, q_ee_z=40.0, q_yaw=1.0,
+                 q_swing_xy=500.0, q_swing_vel=200.0, q_vel=15.0,
+                 r_acc_xy=0.03, r_acc_z=0.15, r_acc_yaw=0.3,
+                 r_jerk=0.15, q_terminal=25.0):
         self.dt  = dt
         self.N   = N
         self.L   = L
@@ -101,15 +105,16 @@ class NMPCController4D:
         P_ref  = ca.SX.sym('P_ref', 4)
         X_init = ca.SX.sym('X_init', self.nx)
         Az_lin = ca.SX.sym('Az_lin')
+        U_prev = ca.SX.sym('U_prev', self.nu)
 
         cost = 0; constraints = []
 
-        Q_pos       = np.array([500.0, 500.0, 40.0, 1.0])
-        Q_swing     = np.array([500.0, 500.0])
-        Q_swing_vel = 200.0
-        Q_vel       = 15.0
-        R_acc       = np.array([0.03, 0.03, 0.15, 0.3])
-        R_jerk      = 0.15
+        Q_pos       = np.array([q_payload_xy, q_payload_xy, q_ee_z, q_yaw])
+        Q_swing     = np.array([q_swing_xy, q_swing_xy])
+        Q_swing_vel = q_swing_vel
+        Q_vel       = q_vel
+        R_acc       = np.array([r_acc_xy, r_acc_xy, r_acc_z, r_acc_yaw])
+        R_jerk      = r_jerk
 
         constraints.append(X[:, 0] - X_init)
         mocap_target_z = P_ref[2] + self.L
@@ -133,11 +138,11 @@ class NMPCController4D:
             cost += Q_vel * (X[4,k]**2 + X[5,k]**2 + X[6,k]**2 + X[7,k]**2)
             cost += (R_acc[0]*U[0,k]**2 + R_acc[1]*U[1,k]**2
                    + R_acc[2]*U[2,k]**2 + R_acc[3]*U[3,k]**2)
-            if k > 0:
-                for j in range(self.nu):
-                    cost += R_jerk * (U[j, k] - U[j, k-1])**2
+            for j in range(self.nu):
+                u_prev_j = U_prev[j] if k == 0 else U[j, k-1]
+                cost += R_jerk * (U[j, k] - u_prev_j)**2
 
-        Qf = 25.0
+        Qf = q_terminal
         cost += Qf * (Q_pos[0]*(X[8, self.N]-P_ref[0])**2
                     + Q_pos[1]*(X[9, self.N]-P_ref[1])**2)
         cost += Qf * (Q_pos[2]*(X[2, self.N]-mocap_target_z)**2
@@ -152,7 +157,7 @@ class NMPCController4D:
         nlp = {
             'x': ca.vertcat(ca.reshape(X, -1, 1), ca.reshape(U, -1, 1)),
             'f': cost, 'g': ca.vertcat(*constraints),
-            'p': ca.vertcat(X_init, P_ref, Az_lin),
+            'p': ca.vertcat(X_init, P_ref, Az_lin, U_prev),
         }
         opts = {
             'ipopt.print_level': 0, 'print_time': 0, 'ipopt.sb': 'yes',
@@ -174,9 +179,11 @@ class NMPCController4D:
         self.lbg = np.zeros(self.nx * (self.N + 1))
         self.ubg = np.zeros(self.nx * (self.N + 1))
         self.last_sol = None
+        self.last_u = None
 
     def get_action(self, state_12d, target_4d):
-        p_val    = np.concatenate([state_12d, target_4d, [self.last_az]])
+        prev_u = self.last_u if self.last_u is not None else np.zeros(self.nu)
+        p_val = np.concatenate([state_12d, target_4d, [self.last_az], prev_u])
         x0_guess = self.last_sol if self.last_sol is not None \
                    else np.zeros(self.lbx.shape)
         try:
@@ -191,6 +198,7 @@ class NMPCController4D:
             self.last_sol = None
             u_opt = np.zeros(self.nu)
             self.last_az = 0.0
+        self.last_u = np.asarray(u_opt, dtype=np.float64).copy()
         return u_opt
 
 
@@ -210,11 +218,36 @@ class NMPCTrajectoryTracker:
                  terminal_hover_kd_payload=1.2,
                  terminal_hover_kd_ee=0.4,
                  terminal_hover_swing_kp=0.25,
-                 action_smoothing_alpha=0.45):
+                 action_smoothing_alpha=0.45,
+                 action_rate_limit_xy=0.12,
+                 action_rate_limit_z=0.25,
+                 action_rate_limit_yaw=0.25,
+                 ref_smoothing_alpha=1.0,
+                 terminal_settle_radius=0.0,
+                 terminal_settle_vel=0.08,
+                 terminal_settle_swing=0.08,
+                 action_deadband_xy=0.0,
+                 action_deadband_z=0.0,
+                 action_deadband_yaw=0.0,
+                 q_payload_xy=500.0, q_ee_z=40.0, q_yaw=1.0,
+                 q_swing_xy=500.0, q_swing_vel=200.0, q_vel=15.0,
+                 r_acc_xy=0.03, r_acc_z=0.15, r_acc_yaw=0.3,
+                 r_jerk=0.15, q_terminal=25.0):
         self.mpc = NMPCController4D(dt=dt, N=N, L=L,
                                     u_max_xy=u_max_xy,
                                     u_max_z=u_max_z,
-                                    u_max_yaw=u_max_yaw)
+                                    u_max_yaw=u_max_yaw,
+                                    q_payload_xy=q_payload_xy,
+                                    q_ee_z=q_ee_z,
+                                    q_yaw=q_yaw,
+                                    q_swing_xy=q_swing_xy,
+                                    q_swing_vel=q_swing_vel,
+                                    q_vel=q_vel,
+                                    r_acc_xy=r_acc_xy,
+                                    r_acc_z=r_acc_z,
+                                    r_acc_yaw=r_acc_yaw,
+                                    r_jerk=r_jerk,
+                                    q_terminal=q_terminal)
         self.path = None
         self.current_idx = 0
         self.arrival_threshold_xy = arrival_threshold_xy
@@ -228,7 +261,21 @@ class NMPCTrajectoryTracker:
         self._terminal_hover_kd_ee = float(terminal_hover_kd_ee)
         self._terminal_hover_swing_kp = float(terminal_hover_swing_kp)
         self._action_smoothing_alpha = float(action_smoothing_alpha)
+        self._action_rate_limit = np.array([
+            action_rate_limit_xy, action_rate_limit_xy,
+            action_rate_limit_z, action_rate_limit_yaw,
+        ], dtype=np.float64)
+        self._ref_smoothing_alpha = float(ref_smoothing_alpha)
+        self._terminal_settle_radius = float(terminal_settle_radius)
+        self._terminal_settle_vel = float(terminal_settle_vel)
+        self._terminal_settle_swing = float(terminal_settle_swing)
+        self._action_deadband = np.array([
+            action_deadband_xy, action_deadband_xy,
+            action_deadband_z, action_deadband_yaw,
+        ], dtype=np.float64)
         self._last_action_4d = None
+        self._last_ref_xy = None
+        self._last_ref_z = None
         self.estimated_L = L
         self.z_cruise = z_cruise
         self._is_descending = False
@@ -241,6 +288,9 @@ class NMPCTrajectoryTracker:
             self._first_cruise_idx = None
             self._descent_start_idx = None
             self._last_action_4d = None
+            self._last_ref_xy = None
+            self._last_ref_z = None
+            self.mpc.last_u = None
             return
         self.path = np.array(path, dtype=np.float64)
         self.current_idx = 0
@@ -248,6 +298,8 @@ class NMPCTrajectoryTracker:
         self._first_cruise_idx = None
         self._descent_start_idx = None
         self._last_action_4d = None
+        self._last_ref_xy = None
+        self._last_ref_z = None
         for i, wp in enumerate(self.path):
             wp_z = float(wp[2]) if len(wp) >= 3 else self.z_cruise
             if self._first_cruise_idx is None and wp_z >= self.z_cruise - 0.005:
@@ -257,6 +309,32 @@ class NMPCTrajectoryTracker:
                 self._descent_start_idx = i
                 break
         self.mpc.last_sol = None; self.mpc.last_az = 0.0
+        self.mpc.last_u = None
+
+    def _settle_deadband_action(self, action, curr_pl_xy, terminal_xy,
+                                pl_vel_xy, ee_vel_xy, ee_xy):
+        action = np.asarray(action, dtype=np.float64).copy()
+        if self._terminal_settle_radius <= 0.0:
+            return action
+        rel_vel = pl_vel_xy - ee_vel_xy
+        swing_xy = curr_pl_xy - ee_xy
+        calm = (
+            float(np.linalg.norm(curr_pl_xy - terminal_xy)) <
+                self._terminal_settle_radius and
+            float(np.linalg.norm(pl_vel_xy)) < self._terminal_settle_vel and
+            float(np.linalg.norm(rel_vel)) < self._terminal_settle_vel and
+            float(np.linalg.norm(swing_xy)) < self._terminal_settle_swing)
+        if not calm:
+            return action
+
+        db = np.maximum(self._action_deadband, 0.0)
+        for i in range(4):
+            if db[i] > 0.0 and abs(action[i]) < db[i]:
+                action[i] = 0.0
+        xy_db = float(db[0])
+        if xy_db > 0.0 and float(np.linalg.norm(action[:2])) < 2.0 * xy_db:
+            action[:2] = 0.0
+        return action
 
     def _smooth_action(self, action):
         action = np.asarray(action, dtype=np.float64)
@@ -264,8 +342,13 @@ class NMPCTrajectoryTracker:
         if self._last_action_4d is None or alpha >= 0.999:
             smoothed = action
         else:
-            smoothed = alpha * action + (1.0 - alpha) * self._last_action_4d
+            blended = alpha * action + (1.0 - alpha) * self._last_action_4d
+            step = np.maximum(self._action_rate_limit, 0.0)
+            smoothed = np.clip(blended,
+                               self._last_action_4d - step,
+                               self._last_action_4d + step)
         self._last_action_4d = smoothed.copy()
+        self.mpc.last_u = smoothed.copy()
         return smoothed
 
     def compute_ee_acceleration(self, obs, target_yaw=0.0):
@@ -388,9 +471,20 @@ class NMPCTrajectoryTracker:
                 ref_xy = np.array([last_cruise[0], last_cruise[1]])
                 ref_z  = last_cruise[2] if len(last_cruise) >= 3 else 0.3
 
+        if not self._is_descending and can_use_cruise_lookahead:
+            alpha_ref = float(np.clip(self._ref_smoothing_alpha, 0.0, 1.0))
+            if self._last_ref_xy is not None and alpha_ref < 0.999:
+                ref_xy = (alpha_ref * ref_xy
+                          + (1.0 - alpha_ref) * self._last_ref_xy)
+                ref_z = (alpha_ref * ref_z
+                         + (1.0 - alpha_ref) * self._last_ref_z)
+            self._last_ref_xy = np.asarray(ref_xy, dtype=np.float64).copy()
+            self._last_ref_z = float(ref_z)
+
         terminal_hover = (
             not self._is_descending and
             can_use_cruise_lookahead and
+            self._terminal_hover_radius > 0.0 and
             float(np.linalg.norm(curr_pl_xy - terminal_xy)) <
                 self._terminal_hover_radius and
             abs(pl_z - terminal_z) < self._terminal_hover_z_tol)
@@ -427,7 +521,15 @@ class NMPCTrajectoryTracker:
         compensated_z = ref_z + (self.estimated_L - self.mpc.L)
         P_ref = np.array([ref_xy[0], ref_xy[1], compensated_z, target_yaw],
                          dtype=np.float64)
-        return self._smooth_action(self.mpc.get_action(state_12d, P_ref))
+        raw_action = self.mpc.get_action(state_12d, P_ref)
+        raw_action = self._settle_deadband_action(
+            raw_action,
+            curr_pl_xy,
+            terminal_xy,
+            np.array([pl_vx, pl_vy], dtype=np.float64),
+            np.array([ee_vx, ee_vy], dtype=np.float64),
+            np.array([ee_x, ee_y], dtype=np.float64))
+        return self._smooth_action(raw_action)
 
 
 # ==============================================================================
@@ -582,6 +684,27 @@ class JointSpaceExpert:
                 "terminal_hover_swing_kp", 0.25),
             action_smoothing_alpha=ctrl_cfg.get(
                 "action_smoothing_alpha", 0.45),
+            action_rate_limit_xy=ctrl_cfg.get("action_rate_limit_xy", 0.12),
+            action_rate_limit_z=ctrl_cfg.get("action_rate_limit_z", 0.25),
+            action_rate_limit_yaw=ctrl_cfg.get("action_rate_limit_yaw", 0.25),
+            ref_smoothing_alpha=ctrl_cfg.get("ref_smoothing_alpha", 1.0),
+            terminal_settle_radius=ctrl_cfg.get("terminal_settle_radius", 0.0),
+            terminal_settle_vel=ctrl_cfg.get("terminal_settle_vel", 0.08),
+            terminal_settle_swing=ctrl_cfg.get("terminal_settle_swing", 0.08),
+            action_deadband_xy=ctrl_cfg.get("action_deadband_xy", 0.0),
+            action_deadband_z=ctrl_cfg.get("action_deadband_z", 0.0),
+            action_deadband_yaw=ctrl_cfg.get("action_deadband_yaw", 0.0),
+            q_payload_xy=ctrl_cfg.get("q_payload_xy", 500.0),
+            q_ee_z=ctrl_cfg.get("q_ee_z", 40.0),
+            q_yaw=ctrl_cfg.get("q_yaw", 1.0),
+            q_swing_xy=ctrl_cfg.get("q_swing_xy", 500.0),
+            q_swing_vel=ctrl_cfg.get("q_swing_vel", 200.0),
+            q_vel=ctrl_cfg.get("q_vel", 15.0),
+            r_acc_xy=ctrl_cfg.get("r_acc_xy", 0.03),
+            r_acc_z=ctrl_cfg.get("r_acc_z", 0.15),
+            r_acc_yaw=ctrl_cfg.get("r_acc_yaw", 0.3),
+            r_jerk=ctrl_cfg.get("r_jerk", 0.15),
+            q_terminal=ctrl_cfg.get("q_terminal", 25.0),
         )
         self.ik_solver = ik_solver
         self.dt = ctrl_cfg["dt"]
@@ -598,6 +721,7 @@ class JointSpaceExpert:
         self._ee_yaw     = 0.0
         self._ee_yaw_vel = 0.0
         self._last_q     = None
+        self.last_action_4d = np.zeros(4, np.float64)
 
         # 巡航段参数
         # [OPT] 降低锚定强度减少位置拖拽, 提高速度一致性
@@ -686,6 +810,11 @@ class JointSpaceExpert:
         self._last_q     = init_q.copy().astype(np.float64)
         self.tracker.mpc.last_sol = None
         self.tracker.mpc.last_az  = 0.0
+        self.tracker.mpc.last_u = None
+        self.tracker._last_action_4d = None
+        self.tracker._last_ref_xy = None
+        self.tracker._last_ref_z = None
+        self.last_action_4d = np.zeros(4, np.float64)
         self._was_descending = False
         self._descent_settle_counter = 0
         self._integral_xy[:] = 0.0
@@ -712,6 +841,7 @@ class JointSpaceExpert:
         is_desc = self.tracker._is_descending
 
         action_4d = self.tracker.compute_ee_acceleration(env_obs, target_yaw)
+        self.last_action_4d = np.asarray(action_4d, dtype=np.float64).copy()
 
         # [v12 关键修复] 在 NMPC 输出后, 积分器前, 注入 RL 残差
         # 这样: NMPC 在"真实 ee state"上规划 → 积分器用"NMPC + RL 残差"演化

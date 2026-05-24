@@ -55,19 +55,92 @@ def set_global_seed(seed):
 
 
 class EpisodeStats:
-    def __init__(self, window=50):
-        self.window = window
+    def __init__(self, window=50, extra_windows=None, baseline_window=50):
+        extra_windows = extra_windows or []
+        if isinstance(extra_windows, (int, float)):
+            extra_windows = [int(extra_windows)]
+        windows = [int(window)] + [int(w) for w in extra_windows]
+        windows = sorted({max(1, w) for w in windows})
+        self.primary_window = max(1, int(window))
+        self.trend_windows = windows
+        self.window = max(windows)
+        self.baseline_window = max(1, int(baseline_window))
         self._data = {}
+        self._baseline = {}
     def update(self, **kwargs):
         for k, v in kwargs.items():
+            try:
+                value = float(v)
+            except Exception:
+                continue
+            if not np.isfinite(value):
+                continue
             if k not in self._data:
                 self._data[k] = deque(maxlen=self.window)
-            self._data[k].append(float(v))
-    def mean(self, key):
+                self._baseline[k] = []
+            self._data[k].append(value)
+            if len(self._baseline[k]) < self.baseline_window:
+                self._baseline[k].append(value)
+    def mean(self, key, window=None):
         d = self._data.get(key)
+        if not d:
+            return 0.0
+        vals = list(d)
+        if window is not None:
+            vals = vals[-max(1, int(window)):]
+        return float(np.mean(vals)) if vals else 0.0
+    def baseline_mean(self, key):
+        d = self._baseline.get(key)
         return float(np.mean(d)) if d else 0.0
-    def success_rate(self):
-        return self.mean("success")
+    def improvement(self, key, window=None, lower_is_better=False):
+        base = self.baseline_mean(key)
+        cur = self.mean(key, window=window)
+        return float(base - cur) if lower_is_better else float(cur - base)
+    def success_rate(self, window=None):
+        return self.mean("success", window=window)
+    def wandb_trends(self, phase):
+        out = {}
+        perf_names = {
+            "reward": ("reward", False),
+            "success": ("sr", False),
+            "steps": ("steps", True),
+            "dist_to_goal_cm": ("dist_to_goal_cm", True),
+        }
+        for w in self.trend_windows:
+            for key, (name, lower_is_better) in perf_names.items():
+                if key not in self._data:
+                    continue
+                out[f"trend/{phase}/{name}_ma{w}"] = self.mean(key, window=w)
+                out[f"trend/{phase}/{name}_improve_ma{w}"] = self.improvement(
+                    key, window=w, lower_is_better=lower_is_better)
+
+            for key in sorted(k for k in self._data if k.startswith("stab_")):
+                name = key[len("stab_"):]
+                out[f"trend_stab/{phase}/{name}_ma{w}"] = self.mean(key, window=w)
+                out[f"trend_stab/{phase}/{name}_improve_ma{w}"] = (
+                    self.improvement(key, window=w, lower_is_better=True))
+        return out
+
+
+def _make_episode_stats(config):
+    train_cfg = config.get("train", {})
+    return EpisodeStats(
+        window=int(train_cfg.get("log_smooth_win", 200)),
+        extra_windows=train_cfg.get("log_trend_windows", [50, 200, 500]),
+        baseline_window=int(train_cfg.get("log_baseline_episodes", 50)))
+
+
+def _update_episode_stats(stats, reward, steps, success,
+                          dist_to_goal_cm=0.0, stab_summary=None):
+    payload = {
+        "reward": reward,
+        "steps": steps,
+        "success": float(success),
+        "dist_to_goal_cm": dist_to_goal_cm,
+    }
+    for k, v in (stab_summary or {}).items():
+        payload[f"stab_{k}"] = v
+    stats.update(**payload)
 
 
 class Logger:
@@ -133,11 +206,35 @@ def build_phase_obs(phase, env_obs, env, start_xy, target_xy, prev_tilt, prev_ya
     if phase == "lift":
         return build_lift_obs(env_obs, env, start_xy, prev_tilt, prev_yaw, wind_obs)
     elif phase == "cruise":
-        return build_cruise_obs(env_obs, env, target_xy, prev_tilt, prev_yaw, wind_obs)
+        return build_cruise_obs(env_obs, env, target_xy, prev_tilt, prev_yaw,
+                                wind_obs, base_action=base_action)
     elif phase == "descent":
         return build_descent_obs(env_obs, env, target_xy, prev_tilt, prev_yaw,
                                  wind_obs, base_action=base_action)
     raise ValueError(f"Unknown phase: {phase}")
+
+
+def get_last_nmpc_action(expert):
+    """Return the latest 4D NMPC action for residual-policy observations."""
+    base = getattr(expert, "last_action_4d", None)
+    if base is None:
+        return np.zeros(4, dtype=np.float32)
+    base = np.asarray(base, dtype=np.float32).reshape(-1)
+    if base.size < 4:
+        base = np.pad(base, (0, 4 - base.size))
+    return base[:4].astype(np.float32)
+
+
+def clip_cruise_residual(action, config):
+    """Clip cruise residual RL output to the small authority around NMPC."""
+    arr = np.asarray(action, dtype=np.float32).reshape(-1)
+    rm_xy = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
+    rm_z = float(config["cruise_rl"].get("residual_acc_max_z_rl", 0.10))
+    return np.array([
+        float(np.clip(arr[0] if arr.size > 0 else 0.0, -rm_xy, rm_xy)),
+        float(np.clip(arr[1] if arr.size > 1 else 0.0, -rm_xy, rm_xy)),
+        float(np.clip(arr[2] if arr.size > 2 else 0.0, -rm_z, rm_z)),
+    ], dtype=np.float64)
 
 
 # ==============================================================================
@@ -672,6 +769,9 @@ def _truncate_path_for_lift(planned_path, config):
 def collect_expert_acc(expert, env, obs, current_q, phase, config):
     """收集专家 EE 加速度 (用于 BC 标签 [descent] 或 SAC warmup [cruise/descent])。"""
     if phase == "cruise":
+        if bool(config.get("cruise_rl", {}).get("nmpc_residual_mode", True)):
+            return np.zeros(int(config["cruise_rl"].get("action_dim", 3)),
+                            dtype=np.float32)
         action_4d = expert.tracker.compute_ee_acceleration(obs, target_yaw=0.0)
         acc_max_xy = float(config["ee_control"].get("acc_max_xy", 0.8))
         return np.clip(
@@ -860,7 +960,6 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
-    W  = int(config["train"]["log_smooth_win"])
 
     print(f"\n{'='*60}\n  PPO | {phase.upper()} | {T} steps | {log_dir}\n{'='*60}\n")
 
@@ -872,6 +971,9 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
     swing_d = SwingDampingController(config) if phase == "cruise" else None
     _cruise_nmpc_base = (phase == "cruise" and
         bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)))
+    _cruise_nmpc_residual = (phase == "cruise" and
+        bool(config.get("cruise_rl", {}).get(
+            "nmpc_residual_mode", _cruise_nmpc_base)))
     _descent_pid_residual = (phase == "descent" and
         bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
     # [v12] lift 也支持 NMPC base + RL 残差
@@ -907,7 +1009,7 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
 
     logger = Logger(log_dir, project=f"phase_rl_v9", run_name=f"{phase}_ppo")
     logger.update_config(config)
-    stats = EpisodeStats(window=W)
+    stats = _make_episode_stats(config)
     ep = 0; ts = 0; best = 0.0; t0 = time.time()
     _ppo_update_count = 0
 
@@ -988,6 +1090,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                         obs, cq.astype(np.float64))
                 except Exception:
                     base_dq_for_obs = np.zeros(7, dtype=np.float32)
+            elif phase == "cruise" and _cruise_nmpc_residual:
+                base_dq_for_obs = get_last_nmpc_action(expert)
             # [v14.0] 构建 obs: (core, cable_raw, wind, tilt, yaw)
             wobs = build_wind_obs(env, _wf_max)
             core, cable_raw, wobs, pt, py = build_phase_obs(
@@ -1004,7 +1108,21 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             #   低空 (payload_z < z_cruise - 0.03): lift 模式 — expert.compute_delta_q_target
             #     (单一积分器路径, 与 test 一致, NMPC 自动垂直上升)
             #   高空 (payload_z 接近 z_cruise): cruise 模式 — 原 lock_z + xy 残差
-            if phase == "cruise" and z_pid is not None:
+            if phase == "cruise" and _cruise_nmpc_residual:
+                act, lp, val = agent.act(no_noisy)
+                _act_arr = np.asarray(act, np.float32)
+                _res3 = clip_cruise_residual(_act_arr, config)
+                dq = expert.compute_delta_q_target(
+                    obs, cq.astype(np.float64), residual_acc=_res3)
+                _cruise_reward_base = get_last_nmpc_action(expert)
+                dq = _add_act_noise(dq, pert["act_noise"])
+                no2, _, _, _, ei = env.step(dq)
+                rw, dn, sc, ri = compute_cruise_reward(
+                    env, no2, config, rs, tracker=rew_tracker,
+                    rl_action=_res3, base_action=_cruise_reward_base)
+                rew_tracker.step()
+
+            elif phase == "cruise" and z_pid is not None:
                 _pl_pos  = env.data.body('prefab').xpos
                 _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
                 _pl_vz   = float(env.data.qvel[_dof_idx + 2])
@@ -1044,6 +1162,7 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
 
                 act, lp, val = agent.act(no_noisy)
                 _act_arr = np.asarray(act, np.float32)
+                _cruise_reward_base = get_last_nmpc_action(expert)
 
                 if _is_lift_phase:
                     # ── Lift 模式: 用 expert.compute_delta_q_target + 3D residual_acc
@@ -1057,6 +1176,7 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                         float(np.clip(_act_arr[2], -_rm_z,  _rm_z)) if len(_act_arr) > 2 else 0.0,
                     ], np.float64)
                     dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
+                    _cruise_reward_base = get_last_nmpc_action(expert)
                 else:
                     # ── Cruise 模式: NMPC 输出 + xy 残差 + lock_z
                     if _cruise_nmpc_base:
@@ -1065,6 +1185,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                             _base = np.array([float(_a4[0]), float(_a4[1])], np.float32)
                         except Exception:
                             _base = np.zeros(2, np.float32)
+                        _cruise_reward_base = np.array(
+                            [_base[0], _base[1], 0.0, 0.0], dtype=np.float32)
                         _res_max = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
                         _rl_clip = np.clip(_act_arr[:2], -_res_max, _res_max)
                         _comb = _base + _rl_clip
@@ -1087,7 +1209,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                 # [v13.0] rl_action 传完整 3D 维度
                 rw, dn, sc, ri = compute_cruise_reward(env, no2, config, rs,
                                                        tracker=rew_tracker,
-                                                       rl_action=_act_arr)
+                                                       rl_action=_act_arr,
+                                                       base_action=_cruise_reward_base)
                 rew_tracker.step()
 
             # ── Descent: PID base + RL residual ──────────────────────────────
@@ -1190,6 +1313,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                                 no2, _cq2.astype(np.float64))
                         except Exception:
                             _base2 = np.zeros(7, dtype=np.float32)
+                    elif phase == "cruise" and _cruise_nmpc_residual:
+                        _base2 = get_last_nmpc_action(expert)
                     _core2, _cable2, _wobs2, _, _ = build_phase_obs(
                         phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs2,
                         base_action=_base2)
@@ -1215,8 +1340,6 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                 rd = True
 
         # ── Episode 末: 更新统计 / 课程 / 日志 ───────────────────────────────
-        stats.update(reward=er, steps=es, success=float(suc))
-        ar = stats.mean("reward"); sr = stats.success_rate()
         cur.update(suc)
         # [v10] 课程倒退则清 Adam 状态, 避免死局轨迹累积的二阶矩阻碍恢复
         if cur.consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
@@ -1260,6 +1383,12 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
         pl_pos_now = env.data.body('prefab').xpos
         dist_to_goal = float(np.linalg.norm(pl_pos_now[:2] - txy)) \
             if phase in ("cruise", "descent") else 0.0
+        stab_summary = stab.summary()
+        _update_episode_stats(
+            stats, reward=er, steps=es, success=suc,
+            dist_to_goal_cm=dist_to_goal * 100.0,
+            stab_summary=stab_summary)
+        ar = stats.mean("reward"); sr = stats.success_rate()
 
         cur_info = cur.info()
         cur_str = f"L{cur.level_idx}/{cur.n_levels-1} ep{cur.eps_at_level}"
@@ -1303,7 +1432,10 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
         # reward 分项
         log_metrics.update(rew_tracker.episode_summary())
         # [v12.6] 细粒度 RL 评估指标 (anti-sway quality + RL intervention)
-        log_metrics.update(stab.summary_for_wandb(phase, prefix="stab"))
+        log_metrics.update({
+            f"stab/{phase}/{k}": v for k, v in stab_summary.items()
+        })
+        log_metrics.update(stats.wandb_trends(phase))
         logger.log(ep, log_metrics)
 
         with open(lf, "a", newline="") as f:
@@ -1351,7 +1483,6 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
-    W  = int(config["train"]["log_smooth_win"])
     start_method = config["train"].get("vec_env_start_method", "forkserver")
 
     print(f"\n{'='*60}\n  PPO [VEC n_envs={n_envs}] | {phase.upper()} | "
@@ -1460,7 +1591,7 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
 
     logger = Logger(log_dir, project=f"phase_rl_v11_vec", run_name=f"{phase}_ppo_vec")
     logger.update_config(config)
-    stats = EpisodeStats(window=W)
+    stats = _make_episode_stats(config)
     ts = 0; ep_count = 0; t0 = time.time(); best = 0.0
 
     lf = os.path.join(log_dir, f"{phase}_ppo_vec_log.csv")
@@ -1618,8 +1749,15 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             and agent.buffer.ptr == 0):
                         _her_eps_added = 0
 
-                    stats.update(reward=ep_rewards[i], steps=ep_steps[i],
-                                 success=float(ep_suc[i]))
+                    _stab_sum = res.get('stab_summary') or {}
+                    _pl_xy_done = np.asarray(res.get('pl_xy', np.zeros(2)),
+                                             np.float32)
+                    _dist_cm = float(np.linalg.norm(_pl_xy_done - txy_list[i]) * 100.0) \
+                        if phase in ("cruise", "descent") else 0.0
+                    _update_episode_stats(
+                        stats, reward=ep_rewards[i], steps=ep_steps[i],
+                        success=ep_suc[i], dist_to_goal_cm=_dist_cm,
+                        stab_summary=_stab_sum)
                     curs[i].update(ep_suc[i])
                     if curs[i].consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
                         agent.reset_adam_state(reason=f"{phase}_w{i}_regression")
@@ -1654,11 +1792,11 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     }
                     log_metrics.update(cur_info)
                     # [v12.6] vec 模式 stab: worker 在 done 时返回 stab_summary, 直接喂 wandb
-                    _stab_sum = res.get('stab_summary')
                     if _stab_sum:
                         log_metrics.update({
                             f"stab/{phase}/{k}": v for k, v in _stab_sum.items()
                         })
+                    log_metrics.update(stats.wandb_trends(phase))
                     logger.log(ep_count, log_metrics)
 
                     with open(lf, "a", newline="") as f:
@@ -1732,7 +1870,6 @@ def train_sac_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
-    W  = int(config["train"]["log_smooth_win"])
     WU = int(config["sac"].get("warmup_steps", 5000))
     start_method = config["train"].get("vec_env_start_method", "forkserver")
 
@@ -1805,7 +1942,7 @@ def train_sac_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
 
     logger = Logger(log_dir, project=f"phase_rl_v11_vec", run_name=f"{phase}_sac_vec")
     logger.update_config(config)
-    stats = EpisodeStats(window=W)
+    stats = _make_episode_stats(config)
     ts = 0; ep_count = 0; t0 = time.time(); best = 0.0; onf = False
     update_interval = int(config["sac"].get("update_interval", 1))
 
@@ -1921,8 +2058,15 @@ def train_sac_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             txy_list[i],
                             float(config["insertion"]["target_payload_z"]))
 
-                    stats.update(reward=ep_rewards[i], steps=ep_steps[i],
-                                 success=float(ep_suc[i]))
+                    _stab_sum = res.get('stab_summary') or {}
+                    _pl_xy_done = np.asarray(res.get('pl_xy', np.zeros(2)),
+                                             np.float32)
+                    _dist_cm = float(np.linalg.norm(_pl_xy_done - txy_list[i]) * 100.0) \
+                        if phase in ("cruise", "descent") else 0.0
+                    _update_episode_stats(
+                        stats, reward=ep_rewards[i], steps=ep_steps[i],
+                        success=ep_suc[i], dist_to_goal_cm=_dist_cm,
+                        stab_summary=_stab_sum)
                     curs[i].update(ep_suc[i])
                     # [v11 vec fix] 倒退时 reset Adam state, 同 PPO vec.
                     if curs[i].consume_regression_flag() and hasattr(agent, 'reset_adam_state'):
@@ -1956,11 +2100,11 @@ def train_sac_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     }
                     log_metrics.update(cur_info)
                     # [v12.6] vec 模式 stab: worker 返回 stab_summary
-                    _stab_sum = res.get('stab_summary')
                     if _stab_sum:
                         log_metrics.update({
                             f"stab/{phase}/{k}": v for k, v in _stab_sum.items()
                         })
+                    log_metrics.update(stats.wandb_trends(phase))
                     logger.log(ep_count, log_metrics)
 
                     with open(lf, "a", newline="") as f:
@@ -2018,7 +2162,6 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
     T  = int(config["train"].get("total_timesteps", 2_000_000))
     SI = int(config["train"]["save_interval"])
     EI = int(config["train"].get("eval_interval", 100))
-    W  = int(config["train"]["log_smooth_win"])
     WU = int(config["sac"].get("warmup_steps", 5000))
 
     print(f"\n{'='*60}\n  SAC | {phase.upper()} | {T} steps | warmup={WU} | "
@@ -2032,6 +2175,9 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
     swing_d = SwingDampingController(config) if phase == "cruise" else None
     _cruise_nmpc_base = (phase == "cruise" and
         bool(config.get("cruise_rl", {}).get("use_nmpc_base", False)))
+    _cruise_nmpc_residual = (phase == "cruise" and
+        bool(config.get("cruise_rl", {}).get(
+            "nmpc_residual_mode", _cruise_nmpc_base)))
     _descent_pid_residual = (phase == "descent" and
         bool(config.get("descent_rl", {}).get("pid_residual_mode", True)))
     # [v12] lift 也支持 NMPC base + RL 残差
@@ -2046,7 +2192,7 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
 
     logger = Logger(log_dir, project=f"phase_rl_v9", run_name=f"{phase}_sac")
     logger.update_config(config)
-    stats = EpisodeStats(window=W)
+    stats = _make_episode_stats(config)
     ep = 0; ts = 0; best = 0.0; t0 = time.time(); onf = False
 
     lf = os.path.join(log_dir, f"{phase}_sac_log.csv")
@@ -2116,6 +2262,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                         obs, cq.astype(np.float64))
                 except Exception:
                     base_dq_for_obs = np.zeros(7, dtype=np.float32)
+            elif phase == "cruise" and _cruise_nmpc_residual:
+                base_dq_for_obs = get_last_nmpc_action(expert)
             cached_base_dq = None
             # [v14.0]
             _wobs = build_wind_obs(env, float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
@@ -2138,8 +2286,17 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                 agent._freeze_obs_norm = True; onf = True
 
             ree = env._get_ee_pos()
+            _cruise_reward_base = None
+            _cruise_reward_action = act
 
-            if phase == "cruise" and z_pid is not None:
+            if phase == "cruise" and _cruise_nmpc_residual:
+                _res3 = clip_cruise_residual(act, config)
+                dq = expert.compute_delta_q_target(
+                    obs, cq.astype(np.float64), residual_acc=_res3)
+                _cruise_reward_base = get_last_nmpc_action(expert)
+                _cruise_reward_action = _res3
+
+            elif phase == "cruise" and z_pid is not None:
                 _pl_pos  = env.data.body('prefab').xpos
                 _dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
                 _pl_vz   = float(env.data.qvel[_dof_idx + 2])
@@ -2153,7 +2310,9 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                 if _falling:
                     rw = -5.0
                     _wobs2 = build_wind_obs(env, float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
-                    _c2, _cb2, _w2, _, _ = build_phase_obs(phase, obs, env, sxy, txy, pt, py, wind_obs=_wobs2)
+                    _c2, _cb2, _w2, _, _ = build_phase_obs(
+                        phase, obs, env, sxy, txy, pt, py, wind_obs=_wobs2,
+                        base_action=get_last_nmpc_action(expert))
                     npo = agent.encode_obs(_c2, _cb2, _w2)
                     nn_ = agent.normalize_obs(npo, update=False)
                     nn_ = _add_obs_noise(nn_, pert["obs_noise"])
@@ -2171,6 +2330,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                         _ba = np.array([float(_a4[0]), float(_a4[1])], np.float32)
                     except Exception:
                         _ba = np.zeros(2, np.float32)
+                    _cruise_reward_base = np.array(
+                        [_ba[0], _ba[1], 0.0, 0.0], dtype=np.float32)
                     # [v11 Path 1] SAC cruise 默认与 PPO 对齐
                     _rm = float(config["cruise_rl"].get("residual_acc_max_xy_rl", 0.08))
                     _cm = _ba + np.clip(act[:2], -_rm, _rm)
@@ -2218,7 +2379,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                 # [v11.2] 传 rl_action 给 cruise reward (action_magnitude/smoothness penalty)
                 rw, dn, sc, ri = compute_cruise_reward(env, no2, config, rs,
                                                        tracker=rew_tracker,
-                                                       rl_action=act[:2])
+                                                       rl_action=_cruise_reward_action,
+                                                       base_action=_cruise_reward_base)
             elif phase == "descent":
                 # [v11.3] 传 rl_action 给 descent reward
                 rw, dn, sc, ri = compute_descent_reward(env, no2, config, rs,
@@ -2249,6 +2411,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                 except Exception:
                     _base3 = np.zeros(7, dtype=np.float32)
                 cached_base_dq = _base3
+            elif phase == "cruise" and _cruise_nmpc_residual:
+                _base3 = get_last_nmpc_action(expert)
             _c3, _cb3, _w3, _, _ = build_phase_obs(
                 phase, no2, env, sxy, txy, pt, py, wind_obs=_wobs3,
                 base_action=_base3)
@@ -2267,8 +2431,6 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
                         float(config["insertion"]["target_payload_z"]))
                 break
 
-        stats.update(reward=er, steps=es, success=float(suc))
-        ar = stats.mean("reward"); sr = stats.success_rate()
         cur.update(suc)
         # [v10] 课程倒退后清理 (SAC 没有 reset_adam_state, 只清标志)
         if cur.consume_regression_flag():
@@ -2279,6 +2441,12 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
         pl_pos_now = env.data.body('prefab').xpos
         dist_to_goal = float(np.linalg.norm(pl_pos_now[:2] - txy)) \
             if phase in ("cruise", "descent") else 0.0
+        stab_summary = stab.summary()
+        _update_episode_stats(
+            stats, reward=er, steps=es, success=suc,
+            dist_to_goal_cm=dist_to_goal * 100.0,
+            stab_summary=stab_summary)
+        ar = stats.mean("reward"); sr = stats.success_rate()
         cur_info = cur.info()
         print(f"Ep{ep:4d} [{ts:7d}] {mark} R:{er:6.2f}({ar:5.2f}) SR:{sr*100:4.0f}% "
               f"S:{es:3d} dist:{dist_to_goal*100:.1f}cm "
@@ -2304,7 +2472,10 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
         log_metrics.update(cur_info)
         log_metrics.update(rew_tracker.episode_summary())
         # [v12.6] 细粒度 RL 评估指标
-        log_metrics.update(stab.summary_for_wandb(phase, prefix="stab"))
+        log_metrics.update({
+            f"stab/{phase}/{k}": v for k, v in stab_summary.items()
+        })
+        log_metrics.update(stats.wandb_trends(phase))
         logger.log(ep, log_metrics)
 
         with open(lf, "a", newline="") as f:

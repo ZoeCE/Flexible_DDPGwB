@@ -201,11 +201,35 @@ DEFAULT_CONFIG = {
         "N":                    20,
         "dt":                   0.1,
         "L":                    0.5,
-        "u_max_xy":             1.2,
-        "u_max_z":              2.5,
+        "u_max_xy":             0.55,
+        "u_max_z":              1.4,
         "u_max_yaw":            2.0,
         "arrival_threshold_xy": 0.08,
         "arrival_threshold_z":  0.08,
+        "cruise_ref_dist":      0.07,
+        "q_payload_xy":         160.0,
+        "q_ee_z":               35.0,
+        "q_yaw":                1.0,
+        "q_swing_xy":           360.0,
+        "q_swing_vel":          760.0,
+        "q_vel":                65.0,
+        "r_acc_xy":             0.60,
+        "r_acc_z":              0.30,
+        "r_acc_yaw":            0.70,
+        "r_jerk":               2.20,
+        "q_terminal":           3.0,
+        "terminal_hover_radius": 0.0,
+        "action_smoothing_alpha": 0.34,
+        "action_rate_limit_xy": 0.045,
+        "action_rate_limit_z":  0.12,
+        "action_rate_limit_yaw": 0.12,
+        "ref_smoothing_alpha":  0.28,
+        "terminal_settle_radius": 0.045,
+        "terminal_settle_vel":  0.075,
+        "terminal_settle_swing": 0.085,
+        "action_deadband_xy":   0.018,
+        "action_deadband_z":    0.025,
+        "action_deadband_yaw":  0.025,
     },
 
     # ==========================================================================
@@ -420,8 +444,9 @@ DEFAULT_CONFIG = {
     # 来源: Jeon et al. 2025 (Residual MPC), Ankile et al. 2024 (ResiP).
     # ==========================================================================
     "cruise_rl": {
-        # [v14.0] obs_dim: 原始 38 + cable_encoder(32) + wind_obs(3) = 73
-        "obs_dim":            73,
+        # [nmpc-residual] obs_dim: core 42 incl. nmpc_action(4)
+        # + cable_encoder(32) + wind_obs(3) = 77
+        "obs_dim":            77,
         "action_dim":         3,    # [v13.0] 2 → 3 (xy + z), 因为合并了 lift 的 z 残差
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
@@ -432,11 +457,15 @@ DEFAULT_CONFIG = {
         "z_lock_height":      0.25,
         "target_z_cruise":    0.25,  # [v13.0] 从 lift_rl 搬来 (统一 z 目标高度)
 
-        # 架构: NMPC base + RL 残差 [v9 缩小残差幅度]
+        # 架构: NMPC base + residual RL.
+        # nmpc_residual_mode keeps the full expert/NMPC integration path and
+        # injects a small 3D EE-acc residual before IK, matching pipeline usage.
         "use_nmpc_base":         True,
-        "residual_acc_max_xy_rl": 0.08,   # [v9] 原 0.25 → 0.08 (base 量级 ~0.5 的 16%)
+        "nmpc_residual_mode":    True,
+        "include_nmpc_action_obs": True,
+        "residual_acc_max_xy_rl": 0.10,   # small authority for damping NMPC loop jitter
         "residual_acc_max_z_rl":  0.10,   # [v13.0] 新增 z 残差上限 (从 lift_rl 搬来)
-        "residual_acc_max_xy":   0.60,    # [v9] 原 0.80 → 0.60
+        "residual_acc_max_xy":   0.60,    # total xy acc cap after base + residual
         "total_acc_max_z":       1.50,    # [v13.0] z 总和上限 (lift 阶段需要)
         # [v9] BC 已完全移除. cruise 残差 actor 在 PPOPhaseAgent.__init__ 中
         # 总是自动应用输出层零初始化 (见 phase_agent.py _zero_init_residual_actor).
@@ -453,9 +482,9 @@ DEFAULT_CONFIG = {
 
             # 1. swing_improve (差分) — 鼓励主动减摆
             #    [v11.4] cap 0.20 → 0.04 (与其他 reward 一起 ÷5 防 Q 发散)
-            "swing_improve_coef":   20.0,    # v11.2 50 → v11.4 20
-            "swing_improve_max":     0.04,   # v11.2 0.20 → v11.4 0.04
-            "swing_worsen_max":      0.04,   # 同上
+            "swing_improve_coef":   28.0,
+            "swing_improve_max":     0.06,
+            "swing_worsen_max":      0.06,
 
             # 2. swing_energy 绝对惩罚 — 核心: 保护 NMPC 稳定性
             #    [v11.2] threshold 50mJ → 10mJ (NMPC normal 4mJ 的 2.5x)
@@ -472,10 +501,23 @@ DEFAULT_CONFIG = {
             # 3. [v11.2 新增, v11.4 缩小] action_magnitude_penalty
             #    Olesen et al. 2026: residual policy 应默认 0, 仅必要时介入
             # [v14.0] 从 0.02 提到 0.10 — 强制 RL 保持 residual, 不 override NMPC
-            "action_magnitude_coef":      0.10,    # v11.4 0.02 → v14.0 0.10
+            "action_rms_free":            0.35,
+            "action_magnitude_coef":      0.05,
+            "action_penalty_max":         0.04,
 
             # 4. [v11.2 新增, v11.4 缩小] action_smoothness_penalty (CAPS)
-            "action_smoothness_coef":     0.04,    # v11.2 0.10 → v11.4 0.04
+            "action_smoothness_coef":     0.035,
+
+            # 4b. NMPC control-loop damping signal. When base NMPC action is
+            # flipping or chattering, reward a small residual that counteracts
+            # it and reduces payload/EE relative motion.
+            "loop_base_jerk_thresh":      0.05,
+            "loop_counter_coef":          0.050,
+            "loop_counter_max":           0.050,
+            "rel_vel_damping_coef":       0.035,
+            "rel_vel_damping_max":        0.035,
+            "loop_jitter_penalty_coef":   0.020,
+            "loop_jitter_penalty_max":    0.030,
 
             # 5. calm_bonus — 引导持续低摆动 (强信号)
             "calm_energy_thresh":   0.005,
@@ -502,7 +544,9 @@ DEFAULT_CONFIG = {
             # 6. 终止信号 (v11.4 全部 ÷5, P0 防 Q 发散)
             # 理论 Q ∈ [success/(1-γ), collision/(1-γ)] = [+500, -200] (γ=0.99)
             # 即使 Q 偶发偏离, critic_loss 量级保持 < 100
-            "collision_penalty":   -2.0,     # v11.2 -10 → v11.4 -2
+            "collision_penalty":   -2.0,     # ground/critical safety fallback
+            "obstacle_collision_penalty": -0.20,  # NMPC-caused obstacle hit: weak signal
+            "base_collision_penalty":     -0.20,
             "instability_penalty": -1.0,     # v11.2 -5 → v11.4 -1
             "success_bonus":        5.0,     # v11.2 20 → v11.4 5
             # [v13.1] 用户反馈: expert 到达终点上方但没成功率 → 放宽标准
@@ -758,7 +802,9 @@ DEFAULT_CONFIG = {
         "save_interval":         50,
         "eval_interval":         100,
         "eval_episodes":         10,
-        "log_smooth_win":        20,
+        "log_smooth_win":        200,
+        "log_trend_windows":     [50, 200, 500],
+        "log_baseline_episodes": 50,
         "gpu_id":                0,
         # [v11 Path 3] Vectorized env (CPU-parallel)
         # n_envs=1 → DummyVecEnv (与原版完全一致, 默认安全)
@@ -828,14 +874,13 @@ DEFAULT_CONFIG = {
         # 理由: RL 从一开始就学习"有扰动"环境, 避免 0→有风的分布突变
         # 增量更细: 每级 ≤ 0.3N, 8 级渐进, 比 v12.5 的 6 级更平滑
         "cruise_levels": [
-            {"wind_max": 0.05},
-            {"wind_max": 0.15},
-            {"wind_max": 0.30},
-            {"wind_max": 0.50},
-            {"wind_max": 0.80},
-            {"wind_max": 1.10},
-            {"wind_max": 1.50},
-            {"wind_max": 2.00},
+            {"wind_max": 0.005},
+            {"wind_max": 0.015},
+            {"wind_max": 0.030},
+            {"wind_max": 0.060},
+            {"wind_max": 0.100},
+            {"wind_max": 0.200},
+            {"wind_max": 0.350},
         ],
         "cruise_sr_threshold":  0.60,
         "cruise_min_eps":       350,   # v12.5 250 → v14.0 350 (每级训练更久)
@@ -843,8 +888,11 @@ DEFAULT_CONFIG = {
         "cruise_stats_window":  100,   # v12.5 80 → v14.0 100
 
         # [v14.2] 连续课程 ramp 参数
-        "cruise_ramp_episodes":     600,   # 从 min→max wind 需要 ~600 成功 episode
-        "cruise_ramp_sr_threshold": 0.48,  # SR 低于此值时暂停 wind 增长
+        "cruise_ramp_episodes":     900,   # small residual, ramp wind gently
+        "cruise_ramp_min_wind":     0.005,
+        "cruise_ramp_sr_threshold": 0.55,  # SR 低于此值时暂停 wind 增长
+        "cruise_ramp_warmup_sr_threshold": 0.40,
+        "cruise_ramp_warmup_scale": 0.25,
 
         # Descent starts with tiny nonzero wind so the policy learns
         # disturbance rejection before it overfits the no-wind insertion.

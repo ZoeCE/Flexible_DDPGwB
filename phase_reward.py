@@ -338,6 +338,7 @@ class CruiseRewardState:
         self.hold_counter     = 0
         # [v11.2] 残差 RL 用: 跟踪上一步 RL action (供 action smoothness penalty)
         self.prev_rl_action   = None
+        self.prev_base_action = None
         # [v13.0] 合并 lift 段后, z_approach 差分需要 prev_z
         self.prev_z           = None
 
@@ -348,10 +349,12 @@ class CruiseRewardState:
         self.prev_swing_energy = None
         self.hold_counter      = 0
         self.prev_rl_action    = None
+        self.prev_base_action  = None
         self.prev_z            = None
 
 
-def compute_cruise_reward(env, obs, config, rstate, tracker=None, rl_action=None):
+def compute_cruise_reward(env, obs, config, rstate, tracker=None,
+                          rl_action=None, base_action=None):
     """
     Cruise 段奖励 v11.2 — 基于 residual RL 文献彻底重设计.
 
@@ -410,12 +413,14 @@ def compute_cruise_reward(env, obs, config, rstate, tracker=None, rl_action=None
         if tracker: tracker.add("instability_penalty", r)
         return r, True, False, {"termination": f"payload_too_low:z={payload_z*1000:.0f}mm"}
     if _check_collision(env, config):
-        r = float(rcfg["collision_penalty"])
-        if tracker: tracker.add("collision_penalty", r)
+        r = float(rcfg.get("obstacle_collision_penalty",
+                           rcfg.get("collision_penalty", -0.2)))
+        if tracker: tracker.add("obstacle_collision_penalty", r)
         return r, True, False, {"termination": "collision"}
     if float(np.linalg.norm(pl_xy)) < 0.03:
-        r = float(rcfg["collision_penalty"])
-        if tracker: tracker.add("collision_penalty", r)
+        r = float(rcfg.get("base_collision_penalty",
+                           rcfg.get("collision_penalty", -0.2)))
+        if tracker: tracker.add("base_collision_penalty", r)
         return r, True, False, {"termination": "collision_base"}
 
     # ── 摆动能量 (核心物理量) ────────────────────────────────────────────────
@@ -475,32 +480,116 @@ def compute_cruise_reward(env, obs, config, rstate, tracker=None, rl_action=None
     # Olesen 2026: residual policy 应学到 "默认 0, 必要时介入"
     # 来源: arXiv:2602.05895 §III.C
     # 量级设计: 一 ep cap = -2.5 (与 success_bonus 比例 1:8, 不会主导)
+    # 3. Residual action shaping: allow small corrective actions, penalize only excess.
     r_act_mag = 0.0
+    action_rms = 0.0
+    a = None
     if rl_action is not None:
-        # rl_action 是 RL 输出, 在 [-1, 1] 内 (squashed); 平方平均
-        a_norm_sq = float(np.mean(np.square(np.asarray(rl_action, np.float32))))
-        k_act_mag = float(rcfg.get("action_magnitude_coef", 0.05))
-        r_act_mag = -k_act_mag * a_norm_sq
+        a = np.asarray(rl_action, np.float32).reshape(-1)
+        crl = config.get("cruise_rl", {})
+        scale = np.array([
+            float(crl.get("residual_acc_max_xy_rl", 0.10)),
+            float(crl.get("residual_acc_max_xy_rl", 0.10)),
+            float(crl.get("residual_acc_max_z_rl", 0.10)),
+        ], dtype=np.float32)[:len(a)]
+        scale = np.maximum(scale, 1e-6)
+        action_rms = float(np.sqrt(np.mean(np.square(a / scale))))
+        free = float(rcfg.get("action_rms_free", 0.35))
+        excess = max(0.0, action_rms - free)
+        r_act_mag = -min(
+            float(rcfg.get("action_magnitude_coef", 0.05)) * excess * excess,
+            float(rcfg.get("action_penalty_max", 0.04)))
         reward += r_act_mag
-    if tracker: tracker.add("action_magnitude_penalty", r_act_mag)
+    if tracker:
+        tracker.add("action_rms_norm", action_rms)
+        tracker.add("action_magnitude_penalty", r_act_mag)
 
-    # ── 4. [v11.2 新增] action_smoothness_penalty (CAPS) ─────────────────────
-    # Mysore 2021: 防止 RL 抖动, ||a_t - a_{t-1}||²
-    # 来源: arXiv:2012.06644 §III
+    # 4. Temporal smoothness in normalized residual-action units.
     r_act_smooth = 0.0
-    if rl_action is not None and rstate.prev_rl_action is not None:
-        diff = np.asarray(rl_action, np.float32) - np.asarray(rstate.prev_rl_action, np.float32)
+    if a is not None and rstate.prev_rl_action is not None:
+        prev_a = np.asarray(rstate.prev_rl_action, np.float32).reshape(-1)[:len(a)]
+        crl = config.get("cruise_rl", {})
+        scale = np.array([
+            float(crl.get("residual_acc_max_xy_rl", 0.10)),
+            float(crl.get("residual_acc_max_xy_rl", 0.10)),
+            float(crl.get("residual_acc_max_z_rl", 0.10)),
+        ], dtype=np.float32)[:len(a)]
+        scale = np.maximum(scale, 1e-6)
+        diff = (a - prev_a) / scale
         smooth_sq = float(np.mean(np.square(diff)))
-        k_smooth = float(rcfg.get("action_smoothness_coef", 0.10))
-        r_act_smooth = -k_smooth * smooth_sq
+        r_act_smooth = -min(
+            float(rcfg.get("action_smoothness_coef", 0.10)) * smooth_sq,
+            float(rcfg.get("action_penalty_max", 0.04)))
         reward += r_act_smooth
-    if rl_action is not None:
-        rstate.prev_rl_action = np.asarray(rl_action, np.float32).copy()
+    if a is not None:
+        rstate.prev_rl_action = a.copy()
     if tracker: tracker.add("action_smoothness_penalty", r_act_smooth)
 
     # ── [v13.0 合并 lift 段] z_approach 差分 + tilt 惩罚 ──────────────────────
     # cruise 段现在合并了 lift, payload 起步在 z=0.11, 需要引导到 z_cruise=0.25.
     # 用差分 reward, 仅在 z < z_cruise - 0.02 (低空段) 启用.
+    r_loop_counter = 0.0
+    r_rel_damp = 0.0
+    r_loop_jitter = 0.0
+    if a is not None and len(a) >= 2 and base_action is not None:
+        a_xy = np.asarray(a[:2], dtype=np.float64)
+        base = np.asarray(base_action, dtype=np.float64).reshape(-1)
+        base_xy = base[:2] if base.size >= 2 else np.zeros(2, dtype=np.float64)
+        base_norm = float(np.linalg.norm(base_xy))
+        res_norm = float(np.linalg.norm(a_xy))
+
+        prev_base = getattr(rstate, "prev_base_action", None)
+        base_jerk = 0.0
+        base_flip = 0.0
+        if prev_base is not None:
+            prev_xy = np.asarray(prev_base, dtype=np.float64).reshape(-1)[:2]
+            prev_norm = float(np.linalg.norm(prev_xy))
+            base_jerk = float(np.linalg.norm(base_xy - prev_xy))
+            if base_norm > 1e-6 and prev_norm > 1e-6:
+                base_flip = max(
+                    0.0,
+                    -float(np.dot(base_xy, prev_xy)) / (base_norm * prev_norm + 1e-8))
+        rstate.prev_base_action = base_xy.copy()
+
+        jerk_thresh = float(rcfg.get("loop_base_jerk_thresh", 0.05))
+        loop_gate = 0.0
+        if jerk_thresh > 1e-6:
+            loop_gate = float(np.clip((base_jerk - jerk_thresh) / jerk_thresh, 0.0, 1.0))
+        loop_gate = max(loop_gate, min(base_flip, 1.0))
+
+        if base_norm > 1e-5 and res_norm > 1e-5 and loop_gate > 0.0:
+            counter_align = -float(np.dot(a_xy, base_xy)) / (res_norm * base_norm + 1e-8)
+            r_loop_counter = (
+                float(rcfg.get("loop_counter_coef", 0.05)) *
+                loop_gate * float(np.clip(counter_align, -1.0, 1.0)))
+            r_loop_counter = float(np.clip(
+                r_loop_counter,
+                -float(rcfg.get("loop_counter_max", 0.05)),
+                float(rcfg.get("loop_counter_max", 0.05))))
+            reward += r_loop_counter
+
+        rel_vel_xy = np.asarray([pl_vx - ee_vx, pl_vy - ee_vy], dtype=np.float64)
+        rel_norm = float(np.linalg.norm(rel_vel_xy))
+        if rel_norm > 1e-5 and res_norm > 1e-5:
+            damp_align = -float(np.dot(a_xy, rel_vel_xy)) / (res_norm * rel_norm + 1e-8)
+            r_rel_damp = (
+                float(rcfg.get("rel_vel_damping_coef", 0.035)) *
+                float(np.clip(damp_align, -1.0, 1.0)))
+            r_rel_damp = float(np.clip(
+                r_rel_damp,
+                -float(rcfg.get("rel_vel_damping_max", 0.035)),
+                float(rcfg.get("rel_vel_damping_max", 0.035))))
+            reward += r_rel_damp
+
+        r_loop_jitter = -min(
+            float(rcfg.get("loop_jitter_penalty_coef", 0.02)) * base_jerk,
+            float(rcfg.get("loop_jitter_penalty_max", 0.03)))
+        reward += r_loop_jitter
+    if tracker:
+        tracker.add("loop_counter_reward", r_loop_counter)
+        tracker.add("rel_vel_damping_reward", r_rel_damp)
+        tracker.add("loop_jitter_penalty", r_loop_jitter)
+
     z_cruise = float(rcfg.get("target_z_cruise",
                               config["cruise_rl"].get("target_z_cruise", 0.25)))
     r_z = 0.0
@@ -875,7 +964,11 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
         return -min(float(rcfg.get("failure_miss_penalty_coef", 10.0)) * miss,
                     float(rcfg.get("failure_miss_penalty_max", 25.0)))
 
-    current_step = getattr(env, 'current_step', 0)
+    # In pipeline evaluation this reward is entered after a long NMPC cruise.
+    # Use the phase-local counter when provided so descent still receives its
+    # trained 300-step budget. Standalone descent keeps env.current_step.
+    current_step = int(getattr(
+        rstate, 'phase_step', getattr(env, 'current_step', 0)))
     max_steps = int(config["descent_rl"]["max_steps"])
     late_start_frac = float(rcfg.get("late_step_penalty_start_frac", 0.70))
     late_start = int(max_steps * np.clip(late_start_frac, 0.0, 0.95))
