@@ -91,6 +91,212 @@ def _check_collision(env, config):
     return False
 
 
+def _estimate_rebar_insertion_depth(env, config):
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+    socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+    socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+    hole_depth = float(cfg_pref.get("socket_hole_depth", 0.06))
+    rebar_half_h = float(cfg_tgt.get("rebar_half_height", 0.01))
+
+    payload_z = float(env.data.body('prefab').xpos[2])
+    try:
+        target_base_z = float(env.data.body('target').xpos[2])
+    except Exception:
+        target_base_z = 0.0
+
+    rebar_top_z = target_base_z + 2.0 * rebar_half_h
+    socket_bottom_z = payload_z - socket_half_z
+    raw_depth = rebar_top_z - socket_bottom_z
+    return float(np.clip(raw_depth, 0.0, max(hole_depth, 0.0))), hole_depth
+
+
+def _check_payload_floor_contact(env, config):
+    if hasattr(env, "_check_prefab_floor_contact"):
+        try:
+            if bool(env._check_prefab_floor_contact()):
+                return True
+        except Exception:
+            pass
+
+    if not bool(config.get("insertion", {}).get("floor_contact_allow_z_fallback", False)):
+        return False
+
+    try:
+        cfg_pref = config.get("prefab", {})
+        socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+        socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+        z_tol = float(config.get("insertion", {}).get("floor_contact_z_tolerance", 0.004))
+        payload_z = float(env.data.body('prefab').xpos[2])
+        return payload_z <= socket_half_z + z_tol
+    except Exception:
+        return False
+
+
+def _physical_insertion_status(env, config, target_pz, payload_z,
+                               dtf, tilt, abs_yaw,
+                               xy_tol, z_tol, tilt_tol, yaw_tol):
+    cfg_ins = config.get("insertion", {})
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+
+    floor_contact = _check_payload_floor_contact(env, config)
+    require_floor = bool(cfg_ins.get(
+        "physical_success_requires_floor_contact",
+        bool(cfg_ins.get("success_by_floor_contact", False)) or
+        bool(cfg_ins.get("require_floor_contact", False))))
+
+    ok_z = abs(payload_z - target_pz) < z_tol or (require_floor and floor_contact)
+    ok_xy = dtf < xy_tol
+    ok_tilt = tilt < tilt_tol
+    ok_yaw = abs_yaw < yaw_tol
+
+    pl_pos = env.data.body('prefab').xpos.copy()
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    rebar_tol = float(cfg_ins.get("physical_rebar_xy_tolerance", xy_tol))
+    try:
+        _, worst_rebar_err, _ = env._compute_rebar_errors(pl_pos[:2], pl_mat)
+    except Exception:
+        worst_rebar_err = dtf
+    ok_rebar = worst_rebar_err < rebar_tol
+
+    insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
+    min_insert_depth = float(cfg_ins.get(
+        "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
+    ok_insert = insert_depth >= min_insert_depth
+
+    require_insert = bool(cfg_ins.get("physical_success_requires_insert_depth", True))
+    require_rebar = bool(cfg_ins.get("physical_success_requires_rebar_alignment", True))
+    ok_floor_success = floor_contact or not require_floor
+    ok_insert_success = ok_insert or floor_contact or not require_insert
+    ok_rebar_success = ok_rebar or not require_rebar
+
+    detail = (
+        f"z={payload_z*1000:.0f}mm,dtf={dtf*1000:.1f}mm,"
+        f"tilt={tilt:.3f},yaw={abs_yaw:.3f},"
+        f"insert={insert_depth*1000:.1f}/{min_insert_depth*1000:.0f}mm,"
+        f"rebar={worst_rebar_err*1000:.1f}/{rebar_tol*1000:.1f}mm,"
+        f"floor={int(floor_contact)}")
+    success = (ok_z and ok_xy and ok_tilt and ok_yaw and
+               ok_rebar_success and ok_insert_success and ok_floor_success)
+    return success, detail, {
+        "floor_contact": floor_contact,
+        "insert_depth": insert_depth,
+        "min_insert_depth": min_insert_depth,
+        "worst_rebar_err": worst_rebar_err,
+        "ok_z": ok_z,
+        "ok_xy": ok_xy,
+        "ok_tilt": ok_tilt,
+        "ok_yaw": ok_yaw,
+        "ok_rebar": ok_rebar,
+        "ok_insert": ok_insert,
+    }
+
+
+def _check_insertion_stuck_failure(env, config, rstate, target_pz, payload_z, dtf):
+    cfg_ins = config.get("insertion", {})
+    if not bool(cfg_ins.get("stuck_fail_enabled", True)):
+        return False, ""
+    if _check_payload_floor_contact(env, config):
+        rstate._stuck_counter = 0
+        return False, ""
+
+    try:
+        hit_obstacle, hit_rebar = env._check_prefab_collision_with_obstacles()
+    except Exception:
+        hit_obstacle, hit_rebar = False, False
+    if hit_obstacle:
+        return False, ""
+
+    z_above = float(cfg_ins.get("stuck_fail_z_above_target", 0.045))
+    if payload_z > target_pz + z_above:
+        rstate._stuck_counter = 0
+        return False, ""
+
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+    socket_hole_size = cfg_pref.get("socket_hole_size", [0.014, 0.014])
+    socket_hole_radius = min(socket_hole_size[0], socket_hole_size[1]) / 2.0
+    rebar_radius = float(cfg_tgt.get("rebar_radius", 0.003))
+    xy_tol = max(socket_hole_radius - rebar_radius, 0.0)
+    xy_gate = float(cfg_ins.get("stuck_fail_xy_gate", 0.035))
+    if dtf > max(xy_gate, xy_tol):
+        rstate._stuck_counter = 0
+        return False, ""
+
+    pl_pos = env.data.body('prefab').xpos.copy()
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    try:
+        _, worst_rebar_err, _ = env._compute_rebar_errors(pl_pos[:2], pl_mat)
+    except Exception:
+        worst_rebar_err = dtf
+    rebar_gate = float(cfg_ins.get("stuck_fail_rebar_xy_gate", 0.035))
+    if worst_rebar_err > max(rebar_gate, xy_tol):
+        rstate._stuck_counter = 0
+        return False, ""
+
+    insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
+    min_insert_depth = float(cfg_ins.get(
+        "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
+    socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
+    socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
+    rebar_half_h = float(cfg_tgt.get("rebar_half_height", 0.01))
+    try:
+        target_base_z = float(env.data.body('target').xpos[2])
+    except Exception:
+        target_base_z = 0.0
+    rebar_top_z = target_base_z + 2.0 * rebar_half_h
+    socket_bottom_z = payload_z - socket_half_z
+    rebar_top_gap = socket_bottom_z - rebar_top_z
+    rebar_top_tol = float(cfg_ins.get("stuck_fail_rebar_top_tol", 0.015))
+    geometric_rebar_contact = (
+        rebar_top_gap <= rebar_top_tol and
+        insert_depth < max(min_insert_depth, rebar_top_tol))
+    has_rebar_support = bool(hit_rebar or geometric_rebar_contact)
+    if (bool(cfg_ins.get("stuck_fail_rebar_contact_required", False)) and
+            not has_rebar_support):
+        rstate._stuck_counter = 0
+        return False, ""
+    if not has_rebar_support:
+        rstate._stuck_counter = 0
+        return False, ""
+
+    prev_best = float(getattr(rstate, "_best_insert_depth", -1.0))
+    progress_eps = float(cfg_ins.get("stuck_fail_progress_eps", 0.0002))
+    progress = insert_depth - prev_best
+    significant_progress = insert_depth > prev_best + progress_eps
+    if insert_depth > prev_best:
+        rstate._best_insert_depth = insert_depth
+
+    try:
+        dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
+        vz_abs = abs(float(env.data.qvel[dof_idx + 2]))
+    except Exception:
+        vz_abs = 0.0
+    vz_gate = float(cfg_ins.get("stuck_fail_vz_abs", 0.015))
+
+    stalled = (not significant_progress) and progress <= progress_eps and vz_abs <= vz_gate
+    if stalled:
+        rstate._stuck_counter = int(getattr(rstate, "_stuck_counter", 0)) + 1
+    else:
+        rstate._stuck_counter = 0
+
+    patience = int(cfg_ins.get("stuck_fail_patience", 15))
+    if rstate._stuck_counter >= patience:
+        detail = (
+            f"stuck_on_rebar:dtf={dtf*1000:.1f}mm,"
+            f"rebar={worst_rebar_err*1000:.1f}mm,"
+            f"z={payload_z*1000:.1f}mm,"
+            f"insert={insert_depth*1000:.1f}/{min_insert_depth*1000:.0f}mm,"
+            f"gap={rebar_top_gap*1000:.1f}mm,"
+            f"vz={vz_abs*1000:.1f}mm/s,"
+            f"rebar_contact={int(hit_rebar)},"
+            f"geom_contact={int(geometric_rebar_contact)},floor=NO,"
+            f"patience={rstate._stuck_counter}")
+        return True, detail
+    return False, ""
+
+
 def _get_swing_ke(env, obs):
     ee_vxy = np.array([obs[2], obs[3]])
     pl_vxy = np.array([obs[6], obs[7]])
@@ -110,210 +316,6 @@ def _get_swing_energy(env, obs, config):
     mass   = float(env.config.get("prefab",     {}).get("mass", 1.0))
     rope_L = float(env.config.get("controller", {}).get("L",    0.5))
     return compute_swing_energy(pl_pos, ee_pos, pl_vel, ee_vel, mass, rope_L)
-
-
-# ==============================================================================
-# Phase 1: Lift Reward
-# ==============================================================================
-
-class LiftRewardState:
-    def __init__(self):
-        self.prev_z         = None
-        self.prev_dtf_start = None
-        self.hold_counter   = 0
-        self.start_xy       = None
-        self.total_steps_global = 0
-        # [v12] 残差 RL 用: action smoothness penalty
-        self.prev_rl_action = None
-        # [v12.4] 合并 cruise reward: swing_improve 差分需要 prev_swing_energy
-        self.prev_swing_energy = None
-
-    def reset(self):
-        self.prev_z         = None
-        self.prev_dtf_start = None
-        self.hold_counter   = 0
-        self.prev_rl_action = None
-        self.prev_swing_energy = None
-
-
-def compute_lift_reward(env, obs, config, rstate, tracker=None, rl_action=None):
-    """
-    Lift 段奖励 v12.4 — 与 cruise 统一: 使用相同的防摆 reward 主体, 只差成功判定.
-
-    [v12.4 重大改动] 合并 lift+cruise reward 设计:
-      Lift 与 cruise 物理任务几乎相同 (末端动, payload 跟随防摆), 之前分两套
-      reward 在过渡处不连续, RL 学不稳. 现在统一:
-        共用部分 (防摆主体):
-          - swing_energy_penalty (核心, 强惩罚)
-          - cable_ke_penalty (v12.3 新增)
-          - action_magnitude_penalty + action_smoothness_penalty (Olesen/CAPS)
-          - tilt_penalty (防 payload 翻倒)
-        Lift 特有:
-          - z_approach 差分 (引导上升, 主导)
-          - 成功条件 = 到达 z_cruise 高度 + xy 不漂 + 摆动小
-        Cruise 特有:
-          - swing_improve 差分 (主动减摆)
-          - calm_bonus (持续低摆)
-          - 成功条件 = 到达 target_xy
-
-    返回与原版本一致: (reward, done, success, info)
-    """
-    rcfg     = config["lift_rl"]["reward"]
-    z_cruise = float(config["lift_rl"]["target_z_cruise"])
-
-    pl_pos    = env.data.body('prefab').xpos.copy()
-    payload_z = float(pl_pos[2])
-    pl_xy     = pl_pos[:2].copy()
-    reward = 0.0; done = False; success = False; info = {}
-
-    # ── 安全检查 (与 cruise 一致) ─────────────────────────────────────────────
-    unstable, reason = _check_instability(env, obs, config, grace_steps=30)
-    if unstable:
-        r = float(rcfg["instability_penalty"])
-        if tracker: tracker.add("instability_penalty", r)
-        return r, True, False, {"termination": reason}
-
-    dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
-    pl_vz = float(env.data.qvel[dof_idx + 2])
-    if payload_z < 0.03 and pl_vz < -0.5:
-        r = float(rcfg["crash_penalty"])
-        if tracker: tracker.add("crash_penalty", r)
-        return r, True, False, {"termination": "crash"}
-
-    _sxy = getattr(rstate, 'start_xy', None)
-    start_xy = _sxy if _sxy is not None else env.default_start_xy.copy()
-    dtf_start = float(np.linalg.norm(pl_xy - start_xy))
-
-    # ── [v12.4 统一] 摆动能量计算 (与 cruise 一致) ──────────────────────────
-    try:
-        swing_energy, swing_ke, swing_pe, swing_angle = _get_swing_energy(env, obs, config)
-    except Exception:
-        swing_energy, swing_ke, swing_pe, swing_angle = 0., 0., 0., 0.
-
-    # ── [v12.4 统一防摆主体] 与 cruise 完全相同 ─────────────────────────────
-    # 1. swing_energy_penalty: 绝对惩罚 (主信号)
-    e_thresh = float(rcfg.get("swing_energy_thresh",       0.010))
-    e_coef   = float(rcfg.get("swing_energy_penalty_coef", 4.0))
-    e_max    = float(rcfg.get("swing_energy_penalty_max",  0.10))
-    r_swing = 0.0
-    if swing_energy > e_thresh:
-        r_swing = -min(e_coef * (swing_energy - e_thresh), e_max)
-        reward += r_swing
-    if tracker:
-        tracker.add("swing_energy_penalty", r_swing)
-        tracker.add("swing_energy_J", swing_energy)
-
-    # 2. [v12.4 加入] swing_improve 差分: 鼓励主动减摆 (与 cruise 一致)
-    k_improve  = float(rcfg.get("swing_improve_coef", 20.0))
-    imp_max    = float(rcfg.get("swing_improve_max",   0.04))
-    worsen_max = float(rcfg.get("swing_worsen_max",    0.04))
-    r_improve = 0.0
-    if rstate.prev_swing_energy is not None:
-        delta_energy = rstate.prev_swing_energy - swing_energy
-        if delta_energy > 0:
-            r_improve = min(k_improve * delta_energy, imp_max)
-        else:
-            r_improve = -min(k_improve * abs(delta_energy), worsen_max)
-        reward += r_improve
-    rstate.prev_swing_energy = swing_energy
-    if tracker: tracker.add("swing_improve", r_improve)
-
-    # 3. [v12.3] cable_ke_penalty (绳索动能, 防 cable 高频振动)
-    cable_ke = _get_cable_kinetic_energy(env)
-    ce_thresh = float(rcfg.get("cable_ke_thresh",      0.05))
-    ce_coef   = float(rcfg.get("cable_ke_penalty_coef", 1.0))
-    ce_max    = float(rcfg.get("cable_ke_penalty_max",  0.08))
-    r_cable_ke = 0.0
-    if cable_ke > ce_thresh:
-        r_cable_ke = -min(ce_coef * (cable_ke - ce_thresh), ce_max)
-        reward += r_cable_ke
-    if tracker:
-        tracker.add("cable_ke_penalty", r_cable_ke)
-        tracker.add("cable_ke", cable_ke)
-
-    # 4. Tilt 惩罚 (有界, lift 段防 payload 翻倒)
-    pl_euler = R.from_matrix(env.data.body('prefab').xmat.reshape(3, 3)).as_euler('xyz')
-    tilt     = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
-    tilt_max_pen = float(rcfg.get("tilt_max_for_penalty", 0.3))
-    r_tilt = -float(rcfg.get("tilt_coef", 0.5)) * min(tilt, tilt_max_pen)
-    reward += r_tilt
-    if tracker: tracker.add("tilt_penalty", r_tilt)
-
-    # 5. action_magnitude_penalty (Olesen 2026)
-    r_act_mag = 0.0
-    if rl_action is not None:
-        a_norm_sq = float(np.mean(np.square(np.asarray(rl_action, np.float32))))
-        k_act_mag = float(rcfg.get("action_magnitude_coef", 0.02))
-        r_act_mag = -k_act_mag * a_norm_sq
-        reward += r_act_mag
-    if tracker: tracker.add("action_magnitude_penalty", r_act_mag)
-
-    # 6. action_smoothness_penalty (Mysore 2021 CAPS)
-    r_act_smooth = 0.0
-    if rl_action is not None and rstate.prev_rl_action is not None:
-        diff = np.asarray(rl_action, np.float32) - np.asarray(rstate.prev_rl_action, np.float32)
-        smooth_sq = float(np.mean(np.square(diff)))
-        k_smooth = float(rcfg.get("action_smoothness_coef", 0.04))
-        r_act_smooth = -k_smooth * smooth_sq
-        reward += r_act_smooth
-    if rl_action is not None:
-        rstate.prev_rl_action = np.asarray(rl_action, np.float32).copy()
-    if tracker: tracker.add("action_smoothness_penalty", r_act_smooth)
-
-    # ── [Lift 特有] z 接近差分 (引导上升) + xy 漂移惩罚 ─────────────────────
-    # 这部分是 lift vs cruise 的唯一差异
-    r_z = 0.0
-    if rstate.prev_z is not None:
-        r_z = float(rcfg.get("z_approach_coef", 2.0)) * (
-            abs(rstate.prev_z - z_cruise) - abs(payload_z - z_cruise))
-        reward += r_z
-    rstate.prev_z = payload_z
-    if tracker: tracker.add("z_approach", r_z)
-
-    r_xy = 0.0
-    xy_coef = float(rcfg.get("xy_drift_coef", 1.0))
-    if rstate.prev_dtf_start is not None:
-        delta = np.clip(rstate.prev_dtf_start - dtf_start, -0.010, 0.010)
-        r_xy = xy_coef * float(delta)
-        reward += r_xy
-    rstate.prev_dtf_start = dtf_start
-    if tracker: tracker.add("xy_drift_reward", r_xy)
-
-    # ── 成功判定 (Lift 特有: 达到 z_cruise + 稳定) ────────────────────────────
-    phase_cfg = config["phase_transition"]
-    z_tol      = float(rcfg.get("success_z_tol",                0.025))
-    vz_max     = float(rcfg.get("success_vz_max",               0.08))
-    s_e_thresh = float(rcfg.get("success_swing_energy_thresh",  0.020))
-    tilt_max   = float(phase_cfg["lift_to_cruise_tilt_max"])
-    xy_max     = float(rcfg.get("xy_max_dist_success", 0.12))
-    hold_steps = int(rcfg.get("hold_steps", 3))
-
-    in_zone = (abs(payload_z - z_cruise) < z_tol and
-               abs(pl_vz) < vz_max  and
-               swing_energy < s_e_thresh and
-               tilt < tilt_max and
-               dtf_start < xy_max)
-    rstate.hold_counter = (rstate.hold_counter + 1) if in_zone else 0
-
-    if rstate.hold_counter >= hold_steps:
-        r_bonus = float(rcfg["success_bonus"])
-        reward += r_bonus
-        if tracker: tracker.add("success_bonus", r_bonus)
-        success = True; done = True
-        info["termination"] = (
-            f"lift_success:z={payload_z*1000:.0f}mm,"
-            f"vz={pl_vz*1000:.0f}mm/s,E={swing_energy*1000:.0f}mJ,"
-            f"dtf={dtf_start*1000:.0f}mm")
-        return reward, done, success, info
-
-    if getattr(env, 'current_step', 0) >= int(config["lift_rl"]["max_steps"]) - 1:
-        done = True
-        info["termination"] = (
-            f"timeout:z={payload_z*1000:.0f}mm,"
-            f"E={swing_energy*1000:.0f}mJ,dtf={dtf_start*1000:.0f}mm")
-
-    reward = float(np.clip(reward, -2.0, 6.0))
-    return reward, done, success, info
 
 
 # ==============================================================================
@@ -383,6 +385,7 @@ def compute_cruise_reward(env, obs, config, rstate, tracker=None,
     rcfg      = config["cruise_rl"]["reward"]
     target_xy = env.target_pos.copy()
     pl_xy  = np.array([obs[4], obs[5]])
+    ee_vxy = np.array([obs[2], obs[3]])
     pl_vxy = np.array([obs[6], obs[7]])
     dtf    = float(np.linalg.norm(pl_xy - target_xy))
 
@@ -568,7 +571,7 @@ def compute_cruise_reward(env, obs, config, rstate, tracker=None,
                 float(rcfg.get("loop_counter_max", 0.05))))
             reward += r_loop_counter
 
-        rel_vel_xy = np.asarray([pl_vx - ee_vx, pl_vy - ee_vy], dtype=np.float64)
+        rel_vel_xy = np.asarray(pl_vxy - ee_vxy, dtype=np.float64)
         rel_norm = float(np.linalg.norm(rel_vel_xy))
         if rel_norm > 1e-5 and res_norm > 1e-5:
             damp_align = -float(np.dot(a_xy, rel_vel_xy)) / (res_norm * rel_norm + 1e-8)
@@ -707,6 +710,11 @@ class DescentRewardState:
         # [v14.2] 早停追踪
         self._z_near_counter       = 0     # payload 在 target_z 附近的连续步数
         self._z_reached            = False  # 是否曾经到达 target_z 附近
+        # physical insertion/stuck detection shared by train and test
+        self._stuck_counter        = 0
+        self._best_insert_depth    = -1.0
+        self._bad_rebar_contact_seen = False
+        self._bad_rebar_contact_counter = 0
 
     def reset(self):
         self.prev_z = None
@@ -716,11 +724,18 @@ class DescentRewardState:
         self.prev_rl_action = None
         self._z_near_counter = 0
         self._z_reached = False
+        self._stuck_counter = 0
+        self._best_insert_depth = -1.0
+        self._bad_rebar_contact_seen = False
+        self._bad_rebar_contact_counter = 0
 
 
 def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=None):
     rcfg    = config["descent_rl"]["reward"]
     cfg_ins = config.get("insertion", {})
+    dense_scale = float(rcfg.get("dense_dt_scale", 1.0))
+    if not np.isfinite(dense_scale) or dense_scale <= 0.0:
+        dense_scale = 1.0
     target_xy = env.target_pos.copy()
     target_pz = float(cfg_ins.get("target_payload_z", 0.10))
 
@@ -760,6 +775,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
     e_coef   = float(rcfg.get("swing_energy_coef", 6.0))
     e_max    = float(rcfg.get("swing_energy_penalty_max", 0.40))
     r_swing_energy = -min(e_coef * max(0.0, swing_energy - e_thresh), e_max)
+    r_swing_energy *= dense_scale
     reward += r_swing_energy
     if tracker:
         tracker.add("swing_energy_penalty", r_swing_energy)
@@ -778,6 +794,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
     r_cable_ke = 0.0
     if cable_ke > ce_thresh:
         r_cable_ke = -min(ce_coef * (cable_ke - ce_thresh), ce_max)
+        r_cable_ke *= dense_scale
         reward += r_cable_ke
     if tracker:
         tracker.add("cable_ke_penalty", r_cable_ke)
@@ -830,7 +847,9 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
     tilt_score = float(np.exp(-0.5 * (tilt / tilt_sigma) ** 2))
     yaw_score = float(np.exp(-0.5 * (abs_yaw / yaw_sigma) ** 2))
     insert_score = xy_score * z_score * tilt_score * yaw_score
-    r_proximity = float(rcfg.get("alignment_success_coef", 0.30)) * insert_score
+    r_proximity = (
+        float(rcfg.get("alignment_success_coef", 0.30)) *
+        insert_score * dense_scale)
 
     r_progress = 0.0
     if rstate.prev_insert_error is not None:
@@ -850,10 +869,26 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
                             xy_score * z_score * z_delta)
     rstate.prev_z = payload_z
 
-    r_height_penalty = -float(rcfg.get("alignment_height_penalty_coef", 0.04)) * (
-        1.0 - z_score) * xy_score
+    r_height_penalty = (
+        -float(rcfg.get("alignment_height_penalty_coef", 0.04)) *
+        (1.0 - z_score) * xy_score * dense_scale)
 
-    r_align = r_proximity + r_progress + r_z_progress + r_height_penalty
+    r_premature_descent = 0.0
+    premature_xy_gate = float(rcfg.get(
+        "premature_descent_xy_gate", rcfg.get("alignment_z_gate", 0.012)))
+    premature_z_margin = float(rcfg.get("premature_descent_z_margin", 0.015))
+    if payload_z > target_pz + premature_z_margin and dtf > premature_xy_gate:
+        downward_v = max(0.0, -pl_vz)
+        if downward_v > 0.0:
+            gate_scale = min(dtf / max(premature_xy_gate, 1e-6), 4.0)
+            r_premature_descent = -min(
+                float(rcfg.get("premature_descent_penalty_coef", 3.0)) *
+                gate_scale * downward_v,
+                float(rcfg.get("premature_descent_penalty_max", 0.08)))
+            r_premature_descent *= dense_scale
+
+    r_align = (r_proximity + r_progress + r_z_progress +
+               r_height_penalty + r_premature_descent)
     reward += r_align
     if tracker:
         tracker.add("alignment_reward", r_align)
@@ -864,7 +899,8 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
         tracker.add("alignment_yaw_score", yaw_score)
         tracker.add("insertion_error_norm", insert_error)
         tracker.add("alignment_height_penalty", r_height_penalty)
-        tracker.add("xy_align_reward", r_progress)  # kept for HER relabeling
+        tracker.add("premature_descent_penalty", r_premature_descent)
+        tracker.add("xy_align_reward", r_progress)
         tracker.add("z_descent_reward", r_z_progress)
 
     # Residual intervention regularizer. It is intentionally a soft band, not a
@@ -888,6 +924,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
         excess = max(0.0, action_rms - free)
         r_action = -min(float(rcfg.get("action_magnitude_coef", 0.28)) * excess * excess,
                         float(rcfg.get("action_penalty_max", 0.08)))
+        r_action *= dense_scale
         reward += r_action
 
         if rstate.prev_rl_action is not None:
@@ -896,6 +933,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
             smooth = float(np.mean(np.square(diff_norm)))
             r_smooth = -min(float(rcfg.get("action_smoothness_coef", 0.035)) * smooth,
                             float(rcfg.get("action_penalty_max", 0.08)))
+            r_smooth *= dense_scale
             reward += r_smooth
         rstate.prev_rl_action = a.copy()
     if tracker:
@@ -936,26 +974,69 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
     on_target = (abs(payload_z - target_pz) < z_tol and
                  dtf < xy_tol and
                  tilt < tilt_tol and abs_yaw < yaw_tol)
-    floor_contact_success = False
-    if bool(cfg_ins.get("success_by_floor_contact", False)) and on_target:
-        try:
-            floor_contact_success = bool(env._check_prefab_floor_contact())
-        except Exception:
-            floor_contact_success = False
+    physical_success, physical_detail, physical_parts = (
+        _physical_insertion_status(
+            env, config, target_pz, payload_z, dtf, tilt, abs_yaw,
+            xy_tol, z_tol, tilt_tol, yaw_tol))
 
     rstate.insertion_hold_counter = (rstate.insertion_hold_counter + 1) if on_target else 0
+    if tracker:
+        tracker.add("physical_floor_contact", 1.0 if physical_parts["floor_contact"] else 0.0)
+        tracker.add("physical_insert_depth", physical_parts["insert_depth"])
+        tracker.add("physical_rebar_error", physical_parts["worst_rebar_err"])
 
-    if floor_contact_success or rstate.insertion_hold_counter >= hold_steps:
+    if bool(cfg_ins.get("train_reject_lucky_rebar_insert", True)):
+        try:
+            _, hit_rebar_now = env._check_prefab_collision_with_obstacles()
+        except Exception:
+            hit_rebar_now = False
+        bad_contact_depth = float(cfg_ins.get("clean_insert_bad_contact_depth", 0.004))
+        bad_rebar_contact = (
+            bool(hit_rebar_now) and
+            not bool(physical_parts.get("floor_contact", False)) and
+            (not bool(physical_parts.get("ok_rebar", False)) or
+             physical_parts.get("insert_depth", 0.0) < bad_contact_depth))
+        if bad_rebar_contact:
+            rstate._bad_rebar_contact_counter = (
+                int(getattr(rstate, "_bad_rebar_contact_counter", 0)) + 1)
+        else:
+            rstate._bad_rebar_contact_counter = 0
+        bad_contact_patience = max(
+            1, int(cfg_ins.get("clean_insert_bad_contact_patience", 1)))
+        if int(getattr(rstate, "_bad_rebar_contact_counter", 0)) >= bad_contact_patience:
+            rstate._bad_rebar_contact_seen = True
+        if tracker:
+            tracker.add("bad_rebar_contact_seen",
+                        1.0 if getattr(rstate, "_bad_rebar_contact_seen", False) else 0.0)
+            tracker.add("bad_rebar_contact_counter",
+                        getattr(rstate, "_bad_rebar_contact_counter", 0))
+
+    if physical_success:
+        if (bool(cfg_ins.get("train_reject_lucky_rebar_insert", True)) and
+                bool(getattr(rstate, "_bad_rebar_contact_seen", False))):
+            r_lucky = float(cfg_ins.get("lucky_rebar_insert_penalty", -12.0))
+            r_miss = -min(
+                float(rcfg.get("failure_miss_penalty_coef", 10.0)) *
+                min(insert_error, float(rcfg.get("failure_miss_error_clip", 3.0))),
+                float(rcfg.get("failure_miss_penalty_max", 25.0)))
+            reward += r_lucky + r_miss
+            if tracker:
+                tracker.add("lucky_rebar_insert_penalty", r_lucky)
+                tracker.add("failure_miss_penalty", r_miss)
+            done = True
+            info["termination"] = (
+                f"lucky_rebar_insert_failure:{physical_detail},"
+                f"bad_rebar_contact_seen=1")
+            return reward, done, success, info
+
         r_bonus = float(rcfg["success_bonus"])
         reward += r_bonus
         if tracker:
             tracker.add("success_bonus", r_bonus)
         success = True; done = True
-        suffix = ",floor_contact=1" if floor_contact_success else ""
         info["termination"] = (
-            f"insertion_success:z={payload_z*1000:.0f}mm,"
-            f"dtf={dtf*1000:.1f}mm,tilt={tilt:.3f},yaw={abs_yaw:.3f},"
-            f"xy_tol={xy_tol*1000:.1f}mm{suffix}")
+            f"insertion_success:{physical_detail},"
+            f"xy_tol={xy_tol*1000:.1f}mm")
         return reward, done, success, info
 
     def _failure_miss_penalty():
@@ -963,6 +1044,19 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
         miss = min(insert_error, miss_clip)
         return -min(float(rcfg.get("failure_miss_penalty_coef", 10.0)) * miss,
                     float(rcfg.get("failure_miss_penalty_max", 25.0)))
+
+    stuck_fail, stuck_detail = _check_insertion_stuck_failure(
+        env, config, rstate, target_pz, payload_z, dtf)
+    if stuck_fail:
+        r_stuck = float(rcfg.get("stuck_fail_penalty", -12.0))
+        r_miss = _failure_miss_penalty()
+        reward += r_stuck + r_miss
+        if tracker:
+            tracker.add("stuck_fail_penalty", r_stuck)
+            tracker.add("failure_miss_penalty", r_miss)
+        done = True
+        info["termination"] = stuck_detail
+        return reward, done, success, info
 
     # In pipeline evaluation this reward is entered after a long NMPC cruise.
     # Use the phase-local counter when provided so descent still receives its
@@ -978,6 +1072,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
         late_frac = np.clip((current_step - late_start + 1) / denom, 0.0, 1.0)
         r_late = -min(float(rcfg.get("late_step_penalty_coef", 0.02)) * late_frac,
                       float(rcfg.get("late_step_penalty_max", 0.05)))
+        r_late *= dense_scale
         reward += r_late
     if tracker:
         tracker.add("late_step_penalty", r_late)
@@ -1039,7 +1134,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
 
 class RewardComponentTracker:
     """轻量分项 reward 追踪器, 每 episode 汇总累积值 + 平均值。
-    [v11 Path 2] 增加 last-step value 跟踪, 供 PPO-HER relabel 用。
+    保留 last-step value 跟踪, 供并行环境返回分项诊断。
     """
     def __init__(self, phase):
         self.phase = phase
@@ -1061,7 +1156,7 @@ class RewardComponentTracker:
         self._count += 1
 
     def get_last_step_value(self, name, default=0.0):
-        """[v11] 取本步最新 add 的值; HER relabel 重算时调用。"""
+        """取本步最新 add 的值。"""
         return self._last_step.get(name, default)
 
     def episode_summary(self):

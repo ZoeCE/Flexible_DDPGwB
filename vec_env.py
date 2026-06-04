@@ -11,7 +11,7 @@
 # - 默认 n_envs=1 用 DummyVecEnv (单进程, 向后兼容)
 #
 # 来源: Stable-Baselines3 SubprocVecEnv 设计 (Hill et al. 2018)
-# 关于并行 PPO/SAC: Crowder et al. 2024 (PPO-HER), Schulman 2017 (PPO 原论文 N_envs)
+# 关于并行 PPO/SAC: Schulman 2017 (PPO 原论文 N_envs)
 # ==============================================================================
 
 import os
@@ -26,6 +26,12 @@ import traceback
 # ==============================================================================
 # Worker 进程: 在子进程中运行一个 env + 所有 base controllers
 # ==============================================================================
+
+def _wind_obs_scale(config):
+    wobs = config.get("wind_obs", {})
+    return float(wobs.get("wind_speed_max",
+                          config.get("wind", {}).get("speed_max", 16.5)))
+
 
 def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=None):
     """子进程主循环.
@@ -60,6 +66,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
             'new_cable_raw': raw cable obs,
             'new_wind_obs':  wind obs,
             'new_base_dq':   descent base controller delta_q for next obs,
+            'delta_q':       actually executed joint delta_q,
             'reward':       float,
             'done':         bool,
             'success':      bool,
@@ -110,21 +117,19 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
     z_pid  = controllers.get("z_pid")
     swing_d = controllers.get("swing_d")
     # [v11 fix] phase 从 controllers 取出, 用于 reset 调用 reset_for_phase
-    worker_phase = controllers.get("phase", "lift")
+    worker_phase = controllers.get("phase", "cruise")
 
     # Import worker-side helpers (lazy, 在 subprocess 内部)
     from train_phase import (build_phase_obs, _add_act_noise,
                              _apply_descent_pid_residual,
                              clip_cruise_residual, get_last_nmpc_action,
                              reset_for_phase,
-                             _advance_expert_to_nearest_wp as _advance_expert_to_nearest_wp_local,
-                             _truncate_path_for_lift as _truncate_path_for_lift_local)
-    from phase_reward import (compute_lift_reward, compute_cruise_reward,
-                              compute_descent_reward, RewardComponentTracker)
+                             _advance_expert_to_nearest_wp as _advance_expert_to_nearest_wp_local)
+    from phase_reward import (compute_cruise_reward, compute_descent_reward,
+                              RewardComponentTracker)
     from stability_metrics import StabilityMetrics
     from scipy.spatial.transform import Rotation as R
     REWARD_FNS = {
-        "lift":    compute_lift_reward,
         "cruise":  compute_cruise_reward,
         "descent": compute_descent_reward,
     }
@@ -155,14 +160,9 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                     expert.reset(obs_r, cq_r, env=env)
                     if pp_r is not None:
                         # [v12.2] lift 时只把"lift 段"喂给 tracker (防 look-ahead 跨段)
-                        if worker_phase == "lift":
-                            _pp_for_expert = _truncate_path_for_lift_local(pp_r, config)
-                        else:
-                            _pp_for_expert = pp_r
-                        expert.set_path(_pp_for_expert)
-                        if worker_phase != "lift":
-                            plp = env.data.body('prefab').xpos.copy()
-                            _advance_expert_to_nearest_wp_local(expert, pp_r, plp)
+                        expert.set_path(pp_r)
+                        plp = env.data.body('prefab').xpos.copy()
+                        _advance_expert_to_nearest_wp_local(expert, pp_r, plp)
                     ectl.reset(env._get_ee_pos(), cq_r)
                     if z_pid is not None:
                         _pl_z   = float(env.data.body('prefab').xpos[2])
@@ -203,6 +203,10 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 rstate = payload['rstate']
                 act_noise = float(payload.get('act_noise', 0.0))
                 base_dq = payload.get('base_dq', None)
+                if 'train_reject_lucky_rebar_insert' in payload:
+                    config.setdefault("insertion", {})[
+                        "train_reject_lucky_rebar_insert"] = bool(
+                            payload.get('train_reject_lucky_rebar_insert'))
 
                 ree = env._get_ee_pos()
                 term_reason = "running"
@@ -241,6 +245,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                                 'new_obs': obs,
                                 'new_core_obs': None, 'new_cable_raw': None, 'new_wind_obs': None,
                                 'new_base_dq': None,
+                                'delta_q': np.zeros(7, dtype=np.float32),
                                 'new_tilt': pt, 'new_yaw': py,
                                 'pl_xy': _pl_pos[:2].copy(), 'xy_align_r': 0.0,
                                 'rstate': rstate,
@@ -317,32 +322,12 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                         rl_action=rl_act)
                     term_reason = ri.get('termination', 'running')
 
-                else:  # lift
-                    _use_lift_nmpc = bool(config.get("lift_rl", {}).get("use_nmpc_base", False))
-                    if _use_lift_nmpc:
-                        # [v12 fix] 用 expert.compute_delta_q_target(..., residual_acc=...)
-                        # 与 test_phase expert-only 路径完全一致.
-                        _rm_xy = float(config["lift_rl"].get("residual_acc_max_xy", 0.08))
-                        _rm_z  = float(config["lift_rl"].get("residual_acc_max_z",  0.10))
-                        _res3 = np.array([
-                            float(np.clip(rl_act[0], -_rm_xy, _rm_xy)),
-                            float(np.clip(rl_act[1], -_rm_xy, _rm_xy)),
-                            float(np.clip(rl_act[2], -_rm_z,  _rm_z)),
-                        ], np.float64)
-                        dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
-                    else:
-                        dq = ectl.compute_delta_q(rl_act, cq, ree)
-                    dq = _add_act_noise(dq, act_noise)
-                    no2, _, _, _, ei = env.step(dq)
-                    # [v12] 传 rl_action
-                    reward, done, success, ri = compute_lift_reward(
-                        env, no2, config, rstate, tracker=tracker,
-                        rl_action=rl_act)
-                    term_reason = ri.get('termination', 'running')
+                else:
+                    raise ValueError(f"Unsupported phase for vec rl_step: {phase}")
 
                 # [v14.0] 构造 phase obs (供下一步 RL inference)
                 from phase_agent import build_wind_obs as _bw
-                _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+                _wind_max = _wind_obs_scale(config)
                 _wobs_next = _bw(env, _wind_max)
                 _base_next = None
                 if phase == "descent" and not done:
@@ -378,6 +363,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                     'new_cable_raw': _cable_next,     # [v14.0]
                     'new_wind_obs': _wobs_next,       # [v14.0]
                     'new_base_dq': _base_next,
+                    'delta_q': np.asarray(dq, dtype=np.float32).copy(),
                     'reward': float(reward), 'done': bool(done), 'success': bool(success),
                     'info': ei, 'new_tilt': float(new_tilt), 'new_yaw': float(new_yaw),
                     'pl_xy': pl_xy_now, 'xy_align_r': xy_align_r,
@@ -390,7 +376,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 from train_phase import build_phase_obs
                 from phase_agent import build_wind_obs
                 phase_b, eo, sxy_b, txy_b, pt_b, py_b = data
-                _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+                _wind_max = _wind_obs_scale(config)
                 _wobs = build_wind_obs(env, _wind_max)
                 _base_b = None
                 if phase_b == "descent":
@@ -419,16 +405,14 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
             elif cmd == 'set_force_noise':
                 env.set_force_noise(data)
                 remote.send('ok')
-            elif cmd == 'set_wind_force':
-                f, d = data
-                if hasattr(env, 'set_wind_force'):
-                    env.set_wind_force(f, d)
+            elif cmd == 'set_wind_speed':
+                v, d = data
+                if hasattr(env, 'set_wind_speed'):
+                    env.set_wind_speed(v, d)
                 remote.send('ok')
-            elif cmd == 'clear_wind_force':
-                if hasattr(env, 'clear_wind_force'):
-                    env.clear_wind_force()
-                elif hasattr(env, 'set_wind_force'):
-                    env.set_wind_force(0.0, 0.0)
+            elif cmd == 'clear_wind':
+                if hasattr(env, 'clear_wind'):
+                    env.clear_wind()
                 remote.send('ok')
             elif cmd == 'set_wind_curriculum':
                 if hasattr(env, 'set_wind_curriculum'):
@@ -486,29 +470,25 @@ class DummyVecEnv:
         # [v11 fix] env.reset() 只返回 obs (1 个值); 用 reset_for_phase 取 (obs, pp)
         from train_phase import reset_for_phase
         env = self.envs[idx]; config = self.configs[idx]
-        phase = self.controllers_list[idx].get("phase", "lift")
+        phase = self.controllers_list[idx].get("phase", "cruise")
         return reset_for_phase(env, phase, config)
 
     def reset_controllers(self, idx, obs, cq, planned_path):
         """[v11 KEY FIX] 每个 episode 开始时重置 expert / ee_ctrl / z_pid.
         必须 reset, 否则 NMPC tracker / PID 保留上 episode 的内部状态 → SR=0.
         """
-        from train_phase import (_advance_expert_to_nearest_wp,
-                                 _truncate_path_for_lift)
+        from train_phase import _advance_expert_to_nearest_wp
         from scipy.spatial.transform import Rotation as R
         env = self.envs[idx]; ctrls = self.controllers_list[idx]
-        phase = ctrls.get("phase", "lift")
+        phase = ctrls.get("phase", "cruise")
         expert = ctrls.get("expert"); ectl = ctrls.get("ee_ctrl")
         z_pid = ctrls.get("z_pid")
         expert.reset(obs, cq, env=env)
         if planned_path is not None:
             # [v12.2] lift 时只把"lift 段"喂给 tracker
-            _pp_for_expert = (_truncate_path_for_lift(planned_path, self.configs[idx])
-                              if phase == "lift" else planned_path)
-            expert.set_path(_pp_for_expert)
-            if phase != "lift":
-                plp = env.data.body('prefab').xpos.copy()
-                _advance_expert_to_nearest_wp(expert, planned_path, plp)
+            expert.set_path(planned_path)
+            plp = env.data.body('prefab').xpos.copy()
+            _advance_expert_to_nearest_wp(expert, planned_path, plp)
         ectl.reset(env._get_ee_pos(), cq)
         if z_pid is not None:
             _pl_z   = float(env.data.body('prefab').xpos[2])
@@ -551,15 +531,13 @@ class DummyVecEnv:
     def set_force_noise(self, idx, val):
         self.envs[idx].set_force_noise(val)
 
-    def set_wind_force(self, idx, f, d):
-        if hasattr(self.envs[idx], 'set_wind_force'):
-            self.envs[idx].set_wind_force(f, d)
+    def set_wind_speed(self, idx, v, d):
+        if hasattr(self.envs[idx], 'set_wind_speed'):
+            self.envs[idx].set_wind_speed(v, d)
 
-    def clear_wind_force(self, idx):
-        if hasattr(self.envs[idx], 'clear_wind_force'):
-            self.envs[idx].clear_wind_force()
-        elif hasattr(self.envs[idx], 'set_wind_force'):
-            self.envs[idx].set_wind_force(0.0, 0.0)
+    def clear_wind(self, idx):
+        if hasattr(self.envs[idx], 'clear_wind'):
+            self.envs[idx].clear_wind()
 
     def set_wind_curriculum(self, idx, w):
         if hasattr(self.envs[idx], 'set_wind_curriculum'):
@@ -579,7 +557,7 @@ class DummyVecEnv:
         env = self.envs[idx]
         ctrls = self.controllers_list[idx]
         config = self.configs[idx]
-        _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+        _wind_max = _wind_obs_scale(config)
         _wobs = build_wind_obs(self.envs[idx], _wind_max)
         _base = None
         if phase == "descent":
@@ -617,8 +595,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
     from train_phase import (build_phase_obs, _add_act_noise,
                              _apply_descent_pid_residual,
                              clip_cruise_residual, get_last_nmpc_action)
-    from phase_reward import (compute_lift_reward, compute_cruise_reward,
-                              compute_descent_reward, RewardComponentTracker)
+    from phase_reward import (compute_cruise_reward, compute_descent_reward,
+                              RewardComponentTracker)
     from scipy.spatial.transform import Rotation as R
 
     expert  = controllers.get("expert")
@@ -637,6 +615,10 @@ def _run_rl_step_inline(env, controllers, config, payload):
     rstate = payload['rstate']
     act_noise = float(payload.get('act_noise', 0.0))
     base_dq = payload.get('base_dq', None)
+    if 'train_reject_lucky_rebar_insert' in payload:
+        config.setdefault("insertion", {})[
+            "train_reject_lucky_rebar_insert"] = bool(
+                payload.get('train_reject_lucky_rebar_insert'))
 
     ree = env._get_ee_pos()
     tracker = RewardComponentTracker(phase)
@@ -672,6 +654,7 @@ def _run_rl_step_inline(env, controllers, config, payload):
                 'new_obs': obs,
                 'new_core_obs': None, 'new_cable_raw': None, 'new_wind_obs': None,
                 'new_base_dq': None,
+                'delta_q': np.zeros(7, dtype=np.float32),
                 'new_tilt': pt, 'new_yaw': py,
                 'pl_xy': _pl_pos[:2].copy().astype(np.float32),
                 'xy_align_r': 0.0, 'rstate': rstate, 'info': {},
@@ -719,30 +702,12 @@ def _run_rl_step_inline(env, controllers, config, payload):
         # [v11.3] 传 rl_action
         reward, done, success, ri = compute_descent_reward(
             env, no2, config, rstate, tracker=tracker, rl_action=rl_act)
-    else:  # lift
-        _use_lift_nmpc = bool(config.get("lift_rl", {}).get("use_nmpc_base", False))
-        if _use_lift_nmpc:
-            # [v12 fix] 用 expert.compute_delta_q_target(..., residual_acc=...)
-            # 与 test_phase expert-only 路径完全一致.
-            _rm_xy = float(config["lift_rl"].get("residual_acc_max_xy", 0.08))
-            _rm_z  = float(config["lift_rl"].get("residual_acc_max_z",  0.10))
-            _res3 = np.array([
-                float(np.clip(rl_act[0], -_rm_xy, _rm_xy)),
-                float(np.clip(rl_act[1], -_rm_xy, _rm_xy)),
-                float(np.clip(rl_act[2], -_rm_z,  _rm_z)),
-            ], np.float64)
-            dq = expert.compute_delta_q_target(obs, cq, residual_acc=_res3)
-        else:
-            dq = ectl.compute_delta_q(rl_act, cq, ree)
-        dq = _add_act_noise(dq, act_noise)
-        no2, _, _, _, ei = env.step(dq)
-        # [v12] 传 rl_action
-        reward, done, success, ri = compute_lift_reward(
-            env, no2, config, rstate, tracker=tracker, rl_action=rl_act)
+    else:
+        raise ValueError(f"Unsupported phase for vec rl_step: {phase}")
 
     # [v14.0]
     from phase_agent import build_wind_obs as _bw2
-    _wind_max = float(config.get("wind_obs", {}).get("wind_force_max", 2.0))
+    _wind_max = _wind_obs_scale(config)
     _wobs_d = _bw2(env, _wind_max)
     _base_d = None
     if phase == "descent" and not done:
@@ -767,6 +732,7 @@ def _run_rl_step_inline(env, controllers, config, payload):
         'falling': False, 'new_obs': no2,
         'new_core_obs': _core_d, 'new_cable_raw': _cable_d, 'new_wind_obs': _wobs_d,
         'new_base_dq': _base_d,
+        'delta_q': np.asarray(dq, dtype=np.float32).copy(),
         'reward': float(reward), 'done': bool(done), 'success': bool(success),
         'info': ei, 'new_tilt': float(new_tilt), 'new_yaw': float(new_yaw),
         'pl_xy': pl_xy_now, 'xy_align_r': xy_align_r,
@@ -879,12 +845,12 @@ class SubprocVecEnv:
         self.remotes[idx].send(('set_force_noise', val))
         return self._check_recv(self.remotes[idx].recv(), idx)
 
-    def set_wind_force(self, idx, f, d):
-        self.remotes[idx].send(('set_wind_force', (f, d)))
+    def set_wind_speed(self, idx, v, d):
+        self.remotes[idx].send(('set_wind_speed', (v, d)))
         return self._check_recv(self.remotes[idx].recv(), idx)
 
-    def clear_wind_force(self, idx):
-        self.remotes[idx].send(('clear_wind_force', None))
+    def clear_wind(self, idx):
+        self.remotes[idx].send(('clear_wind', None))
         return self._check_recv(self.remotes[idx].recv(), idx)
 
     def set_wind_curriculum(self, idx, w):

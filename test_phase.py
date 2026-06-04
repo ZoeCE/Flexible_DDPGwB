@@ -3,27 +3,25 @@
 #
 # 用法:
 #   # 单阶段测试 (默认无噪声无风)
-#   python test_phase.py --phase lift --algo ppo --ckpt saves/lift_ppo/ckpt_best.pt
 #   python test_phase.py --phase cruise --algo ppo --ckpt saves/cruise_ppo/ckpt_best.pt
 #   python test_phase.py --phase descent --algo ppo --ckpt saves/descent_ppo/ckpt_best.pt
 #
 #   # 专家基准 (无 RL)
-#   python test_phase.py --phase lift --algo expert
+#   python test_phase.py --phase cruise --algo expert
 #
 #   # 噪声/风力扫描
 #   python test_phase.py --phase cruise --algo ppo --ckpt ... \
-#       --wind-force 1.5 --obs-noise 0.02 --act-noise 0.003 --force-noise 0.15
+#       --wind-speed 10 --obs-noise 0.02 --act-noise 0.003 --force-noise 0.15
 #
 #   # 完整流水线
 #   python test_phase.py --phase pipeline \
-#       --lift-ckpt saves/lift_ppo/ckpt_best.pt \
 #       --cruise-ckpt saves/cruise_ppo/ckpt_best.pt \
 #       --descent-ckpt saves/descent_ppo/ckpt_best.pt
 #
 # v8 变更:
 #   - 删除 ORCA expert, DescentDualRLAgent, CruiseDualRLAgent, test_cruise_nmpc_wind
 #   - 所有噪声/风力参数 CLI 默认 0
-#   - test 噪声/风力作用一致: 用 set_force_noise / set_wind_force + obs/act 高斯噪声
+#   - test 噪声/风力作用一致: 用 set_force_noise / set_wind_speed + obs/act 高斯噪声
 # ==============================================================================
 
 import os
@@ -42,20 +40,85 @@ from mujoco_env_new import CableRobotEnvWithObstacles
 from controller import JointSpaceExpert
 from phase_agent import (
     PPOPhaseAgent, SACPhaseAgent,
-    build_lift_obs, build_cruise_obs, build_descent_obs,
+    build_cruise_obs, build_descent_obs,
     build_wind_obs, CableEncoder,
 )
 from phase_reward import (
-    compute_lift_reward, compute_cruise_reward, compute_descent_reward,
-    LiftRewardState, CruiseRewardState, DescentRewardState,
+    compute_cruise_reward, compute_descent_reward,
+    CruiseRewardState, DescentRewardState,
 )
 from ee_acc_controller import EEAccController, CruiseZYawPID, SwingDampingController
+from obs_predictor import build_observation_predictor
 from scipy.spatial.transform import Rotation as R
 
 
 # ==============================================================================
 # 稳定性指标 (用于 base vs RL 对比)
 # ==============================================================================
+
+def wind_speed_to_force(config, speed_mps):
+    wind_cfg = config.get("wind", {})
+    v = max(0.0, float(speed_mps))
+    rho = float(wind_cfg.get("air_density", 1.225))
+    cd = float(wind_cfg.get("drag_coefficient", 1.30))
+    area = float(wind_cfg.get("projected_area", 0.020))
+    force = 0.5 * rho * cd * area * v * v
+    return float(min(force, float(wind_cfg.get("F_max", force))))
+
+
+def wind_obs_scale(config):
+    wobs = config.get("wind_obs", {})
+    return float(wobs.get("wind_speed_max",
+                          config.get("wind", {}).get("speed_max", 16.5)))
+
+
+def apply_control_frequency_override(config, control_freq_hz,
+                                     keep_step_budget=False,
+                                     scale_limits_with_dt=False):
+    """Override test-time control period while keeping physical timing coherent."""
+    if control_freq_hz is None:
+        return
+    old_freq = float(config.get("sim", {}).get("control_freq_hz", 10.0))
+    new_freq = float(control_freq_hz)
+    if new_freq <= 0.0:
+        raise ValueError("--control-freq-hz must be positive")
+    old_dt = 1.0 / max(old_freq, 1e-6)
+    new_dt = 1.0 / new_freq
+    step_ratio = new_freq / max(old_freq, 1e-6)
+    dt_ratio = new_dt / max(old_dt, 1e-6)
+
+    config.setdefault("sim", {})["control_freq_hz"] = new_freq
+    config.setdefault("controller", {})["dt"] = new_dt
+    config.setdefault("ee_control", {})["integrator_dt"] = new_dt
+
+    if not keep_step_budget:
+        for section in ("sim", "cruise_rl", "descent_rl", "pipeline"):
+            if section in config and "max_steps" in config[section]:
+                base_steps = int(config[section]["max_steps"])
+                config[section]["max_steps"] = max(1, int(round(base_steps * step_ratio)))
+
+    if scale_limits_with_dt:
+        sp = config.setdefault("space", {})
+        if "dq_max" in sp:
+            sp["dq_max"] = [
+                float(v) * dt_ratio for v in np.asarray(sp["dq_max"], dtype=np.float64)
+            ]
+        ctrl = config.setdefault("controller", {})
+        for key in ("action_rate_limit_xy", "action_rate_limit_z",
+                    "action_rate_limit_yaw"):
+            if key in ctrl:
+                ctrl[key] = float(ctrl[key]) * dt_ratio
+
+    print("\n[Control frequency override]")
+    print(f"  control_freq_hz: {old_freq:.1f} -> {new_freq:.1f}")
+    print(f"  action period: {old_dt:.3f}s -> {new_dt:.3f}s")
+    print(f"  controller.dt / ee_control.integrator_dt: {new_dt:.3f}s")
+    if keep_step_budget:
+        print("  max_steps: unchanged")
+    else:
+        print(f"  max_steps scaled by {step_ratio:.3f} to preserve episode time")
+    print(f"  per-step dq/rate limits scaled with dt: {bool(scale_limits_with_dt)}")
+
 
 from stability_metrics import StabilityMetrics  # [v12.6] 共享模块, 同时供 train 用
 
@@ -70,6 +133,16 @@ def build_config(args):
     config["train"]["gpu_id"] = args.gpu
     config.setdefault("test", {})["wait_for_space_start"] = bool(
         getattr(args, "wait_for_space", False))
+    if getattr(args, "wind_speed_max", None) is not None:
+        _wmax = max(1e-6, float(args.wind_speed_max))
+        config.setdefault("wind", {})["speed_max"] = _wmax
+        config.setdefault("wind_obs", {})["wind_speed_max"] = _wmax
+    if float(getattr(args, "wind_speed", 0.0) or 0.0) > 0.0:
+        _ws = float(args.wind_speed)
+        config.setdefault("wind", {})["speed_max"] = max(
+            float(config.get("wind", {}).get("speed_max", 16.5)), _ws)
+        config.setdefault("wind_obs", {})["wind_speed_max"] = max(
+            float(config.get("wind_obs", {}).get("wind_speed_max", 16.5)), _ws)
     # Keep the trained descent z-gating in evaluation. Strict controller defaults
     # can lock z at high payload height when the learned residual keeps XY just
     # outside the old 15mm hard gate.
@@ -79,25 +152,17 @@ def build_config(args):
     if getattr(args, "phase", None) == "descent":
         insert_target_z = float(getattr(args, "insert_target_z", 0.10))
         insert_depth_min = float(getattr(args, "insert_depth_min", 0.025))
-        physical_target_z = float(getattr(args, "physical_insert_target_z", 0.090))
         config["insertion"]["target_payload_z"] = insert_target_z
         config["planning"]["target_z_descent"] = insert_target_z
         config["insertion"]["physical_insert_depth_min"] = insert_depth_min
-        config["insertion"]["physical_insert_target_z"] = physical_target_z
-        config["insertion"]["success_by_floor_contact"] = True
     if getattr(args, "phase", None) == "pipeline":
-        # Pipeline test policy: lift + translation are pure NMPC. Descent keeps
-        # the trained 100mm alignment target, then a short PID finishing move
-        # continues downward only after alignment is already achieved.
+        # Pipeline test policy: lift + translation are pure NMPC. Descent uses
+        # the same PID+residual-RL control and reward success gates as training.
         insert_target_z = float(getattr(args, "pipeline_insert_target_z", 0.10))
         insert_depth_min = float(getattr(args, "pipeline_insert_depth_min", 0.025))
-        physical_target_z = float(getattr(
-            args, "pipeline_physical_insert_target_z", 0.090))
         config["insertion"]["target_payload_z"] = insert_target_z
         config["planning"]["target_z_descent"] = insert_target_z
         config["insertion"]["physical_insert_depth_min"] = insert_depth_min
-        config["insertion"]["physical_insert_target_z"] = physical_target_z
-        config["insertion"]["success_by_floor_contact"] = True
         pipeline_cruise_z = float(getattr(args, "pipeline_cruise_z", 0.25))
         config["planning"]["payload_z_cruise"] = pipeline_cruise_z
         config["cruise_rl"]["z_lock_height"] = pipeline_cruise_z
@@ -148,6 +213,35 @@ def build_config(args):
         config.setdefault("pipeline", {})["max_steps"] = pipeline_steps
         config["sim"]["max_steps"] = max(int(config["sim"]["max_steps"]),
                                           pipeline_steps)
+    apply_control_frequency_override(
+        config,
+        getattr(args, "control_freq_hz", None),
+        keep_step_budget=bool(getattr(args, "keep_step_budget", False)),
+        scale_limits_with_dt=bool(getattr(
+            args, "scale_limits_with_control_dt", False)))
+    obs_pred_cfg = config.setdefault("observation_predictor", {})
+    if bool(getattr(args, "obs_predictor", False)):
+        obs_pred_cfg["enabled"] = True
+        obs_pred_cfg["train_enabled"] = False
+    if getattr(args, "obs_period", None) is not None:
+        obs_pred_cfg["measurement_period_steps"] = int(args.obs_period)
+    if getattr(args, "obs_predictor_target_mode", None):
+        obs_pred_cfg["target_mode"] = str(args.obs_predictor_target_mode)
+    if getattr(args, "obs_predictor_ckpt", None):
+        obs_pred_cfg["checkpoint"] = str(args.obs_predictor_ckpt)
+    wind_cfg = config.setdefault("wind", {})
+    if bool(getattr(args, "variable_wind", False)):
+        wind_cfg["test_wind_variable"] = True
+    for arg_name, cfg_key in [
+        ("wind_speed_band_abs", "test_speed_band_abs"),
+        ("wind_speed_band_frac", "test_speed_band_frac"),
+        ("wind_speed_rate_std", "test_speed_rate_std"),
+        ("wind_dir_band_rad", "test_dir_band_rad"),
+        ("wind_dir_rate_std", "test_dir_rate_std"),
+    ]:
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            wind_cfg[cfg_key] = float(val)
     return config
 
 
@@ -222,23 +316,54 @@ def load_agent(phase, algo, ckpt_path, config):
     return agent
 
 
+def build_eval_obs_predictor(config, phase, initial_obs, agent=None,
+                             ckpt_path=None):
+    """Build a frozen observation predictor for evaluation-time hidden steps."""
+    cfg = config.setdefault("observation_predictor", {})
+    if not bool(cfg.get("enabled", False)):
+        return None
+    cfg["train_enabled"] = False
+    from train_phase import _obs_pred_target_dim, _obs_pred_target_mode
+    obs_dim = _obs_pred_target_dim(config, initial_obs, agent)
+    pred = build_observation_predictor(
+        config, phase, obs_dim, device=getattr(agent, "device", None))
+    if pred is None:
+        return None
+    pred.train_enabled = False
+    if hasattr(pred, "net"):
+        pred.net.eval()
+
+    load_path = str(ckpt_path or cfg.get("checkpoint", "") or "").strip()
+    if not load_path:
+        raise ValueError("observation predictor is enabled but no checkpoint was provided")
+    if not os.path.exists(load_path):
+        raise FileNotFoundError(f"observation predictor checkpoint not found: {load_path}")
+    pred.load(load_path, map_location=getattr(pred, "device", None))
+    if hasattr(pred, "net"):
+        pred.net.eval()
+    print(f"  [ObsPredictor-EVAL] loaded {load_path}; "
+          f"true obs every {pred.measurement_period} control steps, "
+          f"obs_dim={obs_dim}, target_mode={_obs_pred_target_mode(config)}")
+    return pred
+
+
 # ==============================================================================
 # 噪声/风力应用辅助
 # ==============================================================================
 
-def apply_perturbations(env, wind_force, wind_dir, force_noise):
+def apply_perturbations(env, wind_speed, wind_dir, force_noise):
     """统一施加风力 + 噪声力 (在每 episode reset 之后调用)。"""
     if force_noise > 0 and hasattr(env, 'set_force_noise'):
         env.set_force_noise(force_noise)
     elif hasattr(env, 'set_force_noise'):
         env.set_force_noise(0.0)
 
-    if wind_force > 0 and hasattr(env, 'set_wind_force'):
+    if wind_speed > 0 and hasattr(env, 'set_wind_speed'):
         _wd = float(wind_dir) if wind_dir is not None else float(np.random.uniform(0, 2*np.pi))
-        env.set_wind_force(float(wind_force), _wd)
+        env.set_wind_speed(float(wind_speed), _wd)
     else:
-        if hasattr(env, 'clear_wind_force'):
-            env.clear_wind_force()
+        if hasattr(env, 'clear_wind'):
+            env.clear_wind()
         else:
             # 显式关闭风力
             if hasattr(env, '_test_wind_mode'):
@@ -291,7 +416,7 @@ def print_curriculum_hardest_task(config):
     task = get_descent_eval_init(config, "max")
     ins = config["insertion"]
     print("\n[Descent curriculum hardest task]")
-    print(f"  wind_max: {task['wind_max']:.3f} N, sampled uniformly per episode")
+    print(f"  wind_speed_max: {task['wind_max']:.2f} m/s, sampled uniformly per episode")
     print(f"  init_xy: +/-{task['xy_range']*1000:.1f} mm")
     print(f"  init_payload_xy_vel: +/-{task['vel_range']:.3f} m/s")
     print(f"  init_tilt_noise: +/-{task['tilt_range']:.3f} rad")
@@ -408,18 +533,36 @@ def check_physical_insertion(env, config):
     tilt = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
     abs_yaw = abs(float(pl_euler[2]))
 
-    ok_z    = abs(payload_z - target_pz) < z_tol
+    floor_contact = _check_payload_floor_contact(env, config)
+    require_floor = bool(cfg_ins.get(
+        "physical_success_requires_floor_contact",
+        bool(cfg_ins.get("success_by_floor_contact", False)) or
+        bool(cfg_ins.get("require_floor_contact", False))))
+
+    ok_z    = abs(payload_z - target_pz) < z_tol or (require_floor and floor_contact)
     ok_xy   = dtf < xy_tol
     ok_tilt = tilt < tilt_tol
     ok_yaw  = abs_yaw < yaw_tol
+    rebar_tol = float(cfg_ins.get("physical_rebar_xy_tolerance", xy_tol))
+    try:
+        _, worst_rebar_err, mean_rebar_err = env._compute_rebar_errors(
+            pl_pos[:2], pl_mat)
+    except Exception:
+        worst_rebar_err = dtf
+        mean_rebar_err = dtf
+    ok_rebar = worst_rebar_err < rebar_tol
+
     insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
     min_insert_depth = float(cfg_ins.get(
         "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
     ok_insert = insert_depth >= min_insert_depth
-    floor_contact = _check_payload_floor_contact(env, config)
-    ok_contact_success = (
-        bool(cfg_ins.get("success_by_floor_contact", False)) and
-        floor_contact)
+    require_insert = bool(cfg_ins.get(
+        "physical_success_requires_insert_depth", True))
+    require_rebar = bool(cfg_ins.get(
+        "physical_success_requires_rebar_alignment", True))
+    ok_floor_success = floor_contact or not require_floor
+    ok_insert_success = ok_insert or floor_contact or not require_insert
+    ok_rebar_success = ok_rebar or not require_rebar
 
     detail = (f"z={payload_z*1000:.1f}mm(±{z_tol*1000:.0f}) "
               f"dtf={dtf*1000:.1f}mm(<{xy_tol*1000:.0f}) "
@@ -429,12 +572,18 @@ def check_physical_insertion(env, config):
               f"{'✅' if ok_xy else '❌'}xy "
               f"{'✅' if ok_tilt else '❌'}tilt "
               f"{'✅' if ok_yaw else '❌'}yaw]")
+    insert_label = "OK" if ok_insert else ("OK via floor" if floor_contact else "NO")
     detail += (f" insert={insert_depth*1000:.1f}mm"
                f"(>={min_insert_depth*1000:.0f}) "
-               f"[{'OK' if ok_insert else 'NO'} insert]")
-    detail += f" floor={'OK' if floor_contact else 'NO'}"
+               f"[{insert_label} insert]")
+    detail += (f" rebar_worst={worst_rebar_err*1000:.1f}mm"
+               f"(<{rebar_tol*1000:.1f}) "
+               f"[{'OK' if ok_rebar else 'NO'} rebar]")
+    detail += (f" floor={'OK' if floor_contact else 'NO'}"
+               f"{' req' if require_floor else ''}")
     return (ok_z and ok_xy and ok_tilt and ok_yaw and
-            (ok_insert or ok_contact_success)), detail
+            ok_rebar_success and ok_insert_success and
+            ok_floor_success), detail
 
 
 def _cruise_handoff_status(state, config, step=0, max_steps=500, env=None):
@@ -531,13 +680,25 @@ def _estimate_rebar_insertion_depth(env, config):
     return float(np.clip(raw_depth, 0.0, max(hole_depth, 0.0))), hole_depth
 
 
-def _check_payload_floor_contact(env, config):
+def _check_payload_floor_contact(env, config, allow_z_fallback=None):
+    if allow_z_fallback is None:
+        allow_z_fallback = bool(config.get("insertion", {}).get(
+            "floor_contact_allow_z_fallback", False))
+
     if hasattr(env, "_check_prefab_floor_contact"):
         try:
-            if bool(env._check_prefab_floor_contact()):
+            try:
+                has_contact = bool(env._check_prefab_floor_contact(
+                    allow_z_fallback=allow_z_fallback))
+            except TypeError:
+                has_contact = bool(env._check_prefab_floor_contact())
+            if has_contact:
                 return True
         except Exception:
             pass
+
+    if not allow_z_fallback:
+        return False
 
     try:
         cfg_pref = config.get("prefab", {})
@@ -551,33 +712,117 @@ def _check_payload_floor_contact(env, config):
         return False
 
 
-def _get_physical_insert_target_z(config):
+def check_insertion_stuck_failure(env, config, monitor):
+    """Detect payload resting on rebars without making physical insertion progress."""
     cfg_ins = config.get("insertion", {})
-    if "physical_insert_target_z" in cfg_ins:
-        return float(cfg_ins["physical_insert_target_z"])
+    if not bool(cfg_ins.get("stuck_fail_enabled", True)):
+        return False, ""
 
+    floor_contact = _check_payload_floor_contact(env, config)
+    if floor_contact:
+        monitor["stuck_counter"] = 0
+        return False, ""
+
+    try:
+        hit_obstacle, hit_rebar = env._check_prefab_collision_with_obstacles()
+    except Exception:
+        hit_obstacle, hit_rebar = False, False
+    if hit_obstacle:
+        return False, ""
+
+    pl_pos = env.data.body('prefab').xpos.copy()
+    payload_z = float(pl_pos[2])
+    target_pz = float(cfg_ins.get("target_payload_z", 0.10))
+    z_above = float(cfg_ins.get("stuck_fail_z_above_target", 0.045))
+    if payload_z > target_pz + z_above:
+        monitor["stuck_counter"] = 0
+        return False, ""
+
+    target_xy = env.target_pos.copy()
+    dtf = float(np.linalg.norm(pl_pos[:2] - target_xy))
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+    socket_hole_size = cfg_pref.get("socket_hole_size", [0.014, 0.014])
+    socket_hole_radius = min(socket_hole_size[0], socket_hole_size[1]) / 2.0
+    rebar_radius = float(cfg_tgt.get("rebar_radius", 0.003))
+    xy_tol = max(socket_hole_radius - rebar_radius, 0.0)
+    xy_gate = float(cfg_ins.get("stuck_fail_xy_gate", 0.035))
+    if dtf > max(xy_gate, xy_tol):
+        monitor["stuck_counter"] = 0
+        return False, ""
+
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    try:
+        _, worst_rebar_err, _ = env._compute_rebar_errors(pl_pos[:2], pl_mat)
+    except Exception:
+        worst_rebar_err = dtf
+    rebar_gate = float(cfg_ins.get("stuck_fail_rebar_xy_gate", 0.035))
+    if worst_rebar_err > max(rebar_gate, xy_tol):
+        monitor["stuck_counter"] = 0
+        return False, ""
+
+    insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
+    min_insert_depth = float(cfg_ins.get(
+        "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
     cfg_pref = config.get("prefab", {})
     cfg_tgt = config.get("target", {})
     socket_half_size = cfg_pref.get("socket_half_size", [0.05, 0.05, 0.10])
     socket_half_z = float(socket_half_size[2]) if len(socket_half_size) >= 3 else 0.10
     rebar_half_h = float(cfg_tgt.get("rebar_half_height", 0.01))
-    min_depth = float(cfg_ins.get("physical_insert_depth_min", 0.025))
-    # target body is placed at z=0 in generate_scene_and_trajectory.
-    return max(0.02, 2.0 * rebar_half_h + socket_half_z - min_depth - 0.005)
+    try:
+        target_base_z = float(env.data.body('target').xpos[2])
+    except Exception:
+        target_base_z = 0.0
+    rebar_top_z = target_base_z + 2.0 * rebar_half_h
+    socket_bottom_z = payload_z - socket_half_z
+    rebar_top_gap = socket_bottom_z - rebar_top_z
+    rebar_top_tol = float(cfg_ins.get("stuck_fail_rebar_top_tol", 0.015))
+    geometric_rebar_contact = (
+        rebar_top_gap <= rebar_top_tol and
+        insert_depth < max(min_insert_depth, rebar_top_tol))
+    has_rebar_support = bool(hit_rebar or geometric_rebar_contact)
+    if (bool(cfg_ins.get("stuck_fail_rebar_contact_required", False)) and
+            not has_rebar_support):
+        monitor["stuck_counter"] = 0
+        return False, ""
+    if not has_rebar_support:
+        monitor["stuck_counter"] = 0
+        return False, ""
 
+    prev_best = float(monitor.get("best_insert_depth", -1.0))
+    progress_eps = float(cfg_ins.get("stuck_fail_progress_eps", 0.001))
+    progress = insert_depth - prev_best
+    significant_progress = insert_depth > prev_best + progress_eps
+    if insert_depth > prev_best:
+        monitor["best_insert_depth"] = insert_depth
 
-def _activate_physical_insert_finish(expert, config):
-    if expert is None:
-        return None
-    final_z = _get_physical_insert_target_z(config)
-    expert._target_payload_z = float(final_z)
-    expert._z_reached_thresh = float(final_z)
-    expert._z_reached = False
-    expert._final_hold_counter = 0
-    expert._contact_detected = False
-    if hasattr(expert, "tracker"):
-        expert.tracker._is_descending = True
-    return final_z
+    try:
+        dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
+        vz_abs = abs(float(env.data.qvel[dof_idx + 2]))
+    except Exception:
+        vz_abs = 0.0
+    vz_gate = float(cfg_ins.get("stuck_fail_vz_abs", 0.006))
+
+    stalled = (not significant_progress) and progress <= progress_eps and vz_abs <= vz_gate
+    if stalled:
+        monitor["stuck_counter"] = int(monitor.get("stuck_counter", 0)) + 1
+    else:
+        monitor["stuck_counter"] = 0
+
+    patience = int(cfg_ins.get("stuck_fail_patience", 25))
+    if monitor["stuck_counter"] >= patience:
+        detail = (
+            f"stuck_on_rebar:dtf={dtf*1000:.1f}mm,"
+            f"rebar={worst_rebar_err*1000:.1f}mm,"
+            f"z={payload_z*1000:.1f}mm,"
+            f"insert={insert_depth*1000:.1f}/{min_insert_depth*1000:.0f}mm,"
+            f"gap={rebar_top_gap*1000:.1f}mm,"
+            f"vz={vz_abs*1000:.1f}mm/s,"
+            f"rebar_contact={int(hit_rebar)},"
+            f"geom_contact={int(geometric_rebar_contact)},floor=NO,"
+            f"patience={monitor['stuck_counter']}")
+        return True, detail
+    return False, ""
 
 
 def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None):
@@ -588,23 +833,7 @@ def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None
     else:
         target_xy = np.array(config["task"]["default_target_xy"])
 
-    if phase == "lift":
-        _rcfg_l   = config["lift_rl"]["reward"]
-        _z_cruise = float(config["lift_rl"]["target_z_cruise"])
-        z_tol     = float(_rcfg_l.get("success_z_tol", 0.025))
-        vz_max    = float(_rcfg_l.get("success_vz_max", 0.05))
-        e_thresh  = float(_rcfg_l.get("swing_energy_thresh", 0.05))
-        xy_max    = float(_rcfg_l.get("xy_max_dist_success", 0.12))
-        z_tol_test = max(z_tol, 0.030)
-        return (
-            abs(state["payload_z"] - _z_cruise)    < z_tol_test           and
-            state.get("pl_vz_abs",    999.0)        < vz_max                  and
-            state.get("swing_energy", 999.0)        < e_thresh * 3.0          and
-            state["tilt"]                           < float(pt["lift_to_cruise_tilt_max"]) and
-            state.get("dtf_start",    999.0)        < xy_max * 1.5
-        )
-
-    elif phase == "cruise":
+    if phase == "cruise":
         ok, _, _ = _cruise_handoff_status(
             state, config, step=step, max_steps=max_steps, env=env)
         return ok
@@ -665,30 +894,6 @@ def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos):
     expert.tracker.current_idx = nearest_idx
 
 
-def _truncate_path_for_lift(planned_path, config):
-    """[v12.2] 为 lift phase 截短 path, 只保留垂直上升段.
-    与 train_phase.py 中同名函数行为一致.
-    """
-    if planned_path is None or len(planned_path) == 0:
-        return planned_path
-    pp = np.asarray(planned_path, dtype=np.float64)
-    z_cruise = float(config.get("planning", {}).get("payload_z_cruise", 0.25))
-    keep_idx = []
-    reached_cruise_z = False
-    for i, wp in enumerate(pp):
-        wp_z = float(wp[2]) if len(wp) >= 3 else 0.3
-        if wp_z < z_cruise - 0.001:
-            keep_idx.append(i)
-        elif not reached_cruise_z:
-            keep_idx.append(i)
-            reached_cruise_z = True
-        else:
-            break
-    if not keep_idx:
-        return pp[:1].copy()
-    return pp[keep_idx].copy()
-
-
 def _truncate_path_for_pipeline_cruise(planned_path, config):
     """Keep lift + cruise waypoints only; remove descent waypoints."""
     if planned_path is None or len(planned_path) == 0:
@@ -715,16 +920,20 @@ def _truncate_path_for_pipeline_cruise(planned_path, config):
 
 def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                       n_episodes=20, deterministic=True,
-                      wind_force=0.0, wind_dir=None,
+                      wind_speed=0.0, wind_dir=None,
                       obs_noise=0.0, act_noise=0.0, force_noise=0.0,
-                      eval_cur_init=None, wind_force_sampler=None,
+                      eval_cur_init=None, wind_speed_sampler=None,
                       wind_dir_sampler=None, reset_seed_sampler=None,
-                      verbose=True, progress_every=0, progress_prefix=""):
+                      verbose=True, progress_every=0, progress_prefix="",
+                      obs_predictor_ckpt=None):
     """测试单个阶段, 支持噪声/风力扰动。"""
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
                              _apply_descent_pid_residual,
-                             clip_cruise_residual, get_last_nmpc_action)
+                             clip_cruise_residual, get_last_nmpc_action,
+                             _obs_pred_target_vector,
+                             _obs_pred_visible_env_obs,
+                             _obs_pred_cable_latent_from_vec)
 
     z_pid   = CruiseZYawPID(config)          if phase == "cruise" else None
     swing_d = SwingDampingController(config) if phase == "cruise" else None
@@ -733,6 +942,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
     _cruise_nmpc_residual = (phase == "cruise" and
         bool(config.get("cruise_rl", {}).get(
             "nmpc_residual_mode", _cruise_nmpc_base)))
+    obs_predictor = None
 
     results = []
     ep_count = 0; attempt = 0
@@ -753,19 +963,16 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             continue
 
         # ── 施加扰动 ──────────────────────────────────────────────────────────
-        ep_wind_force = (float(wind_force_sampler(ep_count))
-                         if wind_force_sampler is not None else float(wind_force))
+        ep_wind_speed = (float(wind_speed_sampler(ep_count))
+                         if wind_speed_sampler is not None else float(wind_speed))
         ep_wind_dir = (float(wind_dir_sampler(ep_count))
                        if wind_dir_sampler is not None else wind_dir)
-        apply_perturbations(env, ep_wind_force, ep_wind_dir, force_noise)
+        apply_perturbations(env, ep_wind_speed, ep_wind_dir, force_noise)
 
         current_q = env.data.qpos[:7].copy()
         expert.reset(obs, current_q, env=env)
         if planned_path is not None:
-            # [v12.2] lift 时只把"lift 段"喂给 tracker (test_phase 同步修复)
-            _pp_for_expert = _truncate_path_for_lift(planned_path, config) \
-                if phase == "lift" else planned_path
-            expert.set_path(_pp_for_expert)
+            expert.set_path(planned_path)
             if phase in ("cruise", "descent"):
                 pl_pos = env.data.body('prefab').xpos.copy()
                 _advance_expert_to_nearest_wp(expert, planned_path, pl_pos)
@@ -777,6 +984,13 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             z_pid.reset(_pl_z, _pl_yaw)
         if agent is not None and hasattr(agent, 'reset_history'):
             agent.reset_history()
+        if bool(config.get("observation_predictor", {}).get("enabled", False)):
+            if obs_predictor is None:
+                obs_predictor = build_eval_obs_predictor(
+                    config, phase, obs, agent=agent,
+                    ckpt_path=obs_predictor_ckpt)
+            if obs_predictor is not None:
+                obs_predictor.reset(obs)
         wait_for_space_start(env, config, label=f"{phase} Ep {ep_count + 1}")
 
         start_xy = env.default_start_xy.copy()
@@ -785,8 +999,6 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         rstate = REWARD_STATES[phase]()
         if hasattr(rstate, 'total_steps_global'):
             rstate.total_steps_global = 10_000_000
-        if phase == "lift" and hasattr(rstate, 'start_xy'):
-            rstate.start_xy = env.data.body('prefab').xpos[:2].copy()
         if phase == "descent":
             # 测试用严格判定: xy_tol = config 中的 train_end 值
             if eval_cur_init is not None:
@@ -802,8 +1014,16 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
 
         ep_reward = 0.0; ep_steps = 0; ep_success = False
         term_reason = None
-        physical_finish_active = False
+        stuck_monitor = {}
         stab_metrics = StabilityMetrics()
+        obs_pred_steps = 0
+        obs_pred_hidden = 0
+        obs_pred_cable_latent = None
+        obs_pred_phase_obs = None
+        rl_action_time_s = 0.0
+        rl_action_calls = 0
+        obs_pred_time_s = 0.0
+        obs_pred_calls = 0
 
         max_steps = int(config[f"{phase}_rl"]["max_steps"])
 
@@ -812,13 +1032,14 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             payload_pos = env.data.body('prefab').xpos.copy()
             _cruise_reward_base = None
             _cruise_reward_action = None
+            action = None
 
             if agent is None:
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
                 # [v14.0] 构建 obs: (core, cable_raw, wind, tilt, yaw)
-                _wobs = build_wind_obs(env,
-                    float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
+                _rl_t0 = time.perf_counter()
+                _wobs = build_wind_obs(env, wind_obs_scale(config))
                 base_dq_for_obs = None
                 if phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
                     try:
@@ -831,7 +1052,13 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
                     phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
                     wind_obs=_wobs, base_action=base_dq_for_obs)
-                p_obs = agent.encode_obs(core, cable_raw, _wobs)
+                cable_for_policy = (obs_pred_cable_latent
+                                    if obs_pred_cable_latent is not None
+                                    else cable_raw)
+                obs_pred_phase_obs = (
+                    core, cable_for_policy, _wobs, prev_tilt, prev_yaw,
+                    base_dq_for_obs)
+                p_obs = agent.encode_obs(core, cable_for_policy, _wobs)
                 norm_obs = agent.normalize_obs(p_obs, update=False)
                 norm_obs = _add_obs_noise(norm_obs, obs_noise)
 
@@ -840,6 +1067,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     action = result[0]
                 else:
                     action = result
+                rl_action_time_s += time.perf_counter() - _rl_t0
+                rl_action_calls += 1
 
                 real_ee = env._get_ee_pos()
                 if phase == "cruise" and _cruise_nmpc_residual:
@@ -899,61 +1128,73 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                             "vel_max_z_descent", 0.03))
                         delta_q = ee_ctrl.compute_delta_q(
                             action, current_q, real_ee, vel_max_z=_vmax_z_d)
-                else:  # lift
-                    delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee)
+                else:
+                    raise ValueError(f"Unsupported phase: {phase}")
 
             delta_q = _add_act_noise(delta_q, act_noise)
-            next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
+            if obs_predictor is not None:
+                _pred_t0 = time.perf_counter()
+                current_target = _obs_pred_target_vector(
+                    config, obs, obs_pred_phase_obs, agent)
+                obs_predictor.predict_next(current_target, delta_q, phase)
+                obs_pred_time_s += time.perf_counter() - _pred_t0
+            true_next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
+            next_obs = true_next_obs
+            if obs_predictor is not None:
+                _pred_t0 = time.perf_counter()
+                true_target = _obs_pred_target_vector(
+                    config, true_next_obs, None, agent)
+                visible_target, obs_pred_info = obs_predictor.observe_result(
+                    true_target, next_step_index=ep_steps + 1)
+                next_obs = _obs_pred_visible_env_obs(
+                    config, true_next_obs, visible_target,
+                    getattr(obs_pred_info, "used_prediction", False))
+                obs_pred_cable_latent = _obs_pred_cable_latent_from_vec(
+                    config, visible_target,
+                    getattr(obs_pred_info, "used_prediction", False))
+                obs_pred_time_s += time.perf_counter() - _pred_t0
+                obs_pred_calls += 1
+                obs_pred_steps += 1
+                obs_pred_hidden += int(getattr(obs_pred_info, "used_prediction", False))
             # [v12.6] 传 env (用于 cable_ke) + rl_action (用于 rl_action_mag)
-            stab_metrics.update_step(next_obs, config, env=env,
+            stab_metrics.update_step(true_next_obs, config, env=env,
                                      rl_action=(action if agent is not None else None))
 
             setattr(rstate, "phase_step", int(ep_steps))
             if phase == "cruise":
                 reward, r_done, r_success, r_info = compute_cruise_reward(
-                    env, next_obs, config, rstate,
+                    env, true_next_obs, config, rstate,
                     rl_action=(_cruise_reward_action
                                if _cruise_reward_action is not None
                                else (action if agent is not None else None)),
                     base_action=_cruise_reward_base)
             else:
                 reward, r_done, r_success, r_info = REWARD_FNS[phase](
-                    env, next_obs, config, rstate,
+                    env, true_next_obs, config, rstate,
                     rl_action=(action if agent is not None else None))
 
             ep_reward += reward; ep_steps += 1
 
             if r_success:
                 if phase == "descent":
-                    phys_ok, phys_detail = check_physical_insertion(env, config)
-                    ep_success = phys_ok
-                    mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
-                    if verbose and (phys_ok or not physical_finish_active):
-                        print(f"    [{mark_str}] {phys_detail}")
-                else:
                     ep_success = True
-                if phase == "descent" and not ep_success:
-                    if not physical_finish_active:
-                        final_z = _activate_physical_insert_finish(expert, config)
-                        if verbose and final_z is not None:
-                            print(f"    [physical insert finish] PID target_z={final_z*1000:.1f}mm")
-                        physical_finish_active = True
-                    r_done = False
-                    r_success = False
-                    r_info = dict(r_info)
-                    r_info.pop("termination", None)
-                    term_reason = "reward_success_waiting_physical_insert"
-                else:
-                    term_reason = r_info.get("termination", "success")
-                    obs = next_obs; break
-
-            if phase == "descent" and physical_finish_active and not ep_success:
-                phys_ok, phys_detail = check_physical_insertion(env, config)
-                if phys_ok:
-                    ep_success = True
-                    term_reason = "physical_insertion_success"
+                    finish_term = r_info.get("termination", "insertion_success")
                     if verbose:
-                        print(f"    [✅ 物理插入成功] {phys_detail}")
+                        _, phys_detail = check_physical_insertion(env, config)
+                        print(f"    [✅ 训练成功] {finish_term} | {phys_detail}")
+                else:
+                    ep_success = True
+                term_reason = (finish_term if phase == "descent"
+                               else r_info.get("termination", "success"))
+                obs = next_obs; break
+
+            if phase == "descent" and not ep_success:
+                stuck_fail, stuck_detail = check_insertion_stuck_failure(
+                    env, config, stuck_monitor)
+                if stuck_fail:
+                    term_reason = stuck_detail
+                    if verbose:
+                        print(f"    [❌ 物理插入失败] {stuck_detail}")
                     obs = next_obs; break
 
             if r_info.get("termination"):
@@ -969,14 +1210,29 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             "success":     ep_success,
             "termination": term_reason or "timeout",
             "stability":   stab_metrics.summary(),
-            "wind_force":  ep_wind_force,
+            "wind_speed":  ep_wind_speed,
             "wind_dir":    ep_wind_dir,
+            "obs_pred_hidden_frac": (
+                float(obs_pred_hidden) / max(1, int(obs_pred_steps))
+                if obs_pred_steps > 0 else 0.0),
+            "timing": {
+                "rl_action_ms": 1000.0 * rl_action_time_s /
+                    max(1, int(rl_action_calls)),
+                "obs_pred_ms": 1000.0 * obs_pred_time_s /
+                    max(1, int(obs_pred_calls)),
+                "compute_hz_est": (
+                    1000.0 / max(
+                        1e-9,
+                        1000.0 * rl_action_time_s / max(1, int(rl_action_calls)) +
+                        1000.0 * obs_pred_time_s / max(1, int(obs_pred_calls)))
+                    if rl_action_calls > 0 else 0.0),
+            },
         })
         if verbose:
             mark = "✅" if ep_success else "❌"
             term_short = (term_reason or "timeout").split(":")[0]
             print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
-                  f"Steps:{ep_steps:3d} | W:{ep_wind_force:.3f}N | "
+                  f"Steps:{ep_steps:3d} | W:{ep_wind_speed:.2f}m/s | "
                   f"{term_short} | {stab_metrics.print_line()}")
         elif progress_every and (ep_count % progress_every == 0 or
                                  ep_count == n_episodes):
@@ -995,7 +1251,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
 
 def test_pipeline(env, agents, expert, ee_ctrl, config,
                   n_episodes=20, deterministic=True,
-                  wind_force=0.0, wind_dir=None,
+                  wind_speed=0.0, wind_dir=None,
                   obs_noise=0.0, act_noise=0.0, force_noise=0.0):
     """测试完整 3 阶段流水线。"""
     from train_phase import (reset_for_phase, build_phase_obs,
@@ -1026,7 +1282,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             sys.stdout.close(); sys.stdout = sys_stdout_saved
         if obs is None: continue
 
-        apply_perturbations(env, wind_force, wind_dir, force_noise)
+        apply_perturbations(env, wind_speed, wind_dir, force_noise)
 
         current_q = env.data.qpos[:7].copy()
         expert.reset(obs, current_q, env=env)
@@ -1062,7 +1318,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
 
         ep_reward = 0.0; ep_steps = 0
         final_success = False; term_reason = None
-        physical_finish_active = False
+        stuck_monitor = {}
         stab_all = StabilityMetrics()
         phase_stab = {p: StabilityMetrics() for p in ["cruise", "descent"]}
 
@@ -1126,8 +1382,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
                 # [v14.0] 构建 obs
-                _wobs = build_wind_obs(env,
-                    float(config.get("wind_obs", {}).get("wind_force_max", 2.0)))
+                _wobs = build_wind_obs(env, wind_obs_scale(config))
                 base_dq_for_obs = None
                 if current_phase == "cruise" and _cruise_nmpc_residual:
                     base_dq_for_obs = get_last_nmpc_action(expert)
@@ -1303,39 +1558,23 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 continue
 
             if r_success and current_phase == "descent":
-                phys_ok, phys_detail = check_physical_insertion(env, config)
-                mark_str = "✅ 物理插入成功" if phys_ok else "⚠ 课程容差达标但未插入"
-                if phys_ok or not physical_finish_active:
-                    print(f"    [{mark_str}] {phys_detail}")
-                if phys_ok:
-                    final_success = True
-                    phase_success["descent"] = True
-                    term_reason = r_info.get("termination", "insertion_success")
-                    obs = next_obs; break
-                else:
-                    if not physical_finish_active:
-                        final_z = _activate_physical_insert_finish(expert, config)
-                        if final_z is not None:
-                            print(f"    [physical insert finish] PID target_z={final_z*1000:.1f}mm")
-                        physical_finish_active = True
-                    r_done = False
-                    r_success = False
-                    r_info = dict(r_info)
-                    r_info.pop("termination", None)
-                    term_reason = "reward_success_waiting_physical_insert"
+                final_success = True
+                phase_success["descent"] = True
+                term_reason = r_info.get("termination", "insertion_success")
+                _, finish_detail = check_physical_insertion(env, config)
+                print(f"    [✅ 训练成功] {term_reason} | {finish_detail}")
+                obs = next_obs; break
 
-            if current_phase == "descent" and physical_finish_active and not final_success:
-                phys_ok, phys_detail = check_physical_insertion(env, config)
-                if phys_ok:
-                    final_success = True
-                    phase_success["descent"] = True
-                    term_reason = "physical_insertion_success"
-                    print(f"    [✅ 物理插入成功] {phys_detail}")
+            if current_phase == "descent" and not final_success:
+                stuck_fail, stuck_detail = check_insertion_stuck_failure(
+                    env, config, stuck_monitor)
+                if stuck_fail:
+                    term_reason = stuck_detail
+                    print(f"    [❌ 物理插入失败] {stuck_detail}")
                     obs = next_obs; break
 
-            descent_max_steps = _descent_max
-            if current_phase == "descent" and phase_steps["descent"] >= descent_max_steps:
-                term_reason = f"descent_timeout_{descent_max_steps}"; break
+            if current_phase == "descent" and phase_steps["descent"] >= _descent_max:
+                term_reason = f"descent_timeout_{_descent_max}"; break
 
             if r_info.get("termination"):
                 term_reason = r_info["termination"]
@@ -1356,7 +1595,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             "stability":       stab_all.summary(),
             "phase_stability": {p: phase_stab[p].summary()
                                 for p in ["cruise", "descent"]},
-            "wind_force":      wind_force,
+            "wind_speed":      wind_speed,
         })
         mark = "✅" if final_success else "❌"
         term_short = (term_reason or "timeout").split(":")[0]
@@ -1364,7 +1603,7 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             f"{'✅' if phase_success[p] else '❌'}{p[0].upper()}"
             for p in ["cruise", "descent"]])
         print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
-              f"Steps:{ep_steps:3d} | {phases_str} | {term_short} | "
+              f"Steps:{ep_steps:3d} | W:{wind_speed:.2f}m/s | {phases_str} | {term_short} | "
               f"{stab_all.print_line()}")
 
     return results
@@ -1382,10 +1621,8 @@ def print_summary(results, mode_name):
     avg_r  = np.mean([r["reward"]  for r in results])
     avg_s  = np.mean([r["steps"]   for r in results])
     terms  = Counter((r["termination"] or "unknown").split(":")[0] for r in results)
-    wind_f = results[0].get("wind_force", 0.0)
     print(f"\n{'='*60}")
-    print(f"  [{mode_name}] 结果汇总" +
-          (f"  (风力={wind_f:.1f}N)" if wind_f > 0 else ""))
+    print(f"  [{mode_name}] 结果汇总")
     print(f"{'='*60}")
     print(f"  成功率:    {sr*100:.1f}%")
     print(f"  平均奖励:  {avg_r:.2f}")
@@ -1429,9 +1666,19 @@ def summarize_results(results):
         return {}
     terms = Counter((r["termination"] or "unknown").split(":")[0]
                     for r in results)
+    strict_success = [bool(r["success"]) for r in results]
+    broad_success = []
+    for r in results:
+        term_prefix = (r.get("termination") or "unknown").split(":")[0]
+        broad_success.append(bool(r.get("success", False)) or
+                             term_prefix == "lucky_rebar_insert_failure")
     summary = {
         "episodes": len(results),
-        "success_rate": float(np.mean([r["success"] for r in results])),
+        "success_rate": float(np.mean(strict_success)),
+        "strict_success_rate": float(np.mean(strict_success)),
+        "broad_success_rate": float(np.mean(broad_success)),
+        "lucky_insert_rate": float(terms.get("lucky_rebar_insert_failure", 0) /
+                                   max(1, len(results))),
         "avg_reward": float(np.mean([r["reward"] for r in results])),
         "avg_steps": float(np.mean([r["steps"] for r in results])),
         "termination_counts": dict(terms),
@@ -1446,6 +1693,15 @@ def summarize_results(results):
     stabs = [r.get("stability") or {} for r in results]
     for key in stab_keys:
         vals = [float(s[key]) for s in stabs if key in s]
+        if vals:
+            summary[key] = float(np.mean(vals))
+    pred_fracs = [float(r.get("obs_pred_hidden_frac", 0.0))
+                  for r in results if "obs_pred_hidden_frac" in r]
+    if pred_fracs:
+        summary["obs_pred_hidden_frac"] = float(np.mean(pred_fracs))
+    timings = [r.get("timing") or {} for r in results]
+    for key in ["rl_action_ms", "obs_pred_ms", "compute_hz_est"]:
+        vals = [float(t[key]) for t in timings if key in t]
         if vals:
             summary[key] = float(np.mean(vals))
     return summary
@@ -1468,6 +1724,188 @@ def parse_wind_bins(spec):
     return bins
 
 
+def parse_labeled_paths(spec):
+    items = []
+    for raw in str(spec or "").split(","):
+        raw = raw.strip()
+        if not raw:
+            continue
+        if "=" in raw:
+            label, path = raw.split("=", 1)
+            label = label.strip()
+            path = path.strip()
+        else:
+            path = raw
+            label = os.path.basename(os.path.dirname(path)) or os.path.basename(path)
+        if not label:
+            raise ValueError(f"empty label in checkpoint spec: {raw}")
+        if not path:
+            raise ValueError(f"empty checkpoint path in spec: {raw}")
+        items.append((label, path))
+    if not items:
+        raise ValueError("No checkpoint specs provided")
+    labels = [label for label, _ in items]
+    if len(labels) != len(set(labels)):
+        raise ValueError(f"duplicate checkpoint labels: {labels}")
+    return items
+
+
+def _row_float(row, key, default=np.nan):
+    try:
+        val = row.get(key, "")
+        if val == "":
+            return default
+        return float(val)
+    except Exception:
+        return default
+
+
+def _row_wind_x(row):
+    x = _row_float(row, "wind_speed_mean")
+    if np.isfinite(x):
+        return x
+    x = _row_float(row, "wind_speed_mid")
+    if np.isfinite(x):
+        return x
+    lo = _row_float(row, "wind_speed_low")
+    hi = _row_float(row, "wind_speed_high")
+    if np.isfinite(lo) and np.isfinite(hi):
+        return 0.5 * (lo + hi)
+    return np.nan
+
+
+def _row_broad_success_rate(row):
+    broad = _row_float(row, "broad_success_rate")
+    if np.isfinite(broad):
+        return broad
+    strict = _row_float(row, "strict_success_rate")
+    if not np.isfinite(strict):
+        strict = _row_float(row, "success_rate", 0.0)
+    episodes = max(1.0, _row_float(row, "episodes", 1.0))
+    lucky = 0.0
+    try:
+        counts = json.loads(row.get("termination_counts", "{}") or "{}")
+        lucky = float(counts.get("lucky_rebar_insert_failure", 0))
+    except Exception:
+        lucky = 0.0
+    return min(1.0, max(0.0, strict + lucky / episodes))
+
+
+def _row_metric_value(row, key):
+    if key == "strict_success_rate":
+        val = _row_float(row, "strict_success_rate")
+        if not np.isfinite(val):
+            val = _row_float(row, "success_rate")
+        return 100.0 * val
+    if key == "broad_success_rate":
+        return 100.0 * _row_broad_success_rate(row)
+    return _row_float(row, key)
+
+
+def plot_wind_benchmark_csv(csv_path, out_dir=None):
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except Exception as exc:
+        raise RuntimeError(
+            "matplotlib is required for benchmark plotting") from exc
+
+    with open(csv_path, "r", newline="", encoding="utf-8") as f:
+        rows = list(csv.DictReader(f))
+    if not rows:
+        raise ValueError(f"empty benchmark CSV: {csv_path}")
+
+    if out_dir is None:
+        root, _ = os.path.splitext(csv_path)
+        out_dir = f"{root}_plots"
+    os.makedirs(out_dir, exist_ok=True)
+
+    preferred = ["expert", "residual_rl", "true_obs_rl", "pred_rl"]
+    modes = sorted({r.get("mode", "unknown") for r in rows},
+                   key=lambda m: preferred.index(m) if m in preferred else 99)
+    labels = {
+        "expert": "Expert",
+        "residual_rl": "RL true obs",
+        "true_obs_rl": "RL true obs",
+        "pred_rl": "RL + predictor",
+    }
+    metric_defs = [
+        ("strict_success_rate", "Strict success rate", "%"),
+        ("broad_success_rate", "Broad success rate", "%"),
+        ("avg_angle", "Average swing angle", "deg"),
+        ("avg_ke_mJ", "Average swing kinetic energy", "mJ"),
+        ("cable_ke_avg", "Average cable kinetic energy", "m^2/s^2"),
+    ]
+
+    def _series(mode, key):
+        mode_rows = [r for r in rows if r.get("mode", "unknown") == mode]
+        pts = []
+        for r in mode_rows:
+            x = _row_wind_x(r)
+            y = _row_metric_value(r, key)
+            if np.isfinite(x) and np.isfinite(y):
+                pts.append((x, y))
+        pts.sort(key=lambda p: p[0])
+        if not pts:
+            return np.asarray([]), np.asarray([])
+        return np.asarray([p[0] for p in pts]), np.asarray([p[1] for p in pts])
+
+    fig, axes = plt.subplots(3, 2, figsize=(12, 12), sharex=True)
+    axes_flat = axes.reshape(-1)
+    for ax, (key, title, ylabel) in zip(axes_flat, metric_defs):
+        for mode in modes:
+            x, y = _series(mode, key)
+            if x.size == 0:
+                continue
+            ax.plot(x, y, marker="o", linewidth=2, label=labels.get(mode, mode))
+        ax.set_title(title)
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        if key.endswith("success_rate"):
+            ax.set_ylim(-2, 102)
+    for ax in axes_flat[len(metric_defs):]:
+        ax.axis("off")
+    for ax in axes[-1, :]:
+        ax.set_xlabel("Wind speed (m/s)")
+    handles, legend_labels = axes_flat[0].get_legend_handles_labels()
+    if handles:
+        fig.legend(handles, legend_labels, loc="upper center", ncol=max(1, len(handles)))
+    fig.suptitle("Wind-bin benchmark metrics", y=0.995)
+    fig.tight_layout(rect=[0, 0, 1, 0.96])
+    overview_path = os.path.join(out_dir, "wind_metrics_overview.png")
+    fig.savefig(overview_path, dpi=180)
+    plt.close(fig)
+
+    saved = [overview_path]
+    for key, title, ylabel in metric_defs:
+        fig, ax = plt.subplots(figsize=(8, 5))
+        for mode in modes:
+            x, y = _series(mode, key)
+            if x.size == 0:
+                continue
+            ax.plot(x, y, marker="o", linewidth=2, label=labels.get(mode, mode))
+        ax.set_title(title)
+        ax.set_xlabel("Wind speed (m/s)")
+        ax.set_ylabel(ylabel)
+        ax.grid(True, alpha=0.3)
+        if key.endswith("success_rate"):
+            ax.set_ylim(-2, 102)
+        handles, legend_labels = ax.get_legend_handles_labels()
+        if handles:
+            ax.legend(handles, legend_labels)
+        fig.tight_layout()
+        out_path = os.path.join(out_dir, f"wind_{key}.png")
+        fig.savefig(out_path, dpi=180)
+        plt.close(fig)
+        saved.append(out_path)
+
+    print("[Benchmark Plot] saved:")
+    for path in saved:
+        print(f"  {path}")
+    return saved
+
+
 def run_wind_benchmark(args, config):
     if args.phase != "descent":
         raise ValueError("--compare-wind-bins currently targets --phase descent")
@@ -1479,6 +1917,13 @@ def run_wind_benchmark(args, config):
     config["sim"]["render"] = False
     eval_init = get_descent_eval_init(config, args.eval_curriculum_level)
     bins = parse_wind_bins(args.wind_bins)
+    if bins:
+        _bin_max = max(float(hi) for _, hi in bins)
+        config.setdefault("wind", {})["speed_max"] = max(
+            float(config.get("wind", {}).get("speed_max", 16.5)), _bin_max)
+        config.setdefault("wind_obs", {})["wind_speed_max"] = max(
+            float(config.get("wind_obs", {}).get("wind_speed_max", 16.5)),
+            _bin_max)
     episodes_per_bin = int(args.episodes_per_bin)
     if episodes_per_bin <= 0:
         raise ValueError("--episodes-per-bin must be positive")
@@ -1497,9 +1942,9 @@ def run_wind_benchmark(args, config):
         case_seed = int(args.seed) + 1009 * bin_id
         rng = np.random.default_rng(case_seed)
         if hi <= lo:
-            wind_forces = np.full(episodes_per_bin, float(lo), dtype=np.float64)
+            wind_speeds = np.full(episodes_per_bin, float(lo), dtype=np.float64)
         else:
-            wind_forces = rng.uniform(float(lo), float(hi), episodes_per_bin)
+            wind_speeds = rng.uniform(float(lo), float(hi), episodes_per_bin)
         wind_dirs = rng.uniform(0.0, 2.0 * np.pi, episodes_per_bin)
         reset_seeds = rng.integers(0, np.iinfo(np.int32).max,
                                    episodes_per_bin, dtype=np.int64)
@@ -1512,7 +1957,7 @@ def run_wind_benchmark(args, config):
                 pass
             t_mode = time.perf_counter()
             print(f"[Benchmark] preparing bin {bin_id+1}/{len(bins)} "
-                  f"{lo:.3f}-{hi:.3f}N | {mode} ...", flush=True)
+                  f"{lo:.2f}-{hi:.2f}m/s | {mode} ...", flush=True)
             t0 = time.perf_counter()
             env = CableRobotEnvWithObstacles(config=config)
             try:
@@ -1531,14 +1976,14 @@ def run_wind_benchmark(args, config):
                           flush=True)
 
                 print(f"[Benchmark] running bin {bin_id+1}/{len(bins)} "
-                      f"{lo:.3f}-{hi:.3f}N | {mode} ...", flush=True)
+                      f"{lo:.2f}-{hi:.2f}m/s | {mode} ...", flush=True)
                 prog_every = int(getattr(args, "benchmark_progress_every", 32))
                 if prog_every <= 0:
                     prog_every = 0
                 results = test_single_phase(
                     env, agent, expert, ee_ctrl, "descent", config,
                     n_episodes=episodes_per_bin,
-                    wind_force_sampler=lambda k, wf=wind_forces: wf[k],
+                    wind_speed_sampler=lambda k, ws=wind_speeds: ws[k],
                     wind_dir_sampler=lambda k, wd=wind_dirs: wd[k],
                     reset_seed_sampler=lambda k, rs=reset_seeds: rs[k],
                     obs_noise=args.obs_noise, act_noise=args.act_noise,
@@ -1553,8 +1998,11 @@ def run_wind_benchmark(args, config):
             summary = summarize_results(results)
             row = {
                 "bin_id": bin_id,
-                "wind_low": float(lo),
-                "wind_high": float(hi),
+                "wind_speed_low": float(lo),
+                "wind_speed_high": float(hi),
+                "wind_speed_mid": float(0.5 * (float(lo) + float(hi))),
+                "wind_speed_mean": float(np.mean(wind_speeds)),
+                "wind_speed_std": float(np.std(wind_speeds)),
                 "mode": mode,
                 **summary,
                 "termination_counts": json.dumps(
@@ -1563,9 +2011,13 @@ def run_wind_benchmark(args, config):
             }
             rows.append(row)
             print(f"  -> SR={summary.get('success_rate', 0)*100:.1f}% "
+                  f"bSR={summary.get('broad_success_rate', 0)*100:.1f}% "
                   f"steps={summary.get('avg_steps', 0):.1f} "
                   f"KE={summary.get('avg_ke_mJ', 0):.1f}mJ "
                   f"p95KE={summary.get('p95_ke_mJ', 0):.1f}mJ "
+                  f"rl={summary.get('rl_action_ms', 0):.2f}ms "
+                  f"pred={summary.get('obs_pred_ms', 0):.2f}ms "
+                  f"hz={summary.get('compute_hz_est', 0):.0f} "
                   f"elapsed={time.perf_counter()-t_mode:.1f}s",
                   flush=True)
 
@@ -1581,13 +2033,344 @@ def run_wind_benchmark(args, config):
 
     print("\n[Benchmark Summary]")
     for row in rows:
-        print(f"  bin {row['bin_id']} {row['wind_low']:.3f}-{row['wind_high']:.3f}N "
+        print(f"  bin {row['bin_id']} {row['wind_speed_low']:.2f}-{row['wind_speed_high']:.2f}m/s "
               f"{row['mode']:>11s}: SR={row['success_rate']*100:5.1f}% "
+              f"bSR={row.get('broad_success_rate', 0)*100:5.1f}% "
               f"steps={row['avg_steps']:6.1f} "
               f"avgKE={row.get('avg_ke_mJ', 0):6.1f}mJ "
               f"p95KE={row.get('p95_ke_mJ', 0):6.1f}mJ "
               f"plV_rms={row.get('pl_vel_rms', 0):.3f}")
     print(f"\nSaved benchmark CSV: {out_path}")
+    if bool(getattr(args, "plot_benchmark", False)):
+        plot_wind_benchmark_csv(out_path, getattr(args, "plot_out_dir", None))
+
+
+def run_multi_rl_wind_benchmark(args, config):
+    if args.phase != "descent":
+        raise ValueError("--compare-multi-rl-wind-bins currently targets --phase descent")
+    if args.algo == "expert":
+        raise ValueError("--compare-multi-rl-wind-bins requires --algo ppo or --algo sac")
+
+    ckpt_specs = parse_labeled_paths(args.multi_rl_ckpts)
+    config["sim"]["render"] = False
+    eval_init = get_descent_eval_init(config, args.eval_curriculum_level)
+    bins = parse_wind_bins(args.wind_bins)
+    if bins:
+        _bin_max = max(float(hi) for _, hi in bins)
+        config.setdefault("wind", {})["speed_max"] = max(
+            float(config.get("wind", {}).get("speed_max", 16.5)), _bin_max)
+        config.setdefault("wind_obs", {})["wind_speed_max"] = max(
+            float(config.get("wind_obs", {}).get("wind_speed_max", 16.5)),
+            _bin_max)
+
+    episodes_per_bin = int(args.episodes_per_bin)
+    if episodes_per_bin <= 0:
+        raise ValueError("--episodes-per-bin must be positive")
+    out_path = args.benchmark_out or os.path.join(
+        "test_results",
+        f"descent_multi_rl_wind_benchmark_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    print_curriculum_hardest_task(config)
+    print_descent_eval_settings(config, eval_init)
+    print(f"\n[Multi-RL Benchmark] algo={args.algo}")
+    print(f"[Multi-RL Benchmark] wind bins={bins}, episodes_per_bin={episodes_per_bin}")
+    print(f"[Multi-RL Benchmark] variable_wind={bool(getattr(args, 'variable_wind', False))} "
+          f"speed_band_abs={config.get('wind', {}).get('test_speed_band_abs')} "
+          f"speed_band_frac={config.get('wind', {}).get('test_speed_band_frac')} "
+          f"speed_rate_std={config.get('wind', {}).get('test_speed_rate_std')} "
+          f"dir_band_rad={config.get('wind', {}).get('test_dir_band_rad')} "
+          f"dir_rate_std={config.get('wind', {}).get('test_dir_rate_std')}")
+    for label, ckpt_path in ckpt_specs:
+        print(f"[Multi-RL Benchmark] {label}={ckpt_path}")
+    print(f"[Multi-RL Benchmark] output={out_path}\n", flush=True)
+
+    rows = []
+    for bin_id, (lo, hi) in enumerate(bins):
+        case_seed = int(args.seed) + 1009 * bin_id
+        rng = np.random.default_rng(case_seed)
+        if hi <= lo:
+            wind_speeds = np.full(episodes_per_bin, float(lo), dtype=np.float64)
+        else:
+            wind_speeds = rng.uniform(float(lo), float(hi), episodes_per_bin)
+        wind_dirs = rng.uniform(0.0, 2.0 * np.pi, episodes_per_bin)
+        reset_seeds = rng.integers(0, np.iinfo(np.int32).max,
+                                   episodes_per_bin, dtype=np.int64)
+
+        for label, ckpt_path in ckpt_specs:
+            np.random.seed(case_seed)
+            try:
+                torch.manual_seed(case_seed)
+            except Exception:
+                pass
+
+            t_mode = time.perf_counter()
+            print(f"[Benchmark] preparing bin {bin_id+1}/{len(bins)} "
+                  f"{lo:.2f}-{hi:.2f}m/s | {label} ...", flush=True)
+            mode_config = copy.deepcopy(config)
+            t0 = time.perf_counter()
+            env = CableRobotEnvWithObstacles(config=mode_config)
+            try:
+                print(f"[Benchmark] env ready in {time.perf_counter()-t0:.1f}s",
+                      flush=True)
+                if hasattr(env, 'set_curriculum_n_obstacles'):
+                    env.set_curriculum_n_obstacles(mode_config["scene"]["n_obstacles"])
+                expert = JointSpaceExpert(mode_config, env.ik_solver)
+                ee_ctrl = EEAccController(mode_config, env.ik_solver)
+                print("[Benchmark] controllers ready", flush=True)
+
+                t0 = time.perf_counter()
+                agent = load_agent("descent", args.algo, ckpt_path, mode_config)
+                print(f"[Benchmark] ckpt loaded in {time.perf_counter()-t0:.1f}s",
+                      flush=True)
+
+                print(f"[Benchmark] running bin {bin_id+1}/{len(bins)} "
+                      f"{lo:.2f}-{hi:.2f}m/s | {label} ...", flush=True)
+                prog_every = int(getattr(args, "benchmark_progress_every", 32))
+                if prog_every <= 0:
+                    prog_every = 0
+                results = test_single_phase(
+                    env, agent, expert, ee_ctrl, "descent", mode_config,
+                    n_episodes=episodes_per_bin,
+                    wind_speed_sampler=lambda k, ws=wind_speeds: ws[k],
+                    wind_dir_sampler=lambda k, wd=wind_dirs: wd[k],
+                    reset_seed_sampler=lambda k, rs=reset_seeds: rs[k],
+                    obs_noise=args.obs_noise, act_noise=args.act_noise,
+                    force_noise=args.force_noise,
+                    eval_cur_init=eval_init,
+                    verbose=False,
+                    progress_every=prog_every,
+                    progress_prefix=(f"  bin {bin_id+1}/{len(bins)} {label}"))
+            finally:
+                env.close()
+
+            summary = summarize_results(results)
+            row = {
+                "bin_id": bin_id,
+                "wind_speed_low": float(lo),
+                "wind_speed_high": float(hi),
+                "wind_speed_mid": float(0.5 * (float(lo) + float(hi))),
+                "wind_speed_mean": float(np.mean(wind_speeds)),
+                "wind_speed_std": float(np.std(wind_speeds)),
+                "mode": label,
+                "agent_ckpt": ckpt_path,
+                "variable_wind": bool(getattr(args, "variable_wind", False)),
+                "wind_speed_band_abs": config.get("wind", {}).get("test_speed_band_abs", ""),
+                "wind_speed_band_frac": config.get("wind", {}).get("test_speed_band_frac", ""),
+                "wind_speed_rate_std": config.get("wind", {}).get("test_speed_rate_std", ""),
+                "wind_dir_band_rad": config.get("wind", {}).get("test_dir_band_rad", ""),
+                "wind_dir_rate_std": config.get("wind", {}).get("test_dir_rate_std", ""),
+                **summary,
+                "termination_counts": json.dumps(
+                    summary.get("termination_counts", {}),
+                    ensure_ascii=False, sort_keys=True),
+            }
+            rows.append(row)
+            print(f"  -> SR={summary.get('success_rate', 0)*100:.1f}% "
+                  f"bSR={summary.get('broad_success_rate', 0)*100:.1f}% "
+                  f"steps={summary.get('avg_steps', 0):.1f} "
+                  f"KE={summary.get('avg_ke_mJ', 0):.1f}mJ "
+                  f"p95KE={summary.get('p95_ke_mJ', 0):.1f}mJ "
+                  f"rl={summary.get('rl_action_ms', 0):.2f}ms "
+                  f"hz={summary.get('compute_hz_est', 0):.0f} "
+                  f"elapsed={time.perf_counter()-t_mode:.1f}s",
+                  flush=True)
+
+    fieldnames = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print("\n[Multi-RL Benchmark Summary]")
+    for row in rows:
+        print(f"  bin {row['bin_id']} "
+              f"{row['wind_speed_low']:.2f}-{row['wind_speed_high']:.2f}m/s "
+              f"{row['mode']:>20s}: SR={row['success_rate']*100:5.1f}% "
+              f"bSR={row.get('broad_success_rate', 0)*100:5.1f}% "
+              f"steps={row['avg_steps']:6.1f} "
+              f"avgKE={row.get('avg_ke_mJ', 0):6.1f}mJ "
+              f"p95KE={row.get('p95_ke_mJ', 0):6.1f}mJ "
+              f"plV_rms={row.get('pl_vel_rms', 0):.3f}")
+    print(f"\nSaved benchmark CSV: {out_path}")
+    if bool(getattr(args, "plot_benchmark", False)):
+        plot_wind_benchmark_csv(out_path, getattr(args, "plot_out_dir", None))
+
+
+def run_pred_true_expert_wind_benchmark(args, config):
+    if args.phase != "descent":
+        raise ValueError("--compare-pred-true-expert currently targets --phase descent")
+    if not args.true_obs_ckpt:
+        raise ValueError("--true-obs-ckpt is required")
+    if not args.pred_ckpt:
+        raise ValueError("--pred-ckpt is required")
+    if not args.pred_obs_ckpt:
+        raise ValueError("--pred-obs-ckpt is required")
+
+    config["sim"]["render"] = False
+    eval_init = get_descent_eval_init(config, args.eval_curriculum_level)
+    bins = parse_wind_bins(args.wind_bins)
+    if bins:
+        _bin_max = max(float(hi) for _, hi in bins)
+        config.setdefault("wind", {})["speed_max"] = max(
+            float(config.get("wind", {}).get("speed_max", 16.5)), _bin_max)
+        config.setdefault("wind_obs", {})["wind_speed_max"] = max(
+            float(config.get("wind_obs", {}).get("wind_speed_max", 16.5)),
+            _bin_max)
+
+    episodes_per_bin = int(args.episodes_per_bin)
+    if episodes_per_bin <= 0:
+        raise ValueError("--episodes-per-bin must be positive")
+    out_path = args.benchmark_out or os.path.join(
+        "test_results",
+        f"descent_pred_true_expert_wind8_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+
+    rl_algo = args.algo if args.algo in ("ppo", "sac") else "ppo"
+    mode_specs = [
+        ("expert", None, None),
+        ("true_obs_rl", args.true_obs_ckpt, None),
+        ("pred_rl", args.pred_ckpt, args.pred_obs_ckpt),
+    ]
+
+    print_curriculum_hardest_task(config)
+    print_descent_eval_settings(config, eval_init)
+    print(f"\n[Pred/True/Expert Benchmark] algo={rl_algo}")
+    print(f"[Pred/True/Expert Benchmark] wind bins={bins}, "
+          f"episodes_per_bin={episodes_per_bin}")
+    print(f"[Pred/True/Expert Benchmark] true_obs_ckpt={args.true_obs_ckpt}")
+    print(f"[Pred/True/Expert Benchmark] pred_ckpt={args.pred_ckpt}")
+    print(f"[Pred/True/Expert Benchmark] pred_obs_ckpt={args.pred_obs_ckpt}")
+    print(f"[Pred/True/Expert Benchmark] output={out_path}\n", flush=True)
+
+    rows = []
+    for bin_id, (lo, hi) in enumerate(bins):
+        case_seed = int(args.seed) + 1009 * bin_id
+        rng = np.random.default_rng(case_seed)
+        if hi <= lo:
+            wind_speeds = np.full(episodes_per_bin, float(lo), dtype=np.float64)
+        else:
+            wind_speeds = rng.uniform(float(lo), float(hi), episodes_per_bin)
+        wind_dirs = rng.uniform(0.0, 2.0 * np.pi, episodes_per_bin)
+        reset_seeds = rng.integers(0, np.iinfo(np.int32).max,
+                                   episodes_per_bin, dtype=np.int64)
+
+        for mode, agent_ckpt, pred_ckpt in mode_specs:
+            np.random.seed(case_seed)
+            try:
+                torch.manual_seed(case_seed)
+            except Exception:
+                pass
+
+            mode_config = copy.deepcopy(config)
+            pred_cfg = mode_config.setdefault("observation_predictor", {})
+            pred_cfg["enabled"] = (mode == "pred_rl")
+            pred_cfg["train_enabled"] = False
+            if mode == "pred_rl":
+                pred_cfg["measurement_period_steps"] = int(args.pred_obs_period)
+                pred_cfg["checkpoint"] = str(pred_ckpt)
+
+            t_mode = time.perf_counter()
+            print(f"[Benchmark] preparing bin {bin_id+1}/{len(bins)} "
+                  f"{lo:.2f}-{hi:.2f}m/s | {mode} ...", flush=True)
+            t0 = time.perf_counter()
+            env = CableRobotEnvWithObstacles(config=mode_config)
+            try:
+                print(f"[Benchmark] env ready in {time.perf_counter()-t0:.1f}s",
+                      flush=True)
+                if hasattr(env, 'set_curriculum_n_obstacles'):
+                    env.set_curriculum_n_obstacles(
+                        mode_config["scene"]["n_obstacles"])
+                expert = JointSpaceExpert(mode_config, env.ik_solver)
+                ee_ctrl = EEAccController(mode_config, env.ik_solver)
+                print("[Benchmark] controllers ready", flush=True)
+
+                agent = None
+                if agent_ckpt:
+                    t0 = time.perf_counter()
+                    agent = load_agent("descent", rl_algo, agent_ckpt, mode_config)
+                    print(f"[Benchmark] ckpt loaded in {time.perf_counter()-t0:.1f}s",
+                          flush=True)
+
+                print(f"[Benchmark] running bin {bin_id+1}/{len(bins)} "
+                      f"{lo:.2f}-{hi:.2f}m/s | {mode} ...", flush=True)
+                prog_every = int(getattr(args, "benchmark_progress_every", 32))
+                if prog_every <= 0:
+                    prog_every = 0
+                results = test_single_phase(
+                    env, agent, expert, ee_ctrl, "descent", mode_config,
+                    n_episodes=episodes_per_bin,
+                    wind_speed_sampler=lambda k, ws=wind_speeds: ws[k],
+                    wind_dir_sampler=lambda k, wd=wind_dirs: wd[k],
+                    reset_seed_sampler=lambda k, rs=reset_seeds: rs[k],
+                    obs_noise=args.obs_noise, act_noise=args.act_noise,
+                    force_noise=args.force_noise,
+                    eval_cur_init=eval_init,
+                    verbose=False,
+                    progress_every=prog_every,
+                    progress_prefix=(f"  bin {bin_id+1}/{len(bins)} {mode}"),
+                    obs_predictor_ckpt=pred_ckpt)
+            finally:
+                env.close()
+
+            summary = summarize_results(results)
+            row = {
+                "bin_id": bin_id,
+                "wind_speed_low": float(lo),
+                "wind_speed_high": float(hi),
+                "wind_speed_mid": float(0.5 * (float(lo) + float(hi))),
+                "wind_speed_mean": float(np.mean(wind_speeds)),
+                "wind_speed_std": float(np.std(wind_speeds)),
+                "mode": mode,
+                "agent_ckpt": agent_ckpt or "",
+                "obs_predictor_ckpt": pred_ckpt or "",
+                "obs_period": int(args.pred_obs_period) if mode == "pred_rl" else 1,
+                **summary,
+                "termination_counts": json.dumps(
+                    summary.get("termination_counts", {}),
+                    ensure_ascii=False, sort_keys=True),
+            }
+            rows.append(row)
+            print(f"  -> SR={summary.get('success_rate', 0)*100:.1f}% "
+                  f"bSR={summary.get('broad_success_rate', 0)*100:.1f}% "
+                  f"steps={summary.get('avg_steps', 0):.1f} "
+                  f"KE={summary.get('avg_ke_mJ', 0):.1f}mJ "
+                  f"p95KE={summary.get('p95_ke_mJ', 0):.1f}mJ "
+                  f"hidden={summary.get('obs_pred_hidden_frac', 0)*100:.0f}% "
+                  f"rl={summary.get('rl_action_ms', 0):.2f}ms "
+                  f"pred={summary.get('obs_pred_ms', 0):.2f}ms "
+                  f"hz={summary.get('compute_hz_est', 0):.0f} "
+                  f"elapsed={time.perf_counter()-t_mode:.1f}s",
+                  flush=True)
+
+    fieldnames = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+
+    print("\n[Pred/True/Expert Benchmark Summary]")
+    for row in rows:
+        print(f"  bin {row['bin_id']} "
+              f"{row['wind_speed_low']:.2f}-{row['wind_speed_high']:.2f}m/s "
+              f"{row['mode']:>11s}: SR={row['success_rate']*100:5.1f}% "
+              f"bSR={row.get('broad_success_rate', 0)*100:5.1f}% "
+              f"steps={row['avg_steps']:6.1f} "
+              f"avgKE={row.get('avg_ke_mJ', 0):6.1f}mJ "
+              f"p95KE={row.get('p95_ke_mJ', 0):6.1f}mJ "
+              f"hidden={row.get('obs_pred_hidden_frac', 0)*100:4.0f}% "
+              f"plV_rms={row.get('pl_vel_rms', 0):.3f}")
+    print(f"\nSaved benchmark CSV: {out_path}")
+    if bool(getattr(args, "plot_benchmark", False)):
+        plot_wind_benchmark_csv(out_path, getattr(args, "plot_out_dir", None))
 
 
 # ==============================================================================
@@ -1598,8 +2381,7 @@ def main():
     parser = argparse.ArgumentParser(
         description="[v13.0] 两阶段 RL 测试: cruise (NMPC 抬升+平移) + descent (PID 下降) + pipeline")
     parser.add_argument("--phase", type=str, required=True,
-                        choices=["cruise", "descent", "pipeline", "lift"],
-                        help="[v13.0] 'lift' 自动重定向到 cruise (lift 已合并)")
+                        choices=["cruise", "descent", "pipeline"])
     parser.add_argument("--algo", type=str, default="expert",
                         choices=["ppo", "sac", "expert"])
     parser.add_argument("--ckpt", type=str, default=None)
@@ -1613,9 +2395,13 @@ def main():
     parser.add_argument("--insert-target-z", type=float, default=0.10,
                         help="Descent only: trained alignment target payload COM z (m)")
     parser.add_argument("--insert-depth-min", type=float, default=0.025,
-                        help="Descent only: minimum visible rebar insertion depth (m)")
-    parser.add_argument("--physical-insert-target-z", type=float, default=0.090,
-                        help="Descent only: PID finishing target z after alignment success (m)")
+                        help="Descent only: minimum rebar insertion depth (m)")
+    parser.add_argument("--control-freq-hz", type=float, default=None,
+                        help="test-time control frequency; 5 means one action every 0.2s")
+    parser.add_argument("--keep-step-budget", action="store_true",
+                        help="do not scale max_steps when overriding control frequency")
+    parser.add_argument("--scale-limits-with-control-dt", action="store_true",
+                        help="scale per-step dq/rate limits with control period to preserve per-second limits")
 
     # pipeline 模式 [v13.0] 只有 2 个 ckpt
     parser.add_argument("--cruise-ckpt",  type=str, default=None)
@@ -1627,23 +2413,28 @@ def main():
     parser.add_argument("--pipeline-insert-target-z", type=float, default=0.10,
                         help="Pipeline only: trained alignment target payload COM z (m)")
     parser.add_argument("--pipeline-insert-depth-min", type=float, default=0.025,
-                        help="Pipeline only: minimum visible rebar insertion depth (m)")
-    parser.add_argument("--pipeline-physical-insert-target-z", type=float, default=0.090,
-                        help="Pipeline only: PID finishing target z after alignment success (m)")
+                        help="Pipeline only: minimum rebar insertion depth (m)")
     parser.add_argument("--pipeline-cruise-z", type=float, default=0.25,
                         help="Pipeline only: NMPC terminal payload z above the rebars (m)")
-    # 兼容: 旧 --lift-ckpt 参数仍允许, 但会被映射成 cruise-ckpt
-    parser.add_argument("--lift-ckpt",    type=str, default=None,
-                        help="[v13.0 兼容] 自动映射到 --cruise-ckpt")
-    parser.add_argument("--lift-algo",    type=str, default=None,
-                        choices=["ppo", "sac", "expert", None],
-                        help="[v13.0 兼容] 自动映射到 --cruise-algo")
-
     # ── 噪声/风力扰动 (默认全部 0) [v8] ──────────────────────────────────────
-    parser.add_argument("--wind-force",  type=float, default=0.0,
-                        help="施加恒定风力 (N), 0=无风")
+    parser.add_argument("--wind-speed",  type=float, default=0.0,
+                        help="fixed wind speed (m/s)")
+    parser.add_argument("--wind-speed-max", type=float, default=None,
+                        help="test-time wind speed/observation normalization cap (m/s)")
     parser.add_argument("--wind-dir",    type=float, default=None,
                         help="风向 (rad), None=随机")
+    parser.add_argument("--variable-wind", action="store_true",
+                        help="vary wind continuously around the sampled episode wind")
+    parser.add_argument("--wind-speed-band-abs", type=float, default=None,
+                        help="variable wind absolute speed band (m/s)")
+    parser.add_argument("--wind-speed-band-frac", type=float, default=None,
+                        help="variable wind fractional speed band")
+    parser.add_argument("--wind-speed-rate-std", type=float, default=None,
+                        help="variable wind speed random-walk std")
+    parser.add_argument("--wind-dir-band-rad", type=float, default=None,
+                        help="variable wind direction band around initial direction (rad)")
+    parser.add_argument("--wind-dir-rate-std", type=float, default=None,
+                        help="variable wind direction random-walk std")
     parser.add_argument("--obs-noise",   type=float, default=0.0,
                         help="观测噪声标准差 (加到 normalized obs)")
     parser.add_argument("--act-noise",   type=float, default=0.0,
@@ -1654,13 +2445,43 @@ def main():
                         help="descent eval init level: 'max' or a numeric curriculum level")
     parser.add_argument("--compare-wind-bins", action="store_true",
                         help="run expert vs Residual RL descent benchmark over wind bins")
+    parser.add_argument("--compare-multi-rl-wind-bins", action="store_true",
+                        help="run several Residual RL checkpoints over identical wind-bin cases")
+    parser.add_argument("--compare-pred-true-expert", action="store_true",
+                        help="run expert vs true-observation RL vs predictor RL over wind bins")
+    parser.add_argument("--true-obs-ckpt", type=str, default=None,
+                        help="checkpoint for the true-observation residual RL baseline")
+    parser.add_argument("--pred-ckpt", type=str, default=None,
+                        help="checkpoint for residual RL trained/evaluated with predictor observations")
+    parser.add_argument("--pred-obs-ckpt", type=str, default=None,
+                        help="checkpoint for the observation predictor used by --pred-ckpt")
+    parser.add_argument("--pred-obs-period", type=int, default=2,
+                        help="true observation period for predictor evaluation")
+    parser.add_argument("--multi-rl-ckpts", type=str, default=None,
+                        help="comma separated label=checkpoint specs for --compare-multi-rl-wind-bins")
+    parser.add_argument("--obs-predictor", action="store_true",
+                        help="single-run mode: evaluate with a frozen observation predictor")
+    parser.add_argument("--obs-predictor-ckpt", type=str, default=None,
+                        help="single-run mode: observation predictor checkpoint")
+    parser.add_argument("--obs-predictor-target-mode", type=str, default=None,
+                        choices=["raw", "non_cable_latent"],
+                        help="predictor target mode for eval and pred-vs-true benchmark")
+    parser.add_argument("--obs-period", type=int, default=None,
+                        help="single-run mode: true observation period for predictor evaluation")
     parser.add_argument("--episodes-per-bin", type=int, default=512,
                         help="episodes per wind bin for --compare-wind-bins")
     parser.add_argument("--wind-bins", type=str,
-                        default="0.00-0.02,0.02-0.05,0.05-0.10,0.10-0.20,0.20-0.35",
-                        help="comma separated wind bins in N, e.g. 0-0.02,0.02-0.05")
+                        default=("0-1.25,1.25-2.5,2.5-3.75,3.75-5,"
+                                 "5-6.25,6.25-7.5,7.5-8.75,8.75-10"),
+                        help="comma separated wind-speed bins in m/s, e.g. 0-3,3-6")
     parser.add_argument("--benchmark-out", type=str, default=None,
                         help="CSV output path for --compare-wind-bins")
+    parser.add_argument("--plot-benchmark", action="store_true",
+                        help="save benchmark metric plots after writing the CSV")
+    parser.add_argument("--plot-benchmark-csv", type=str, default=None,
+                        help="plot an existing benchmark CSV and exit")
+    parser.add_argument("--plot-out-dir", type=str, default=None,
+                        help="directory for benchmark plot PNG files")
     parser.add_argument("--benchmark-progress-every", type=int, default=32,
                         help="print benchmark progress every N episodes; 0 disables it")
     parser.add_argument("--quiet", action="store_true",
@@ -1673,19 +2494,20 @@ def main():
     except Exception:
         pass
 
-    # [v13.0] lift 重定向到 cruise
-    if args.phase == "lift":
-        print("\n[v13.0 提示] lift 已合并进 cruise, 自动重定向 --phase lift → cruise\n")
-        args.phase = "cruise"
-    # 兼容: 旧的 --lift-ckpt 映射到 --cruise-ckpt
-    if args.lift_ckpt and not args.cruise_ckpt:
-        print(f"[v13.0 兼容] --lift-ckpt {args.lift_ckpt} → --cruise-ckpt")
-        args.cruise_ckpt = args.lift_ckpt
-    if args.lift_algo and args.lift_algo != "ppo":
-        args.cruise_algo = args.lift_algo
+    if args.plot_benchmark_csv:
+        plot_wind_benchmark_csv(args.plot_benchmark_csv, args.plot_out_dir)
+        return
 
     config = build_config(args)
     config["scene"]["seed"] = args.seed
+
+    if args.compare_pred_true_expert:
+        run_pred_true_expert_wind_benchmark(args, config)
+        return
+
+    if args.compare_multi_rl_wind_bins:
+        run_multi_rl_wind_benchmark(args, config)
+        return
 
     if args.compare_wind_bins:
         run_wind_benchmark(args, config)
@@ -1699,7 +2521,9 @@ def main():
     env = CableRobotEnvWithObstacles(config=config)
     install_space_start_callback(
         env,
-        bool(args.wait_for_space and args.render and not args.compare_wind_bins))
+        bool(args.wait_for_space and args.render
+             and not args.compare_wind_bins
+             and not args.compare_pred_true_expert))
     if args.wait_for_space and not args.render:
         print("[wait-for-space] 未开启 --render，等待空格设置已忽略")
     if hasattr(env, 'set_curriculum_n_obstacles'):
@@ -1709,7 +2533,15 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"  测试配置: phase={args.phase} algo={args.algo} eps={args.episodes}")
-    print(f"  扰动: wind={args.wind_force:.1f}N, force_noise={args.force_noise:.2f}, "
+    print(f"  control: {float(config['sim']['control_freq_hz']):.1f}Hz "
+          f"(action_dt={1.0/float(config['sim']['control_freq_hz']):.3f}s, "
+          f"env_dt={float(env.dt):.3f}s, sim_steps={int(env.sim_steps)})")
+    if args.wind_speed > 0:
+        _wind_label = (f"{args.wind_speed:.2f}m/s "
+                       f"({wind_speed_to_force(config, args.wind_speed):.2f}N)")
+    else:
+        _wind_label = "0"
+    print(f"  扰动: wind={_wind_label}, force_noise={args.force_noise:.2f}, "
           f"obs_noise={args.obs_noise:.3f}, act_noise={args.act_noise:.3f}")
     print(f"{'='*60}\n")
 
@@ -1738,7 +2570,8 @@ def main():
         results = test_pipeline(
             env, agents, expert, ee_ctrl, config,
             n_episodes=args.episodes,
-            wind_force=args.wind_force, wind_dir=args.wind_dir,
+            wind_speed=args.wind_speed,
+            wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
             force_noise=args.force_noise)
         print_summary(
@@ -1762,11 +2595,13 @@ def main():
         results = test_single_phase(
             env, agent, expert, ee_ctrl, args.phase, config,
             n_episodes=args.episodes,
-            wind_force=args.wind_force, wind_dir=args.wind_dir,
+            wind_speed=args.wind_speed,
+            wind_dir=args.wind_dir,
             obs_noise=args.obs_noise, act_noise=args.act_noise,
             force_noise=args.force_noise,
             eval_cur_init=eval_cur_init,
-            verbose=not args.quiet)
+            verbose=not args.quiet,
+            obs_predictor_ckpt=args.obs_predictor_ckpt)
         print_summary(results, f"{args.phase}-{args.algo}")
 
     env.close()

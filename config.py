@@ -3,9 +3,9 @@
 #
 # v8 重构核心:
 #   1. 删除所有已废弃模块的参数 (ORCA expert, dual-RL, shadow obstacle, ...)
-#   2. 三阶段聚焦于「噪声/风力鲁棒性」课程学习
+#   2. 三阶段聚焦于「噪声/风速鲁棒性」课程学习
 #   3. 课程晋级条件: success_rate ≥ threshold AND episodes_at_level ≥ min_eps
-#   4. 风力上限统一: 训练/测试最大 2.0 N
+#   4. 风速上限统一: 训练/测试最大 10 m/s
 #   5. wandb 日志精简: PPO 训练指标 + 课程参数 + 训练表现 三类
 #
 # 各阶段统一课程结构 (噪声等级 0 → max):
@@ -154,7 +154,9 @@ DEFAULT_CONFIG = {
             [-0.035,  0.035],
             [-0.035, -0.035],
         ],
-        "mass":               1.0,
+        # Socket volume is about 1.95e-3 m^3; 4.7 kg is close to a
+        # concrete-density lifting block while still within the iiwa sim range.
+        "mass":               4.7,
         "lift_site_offset":   0.1,
         "lift_site_spread":   0.05,
     },
@@ -246,6 +248,39 @@ DEFAULT_CONFIG = {
         "vel_xy_tolerance":      0.05,
         "vel_z_tolerance":       0.05,
         "require_floor_contact": False,
+        # Shared train/test physical success gates.  A descent success now
+        # means the policy itself reaches the insertion target; test no longer
+        # appends an extra independent PID finishing segment.
+        "physical_success_requires_floor_contact": True,
+        "physical_success_requires_insert_depth":  False,
+        "physical_success_requires_rebar_alignment": True,
+        "physical_rebar_xy_tolerance": 0.0045,
+        "floor_contact_allow_z_fallback": True,
+        "floor_contact_z_tolerance": 0.004,
+        # PPO should learn direct clean insertion, not count a lucky slide-in
+        # after resting on / colliding with the rebar tips before entering the holes.
+        "train_reject_lucky_rebar_insert": True,
+        "clean_insert_bad_contact_depth": 0.004,
+        "lucky_rebar_insert_penalty": -12.0,
+        # Strict by default: lucky slide-in after bad rebar contact is always a
+        # failure.  The old bootstrap schedule is left disabled for compatibility
+        # but should not be used for residual RL training.
+        "strict_lucky_reject_always": True,
+        "lucky_reject_auto_enable": False,
+        "lucky_reject_enable_sr": 0.70,
+        "lucky_reject_min_window": 80,
+        # Early negative termination for the common failure mode where the
+        # socket is resting on the rebars, no longer moving down, and still has
+        # not reached the floor.
+        "stuck_fail_enabled": True,
+        "stuck_fail_patience": 25,
+        "stuck_fail_rebar_contact_required": False,
+        "stuck_fail_vz_abs": 0.006,
+        "stuck_fail_progress_eps": 0.0002,
+        "stuck_fail_xy_gate": 0.035,
+        "stuck_fail_rebar_xy_gate": 0.035,
+        "stuck_fail_z_above_target": 0.045,
+        "stuck_fail_rebar_top_tol": 0.015,
         "partial_dist_scale":    0.05,
 
         # 退火 (descent 课程最高 level 后用)
@@ -258,14 +293,28 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 14. 风力 (env 内部; 训练用 set_wind_force 每 episode 覆盖)
+    # 14. 风速 (env 内部; 训练用 set_wind_speed 每 episode 覆盖)
     # ==========================================================================
     "wind": {
         "enabled":            False,
-        "F_max":              2.0,        # [v8] 全局上限 2.0 N
+        # User-facing wind quantity is speed.  The environment converts it to
+        # force via F = 0.5 * rho * Cd * A * v^2.
+        "air_density":        1.225,
+        "drag_coefficient":   1.30,
+        "projected_area":     0.020,
+        "speed_max":          16.5,
+        "speed_rate_std":     0.50,
+        "F_max":              8.0,
         "theta_rate_std":     0.15,
-        "force_rate_std":     0.1,
         "seed":               123,
+        "test_wind_variable": False,
+        "test_speed_band_abs": 0.50,
+        "test_speed_band_frac": 0.15,
+        "test_speed_rate_std": 0.25,
+        "test_speed_mean_reversion": 0.80,
+        "test_dir_band_rad": 0.35,
+        "test_dir_rate_std": 0.08,
+        "test_dir_mean_reversion": 0.50,
     },
 
     # ==========================================================================
@@ -337,14 +386,76 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 17d. [v14.0] Wind Observation — 让 RL 知道当前风力
+    # 17d. [v14.0] Wind Observation — 让 RL 知道当前风速
     # ==========================================================================
-    # 问题: obs 中完全没有风力信息 → RL 无法适应不同风力
-    # 方案: 在 obs 中追加 [wind_force_normalized, wind_dir_cos, wind_dir_sin]
+    # 问题: obs 中完全没有风速信息 → RL 无法适应不同风扰动
+    # 方案: 在 obs 中追加 [wind_speed_normalized, wind_dir_cos, wind_dir_sin]
     # 这 3 维让 RL 能区分有风/无风, 并知道风从哪个方向来
     "wind_obs": {
         "enabled":               True,
-        "wind_force_max":        2.0,   # 归一化分母
+        "wind_speed_max":        16.5,  # m/s normalization denominator
+    },
+
+    # ==========================================================================
+    # 17e. Observation Predictor (real-device latency model)
+    # ==========================================================================
+    # When enabled, RL/base controllers receive a true env observation at step
+    # 0, 2, 4, ... and an LSTM-predicted raw env observation at intermediate
+    # 10Hz control steps. MuJoCo's accurate observation remains available only
+    # for reward/termination and supervised predictor loss.
+    "observation_predictor": {
+        "enabled":               False,
+        "measurement_period_steps": 2,
+        "warmup_true_steps":     0,
+        "train_enabled":         True,
+        "train_on_all_steps":    True,
+        "action_dim":            7,
+        "hidden_dim":            128,
+        "n_layers":              1,
+        "dropout":               0.0,
+        "lr":                    3e-4,
+        "weight_decay":          0.0,
+        "grad_clip":             1.0,
+        "nll_coef":              1.0,
+        "huber_coef":            0.25,
+        "nll_error_clip":        0.0,
+        "log_std_min":          -5.0,
+        "log_std_max":           1.0,
+        "obs_norm_clip":         8.0,
+        "action_norm_clip":      2.0,
+        "rebar_error_scale":     0.05,
+        # target_mode:
+        #   raw: predict the full raw env observation (old 294D path).
+        #   non_cable_latent: predict env raw obs before the cable block
+        #      (0:54) plus CableEncoder(cable_raw) latent (32D). This reduces
+        #      target width from 294 to 86 and gives important non-cable state a
+        #      larger loss share.
+        "target_mode":           "raw",
+        "non_cable_dim":         54,
+        "cable_latent_dim":      32,
+        "non_cable_loss_weight": 2.0,
+        "cable_latent_loss_weight": 1.0,
+        "cable_latent_scale":    1.0,
+        # Optional explicit predictor checkpoint. If empty, PPO falls back to
+        # the paired path derived from --resume-ckpt.
+        "checkpoint":            "",
+        # Predictor-only pretraining uses a frozen residual policy and true
+        # simulator observations for policy input.
+        "pretrain_policy_deterministic": True,
+        "pretrain_final_curriculum": True,
+        "pretrain_wind_min":      0.0,
+    },
+
+    # Held-observation Delay-MDP baseline for real-device latency.
+    # No predictor is used: the policy/base controller sees a true observation
+    # at steps 0, 2, 4, ... and reuses the last measured observation in between.
+    # Reward/termination still use the simulator's true current state.
+    "delay_mdp": {
+        "enabled":                  False,
+        "measurement_period_steps": 2,
+        "include_obs_age":          True,
+        "action_history_steps":     4,
+        "action_dim":               7,
     },
     "cruise_z_pid": {
         "kp_z":               3.0,
@@ -357,79 +468,6 @@ DEFAULT_CONFIG = {
         "yaw_correction_max": 0.1,
         "floor_z_threshold":  0.04,
         "floor_vz_threshold": -0.15,
-    },
-
-    # ==========================================================================
-    # 18. Phase 1: Lift RL (v12: NMPC base + RL residual 3D acc)
-    # ==========================================================================
-    # [v12] 架构改为 NMPC + residual, 与 cruise/descent 统一
-    # - NMPC 单独跑能完成纯垂直 lift (path 起点 -> z_cruise, xy 不变)
-    # - RL 残差: 在 NMPC 基础上做小幅微调 (主要抗风/抗噪)
-    # - 用户要求: RL 残差权重小, 只是提高稳定性
-    "lift_rl": {
-        # [v14.0] obs_dim 重算: 原始 23 维 + cable_encoder_out(32) + wind_obs(3) = 58
-        # 原 263 = 23 + 240(raw cable); 现用 CableEncoder 压缩到 32 维, 加 3 维风力obs
-        "obs_dim":            58,
-        "action_dim":         3,
-        "init_xy_range":      0.01,
-        "init_z_range":       0.01,
-        "init_vel_range":     0.0,
-        "max_steps":          200,
-        "target_z_cruise":    0.25,
-
-        # [v12] 架构: NMPC + RL 残差
-        "use_nmpc_base":             True,
-        "residual_acc_max_xy":       0.08,    # xy 残差 (sim2real 抗风用, 与 cruise 一致)
-        "residual_acc_max_z":        0.10,    # z 残差 (微调 lift 速度, 应远 < acc_max_z=1.5)
-        # 残差总和上限 (clip after base + residual)
-        "total_acc_max_xy":          0.60,
-        "total_acc_max_z":           1.50,
-
-        # log_std phase-specific (新 lift residual 用 zero-init + 小 std)
-        # [v14.0] log_std_init 从 -2.0 提到 -1.0 (std 0.37), 给 cruise 残差更多探索
-        "lift_log_std_init":         -1.0,   # v12 -2.0 → v14 -1.0 (std 0.37)
-        "lift_log_std_floor_init":   -1.5,   # v12 -3.0 → v14 -1.5 (std 0.22)
-        "lift_log_std_floor_final":  -3.0,
-
-        "reward": {
-            # ── v12.4 Lift reward (与 cruise 共用防摆主体) ───────────────────
-            # 核心: NMPC 已能 lift, RL 残差只需抗扰. 防摆 reward 与 cruise 完全一致.
-            # 终止 reward 量级 ≤ 5 (v11.4 经验, 防 PPO Q 发散).
-            #
-            # 1. z_approach: 引导 z 接近 cruise 高度 (差分, lift 特有, 主导)
-            "z_approach_coef":            2.0,
-            # 2. swing_energy 强惩罚 (与 cruise 完全一致)
-            "swing_energy_thresh":        0.010,
-            "swing_energy_penalty_coef":  4.0,
-            "swing_energy_penalty_max":   0.10,
-            # [v12.4 新增] swing_improve 差分鼓励主动减摆 (与 cruise 一致)
-            "swing_improve_coef":         20.0,
-            "swing_improve_max":           0.04,
-            "swing_worsen_max":            0.04,
-            # 3. [v12.3] cable_ke_penalty (与 cruise 一致)
-            "cable_ke_thresh":            0.05,
-            "cable_ke_penalty_coef":      1.0,
-            "cable_ke_penalty_max":       0.08,
-            # 4. tilt 惩罚 (lift 阶段防止 payload 翻倒)
-            "tilt_coef":                  0.5,
-            "tilt_max_for_penalty":       0.3,
-            # 5. action 残差限制 (与 cruise 一致)
-            "action_magnitude_coef":      0.02,
-            "action_smoothness_coef":     0.04,
-            # 6. xy drift (lift 特有: NMPC 已保证, 小奖励)
-            "xy_drift_coef":              1.0,
-            # 7. 成功判定参数
-            "success_z_tol":              0.025,
-            "success_vz_max":             0.08,
-            "success_swing_energy_thresh": 0.020,
-            "xy_max_dist_success":        0.12,
-            "hold_steps":                 3,
-            # 8. 终止 reward (量级与 cruise 一致)
-            "success_bonus":              5.0,
-            "step_penalty":               0.0,    # 用户要求 "不加 penalty"
-            "instability_penalty":       -1.0,
-            "crash_penalty":             -1.5,
-        },
     },
 
     # ==========================================================================
@@ -455,7 +493,7 @@ DEFAULT_CONFIG = {
         "min_steps_for_success": 5,
         "estimated_full_dist_m": 0.41,
         "z_lock_height":      0.25,
-        "target_z_cruise":    0.25,  # [v13.0] 从 lift_rl 搬来 (统一 z 目标高度)
+        "target_z_cruise":    0.25,  # [v13.0] 统一 z 目标高度
 
         # 架构: NMPC base + residual RL.
         # nmpc_residual_mode keeps the full expert/NMPC integration path and
@@ -464,7 +502,7 @@ DEFAULT_CONFIG = {
         "nmpc_residual_mode":    True,
         "include_nmpc_action_obs": True,
         "residual_acc_max_xy_rl": 0.10,   # small authority for damping NMPC loop jitter
-        "residual_acc_max_z_rl":  0.10,   # [v13.0] 新增 z 残差上限 (从 lift_rl 搬来)
+        "residual_acc_max_z_rl":  0.10,   # [v13.0] z 残差上限
         "residual_acc_max_xy":   0.60,    # total xy acc cap after base + residual
         "total_acc_max_z":       1.50,    # [v13.0] z 总和上限 (lift 阶段需要)
         # [v9] BC 已完全移除. cruise 残差 actor 在 PPOPhaseAgent.__init__ 中
@@ -537,7 +575,7 @@ DEFAULT_CONFIG = {
 
             # ── [v13.0] lift 段引导 (payload z < z_cruise 时启用) ────────────
             # 用于合并的 lift 阶段, payload 仍在低空时优先引导上升
-            "z_approach_coef":            2.0,     # 差分系数 (从 lift_rl 搬来)
+            "z_approach_coef":            2.0,     # z 差分引导系数
             "tilt_coef":                  0.5,     # tilt 惩罚 (lift 时防翻倒)
             "tilt_max_for_penalty":       0.3,
 
@@ -637,16 +675,6 @@ DEFAULT_CONFIG = {
         # training should not jump back to them mid-run because that breaks the
         # on-policy trajectory and optimizer state continuity.
 
-        # [v11 Path 2] PPO-HER (Crowder et al. 2024, arXiv:2410.22524)
-        # [v11.3] max_eps 5 → 16, 让 HER 真正补偿 sparse reward
-        # Disabled after adding normalized insertion-state to observations:
-        # the old relabeler only edits target_xy/pl_target_err and would leave
-        # the normalized success-tube features inconsistent in single-env PPO.
-        "ppo_her_enabled":             False,
-        "ppo_her_xy_tol_relabel":      0.020,  # 0.015 → 0.020 (更宽松, 更易 relabel)
-        "ppo_her_min_displacement":    0.003,  # 0.005 → 0.003
-        "ppo_her_max_episodes":         16,    # 5 → 16 (≥ 1 个 rollout 大量 relabel)
-
         # [v12.3 关键回退] 用户反馈: "很久之前版本可以 work, 现在出错了"
         # 嫌疑 #1: action_scale 缩太小. v8: 0.5/1.0, v11.4: 0.10/0.20 → 缩 80%
         # 在 5mm 精度时, RL 残差需要"小且精准"的修正, 太小则无力修正
@@ -678,9 +706,16 @@ DEFAULT_CONFIG = {
             "alignment_success_coef":    0.30,
             "alignment_progress_coef":   0.42,
             "alignment_progress_clip":   0.25,
-            "alignment_z_gate":          0.060,
+            # Only pay vertical progress after the payload is close enough to
+            # the rebar holes. A wide gate made high-wind policies press down
+            # while still several cm off target, then get stuck on rebar tops.
+            "alignment_z_gate":          0.012,
             "alignment_z_progress_coef": 5.0,
-            "alignment_height_penalty_coef": 0.04,
+            "alignment_height_penalty_coef": 0.06,
+            "premature_descent_xy_gate": 0.012,
+            "premature_descent_z_margin": 0.015,
+            "premature_descent_penalty_coef": 3.0,
+            "premature_descent_penalty_max": 0.08,
 
             # Soft residual intervention regularizer. This keeps small corrective
             # residuals free, but discourages the current high sustained action
@@ -696,6 +731,7 @@ DEFAULT_CONFIG = {
             "late_step_penalty_coef":       0.02,
             "late_step_penalty_max":        0.05,
             "timeout_penalty":             -8.0,
+            "stuck_fail_penalty":          -12.0,
             "failure_miss_penalty_coef":   10.0,
             "failure_miss_penalty_max":    25.0,
             "failure_miss_error_clip":      3.0,
@@ -816,14 +852,273 @@ DEFAULT_CONFIG = {
         "seed":                  42,
     },
 
+    # Explicit side-branch presets. They are only used with
+    # train_phase.py --profile, so the default/main 10Hz path is unchanged.
+    "train_profiles": {
+        "descent_variable_wind_true_obs": {
+            "description": "10Hz full-observation descent PPO adaptation with continuous variable wind around each sampled episode wind.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_variable_wind_true_obs",
+            "config": {
+                "train": {
+                    "total_timesteps": 6_000_000,
+                    "n_envs": 8,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_strict_highwind_finetune": {
+            "description": "10Hz strict-lucky true-observation PPO finetune from the stable variable-wind model, with moderate high-wind focus.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_strict_highwind_finetune",
+            "resume_ckpt": "saves/descent_ppo_variable_wind_true_obs_finetune_20260531_110809/ckpt_latest.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 4_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "ppo": {
+                    "lr_actor": 5e-5,
+                    "lr_critic": 1e-4,
+                    "freeze_obs_norm": True,
+                },
+                "insertion": {
+                    "strict_lucky_reject_always": True,
+                    "train_reject_lucky_rebar_insert": True,
+                    "lucky_reject_auto_enable": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_start_level": 8,
+                    "descent_start_wind": 8.0,
+                    "descent_ramp_sr_threshold": 0.55,
+                    "descent_ramp_warmup_sr_threshold": 0.45,
+                    "descent_ramp_warmup_scale": 0.05,
+                    "descent_ramp_min_window": 100,
+                    "descent_wind_focus_enabled": True,
+                    "descent_wind_focus_start_level": 6,
+                    "descent_wind_focus_full_level": 8,
+                    "descent_wind_focus_start_min": 3.0,
+                    "descent_wind_focus_full_min": 4.5,
+                    "descent_wind_focus_final_min": 6.0,
+                },
+            },
+        },
+        "descent_obs_pred_nll_guard_highwind6": {
+            "description": "Predictor-only high-wind stabilization with guarded NLL, Huber-dominant mean fitting, and non-cable+cable-latent targets.",
+            "phase": "descent",
+            "algo": "obs_pred",
+            "log_dir": "saves/descent_obs_pred_pretrain_nclatent_nll_guard_highwind6",
+            "resume_ckpt": "saves/descent_ppo_variable_wind_true_obs_finetune_highwind_focus_20260531_231923/ckpt_latest.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 900_000,
+                    "n_envs": 8,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "measurement_period_steps": 2,
+                    "checkpoint": "saves/descent_obs_pred_pretrain_nclatent_stable_lr3e5_w4_c1_20260602_005741/ckpt_final_obs_predictor.pt",
+                    "target_mode": "non_cable_latent",
+                    "lr": 2e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                    "pretrain_wind_min": 6.0,
+                    "pretrain_policy_deterministic": True,
+                    "pretrain_final_curriculum": True,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_20hz_from_scratch": {
+            "description": "20Hz full-observation residual+PID PPO branch from scratch with time-scaled high-frequency settings and variable wind.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_20hz_true_obs_scratch",
+            "control_freq_hz": 20.0,
+            "scale_limits_with_control_dt": True,
+            "keep_step_budget": False,
+            "config": {
+                "train": {
+                    "total_timesteps": 12_000_000,
+                    "n_envs": 8,
+                },
+                "insertion": {
+                    "strict_lucky_reject_always": True,
+                    "train_reject_lucky_rebar_insert": True,
+                    "lucky_reject_auto_enable": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_20hz_finetune_from_10hz": {
+            "description": "20Hz full-observation PPO finetune from the mature 10Hz variable-wind model, restarting the normal curriculum from level 0.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_20hz_true_obs_finetune_from_10hz",
+            "resume_ckpt": "saves/descent_ppo_variable_wind_true_obs_finetune_20260531_110809/ckpt_latest.pt",
+            "control_freq_hz": 20.0,
+            "scale_limits_with_control_dt": True,
+            "keep_step_budget": False,
+            "config": {
+                "train": {
+                    "total_timesteps": 12_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "ppo": {
+                    "lr_actor": 5e-5,
+                    "lr_critic": 1e-4,
+                    "freeze_obs_norm": True,
+                },
+                "insertion": {
+                    "strict_lucky_reject_always": True,
+                    "train_reject_lucky_rebar_insert": True,
+                    "lucky_reject_auto_enable": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_start_level": 0,
+                    "descent_start_wind": 0.5,
+                },
+            },
+        },
+        "descent_5hz_from_scratch": {
+            "description": "5Hz full-observation residual+PID PPO branch from scratch with the normal descent curriculum.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_5hz_from_scratch",
+            "control_freq_hz": 5.0,
+            "scale_limits_with_control_dt": True,
+            "keep_step_budget": False,
+            "config": {
+                "train": {
+                    "total_timesteps": 7_500_000,
+                    "n_envs": 8,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_5hz_keep_steps_diag": {
+            "description": "5Hz full-observation diagnostic from scratch; keep descent max_steps=300 for a 60s episode budget.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_5hz_keep_steps_diag",
+            "control_freq_hz": 5.0,
+            "scale_limits_with_control_dt": True,
+            "keep_step_budget": True,
+            "config": {
+                "train": {
+                    "total_timesteps": 2_000_000,
+                    "n_envs": 8,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_5hz_from_scratch_conservative": {
+            "description": "5Hz full-observation residual+PID PPO branch from scratch without per-step dq/rate scaling.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_5hz_from_scratch_conservative",
+            "control_freq_hz": 5.0,
+            "scale_limits_with_control_dt": False,
+            "keep_step_budget": False,
+            "config": {
+                "train": {
+                    "total_timesteps": 7_500_000,
+                    "n_envs": 8,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+    },
+
     # ==========================================================================
-    # 24. 课程学习 [v9] 三类噪声 + 风力 统一管理 (BC 已完全移除)
+    # 24. 课程学习 [v9] 三类噪声 + 风速 统一管理 (BC 已完全移除)
     #
     # 每个 level 同时定义:
     #   obs_noise   — 观测噪声 σ (加到 normalized obs 上)
     #   act_noise   — 执行噪声 σ (加到 delta_q 上, rad/step)
     #   force_noise — 环境噪声力 σ (N, 加在 payload 上, 随机方向)
-    #   wind_max    — 风力上限 (N, 每 episode 在 [0, wind_max] 均匀采样)
+    #   wind_max    — 风速上限 (m/s, 每 episode 在 [0, wind_max] 均匀采样)
     #
     # 晋级条件: (sr ≥ sr_threshold) AND (eps_at_level ≥ min_eps)
     # 硬上限: eps_at_level ≥ hard_cap_eps 时强制晋级 (防卡死)
@@ -832,55 +1127,28 @@ DEFAULT_CONFIG = {
     "curriculum": {
         "enabled": True,
 
-        # ── [v12.5] 课程倒退机制 — 用户反馈: 倒退导致策略反复反弹破坏稳定 ───
-        # 用户原话: "反复反弹由于回退机制导致, 破坏其稳定性很快达到 0 成功率"
-        # 解决: 关闭所有倒退, 改用 hysteresis: 学坏时延长当前级训练而非倒退
-        # 文献: Narvekar et al. 2020 (Curriculum Learning Survey, arXiv:2003.04960)
-        #       —— 反复倒退/晋级会让 on-policy RL (PPO) 灾难性发散
-        "descent_regression_enabled": False,   # v12.5: 关闭
-        "lift_regression_enabled":    False,
-        "cruise_regression_enabled":  False,
-
         # ── [v12.5] 三段课程统一策略 ─────────────────────────────────────────
         # 1. 噪声维度: 只保留 wind_max (用户要求 + Pinto 2017 robust adversarial RL)
         #    - 取消 obs_noise: 测量噪声本可由 LSTM actor 隐式滤掉
         #    - 取消 act_noise: 执行噪声在真实系统是 motor backlash, 不大
         #    - 取消 force_noise: 已被 wind 包含 (都是外力)
-        #    - 风力 wind_max 是真正的 sim2real 主要 gap (环境扰动)
-        # 2. 课程: 6 级渐进 (每级风力增量 ≤ 0.5N), 不是 2 级突变
-        #    旧 v12.3 L0→L1 跳 0→1N 导致 PPO 策略灾难性发散
+        #    - 风速 wind_max 是真正的 sim2real 主要 gap (环境扰动)
+        # 2. 课程: 逐级提高风速, 避免大幅分布突变
         # 3. 晋级条件: 严格 (SR ≥ 阈值 + min_eps 充分训练)
         # 4. 不倒退: 学坏 → 延长当前级 (hard_cap_eps 增大)
 
-        # ── Lift 课程 (8 级渐进, 风力 0.05 → 2.0N) ──────────────────────────────
-        # [v14.0] 与 cruise 统一 (lift 已合并到 cruise)
-        "lift_levels": [
-            {"wind_max": 0.05},
-            {"wind_max": 0.15},
-            {"wind_max": 0.30},
-            {"wind_max": 0.50},
-            {"wind_max": 0.80},
-            {"wind_max": 1.10},
-            {"wind_max": 1.50},
-            {"wind_max": 2.00},
-        ],
-        "lift_sr_threshold":  0.75,
-        "lift_min_eps":       350,    # v12.5 200 → v14.0 350
-        "lift_hard_cap_eps":  2500,   # v12.5 1500 → v14.0 2500
-        "lift_stats_window":  100,    # v12.5 60 → v14.0 100
-
-        # ── Cruise 课程 (8 级渐进, 风力 0.05 → 2.0N) ────────────────────────────
-        # [v14.0] 关键改动: 不从 0 风开始, 从微弱风 (0.05N) 开始训练
+        # ── Cruise 课程 (风速 1 → 10m/s) ────────────────────────────
+        # [v14.0] 关键改动: 不从 0 风开始, 从微弱风开始训练
         # 理由: RL 从一开始就学习"有扰动"环境, 避免 0→有风的分布突变
         # 增量更细: 每级 ≤ 0.3N, 8 级渐进, 比 v12.5 的 6 级更平滑
         "cruise_levels": [
-            {"wind_max": 0.005},
-            {"wind_max": 0.015},
-            {"wind_max": 0.030},
-            {"wind_max": 0.060},
-            {"wind_max": 0.100},
-            {"wind_max": 0.200},
-            {"wind_max": 0.350},
+            {"wind_max": 1.0},
+            {"wind_max": 2.0},
+            {"wind_max": 3.0},
+            {"wind_max": 4.0},
+            {"wind_max": 5.5},
+            {"wind_max": 7.5},
+            {"wind_max": 10.0},
         ],
         "cruise_sr_threshold":  0.60,
         "cruise_min_eps":       350,   # v12.5 250 → v14.0 350 (每级训练更久)
@@ -889,28 +1157,35 @@ DEFAULT_CONFIG = {
 
         # [v14.2] 连续课程 ramp 参数
         "cruise_ramp_episodes":     900,   # small residual, ramp wind gently
-        "cruise_ramp_min_wind":     0.005,
+        "cruise_ramp_min_wind":     1.0,
         "cruise_ramp_sr_threshold": 0.55,  # SR 低于此值时暂停 wind 增长
         "cruise_ramp_warmup_sr_threshold": 0.40,
         "cruise_ramp_warmup_scale": 0.25,
 
         # Descent starts with tiny nonzero wind so the policy learns
         # disturbance rejection before it overfits the no-wind insertion.
+        # For the 4.7kg payload, 10m/s is already comparable to the old
+        # successful 0.35N disturbance per unit mass; keep 12-14m/s for later
+        # explicit stress runs instead of the default curriculum.
         "descent_levels": [
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.005},
+             "wind_max": 0.5},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.015},
+             "wind_max": 1.0},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.03},
+             "wind_max": 1.5},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.06},
+             "wind_max": 2.5},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.10},
+             "wind_max": 3.5},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.20},
+             "wind_max": 5.0},
             {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
-             "wind_max": 0.35},
+             "wind_max": 6.5},
+            {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+             "wind_max": 8.0},
+            {"init_xy": 0.020, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+             "wind_max": 10.0},
         ],
         "descent_sr_threshold":  0.80,
         "descent_min_eps":       400,   # v12.5 250 → v14.0 400
@@ -918,11 +1193,23 @@ DEFAULT_CONFIG = {
         "descent_stats_window":   100,  # v12.5 80 → v14.0 100
 
         # [v14.2] 连续课程 ramp 参数
-        "descent_ramp_episodes":     1000,  # tiny wind starts early, so ramp more gently
-        "descent_ramp_min_wind":     0.005,
-        "descent_ramp_sr_threshold": 0.60,
-        "descent_ramp_warmup_sr_threshold": 0.45,
-        "descent_ramp_warmup_scale": 0.25,
+        "descent_ramp_episodes":     2500,
+        "descent_ramp_min_wind":     0.5,
+        "descent_ramp_sr_threshold": 0.70,
+        "descent_ramp_warmup_sr_threshold": 0.60,
+        "descent_ramp_warmup_scale": 0.10,
+        "descent_ramp_min_window":   80,
+
+        # Optional high-wind focus sampling.  When enabled the episode wind is
+        # sampled from [wind_min, wind_max] instead of [0, wind_max].  This is
+        # intended for finetuning a policy that already solves low/mid wind and
+        # needs more samples in the difficult 6-10m/s region.
+        "descent_wind_focus_enabled": False,
+        "descent_wind_focus_start_level": 6,
+        "descent_wind_focus_full_level": 8,
+        "descent_wind_focus_start_min": 3.0,
+        "descent_wind_focus_full_min": 5.0,
+        "descent_wind_focus_final_min": 8.0,
 
         # OmniReset (descent 仍用; 早期阶段从目标附近开始, 加速学习)
         "omnireset_enabled":          True,
@@ -932,7 +1219,7 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 26. 测试默认参数 (test_phase.py 用; 噪声/风力默认全部 0)
+    # 26. 测试默认参数 (test_phase.py 用; 噪声/风速默认全部 0)
     # ==========================================================================
     "test": {
         "n_episodes":         20,
@@ -941,7 +1228,7 @@ DEFAULT_CONFIG = {
         "obstacle_seed":      21,
         "save_paths":         False,
         "save_paths_dir":     "test_results",
-        "wind_force":         0.0,
+        "wind_speed":         0.0,
         "wind_direction":     0.0,
         "obs_noise":          0.0,
         "act_noise":          0.0,

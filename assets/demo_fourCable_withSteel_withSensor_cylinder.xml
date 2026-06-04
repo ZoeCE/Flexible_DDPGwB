@@ -27,28 +27,28 @@
     <!-- prefab: payload with free joint -->
     <body name="prefab" pos="0.3 0.15 0.5">
       <joint type="free"/>
-      <geom name="socket_top" type="box" size="0.05 0.05 0.070000" pos="0 0 0.030000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b1" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b2" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b3" type="box" size="0.004000 0.028000 0.030000" pos="-0.046000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b4" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b5" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b6" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b7" type="box" size="0.007000 0.028000 0.030000" pos="-0.035000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b8" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b9" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b10" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b11" type="box" size="0.028000 0.028000 0.030000" pos="0.000000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b12" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b13" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b14" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b15" type="box" size="0.007000 0.028000 0.030000" pos="0.035000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b16" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b17" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 -0.046000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b18" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 -0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b19" type="box" size="0.004000 0.028000 0.030000" pos="0.046000 0.000000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b20" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 0.035000 -0.070000" material="concrete" mass="0.045455"/>
-      <geom name="socket_b21" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 0.046000 -0.070000" material="concrete" mass="0.045455"/>
+      <geom name="socket_top" type="box" size="0.05 0.05 0.070000" pos="0 0 0.030000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b1" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 -0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b2" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 -0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b3" type="box" size="0.004000 0.028000 0.030000" pos="-0.046000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b4" type="box" size="0.004000 0.007000 0.030000" pos="-0.046000 0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b5" type="box" size="0.004000 0.004000 0.030000" pos="-0.046000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b6" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 -0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b7" type="box" size="0.007000 0.028000 0.030000" pos="-0.035000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b8" type="box" size="0.007000 0.004000 0.030000" pos="-0.035000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b9" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 -0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b10" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 -0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b11" type="box" size="0.028000 0.028000 0.030000" pos="0.000000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b12" type="box" size="0.028000 0.007000 0.030000" pos="0.000000 0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b13" type="box" size="0.028000 0.004000 0.030000" pos="0.000000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b14" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 -0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b15" type="box" size="0.007000 0.028000 0.030000" pos="0.035000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b16" type="box" size="0.007000 0.004000 0.030000" pos="0.035000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b17" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 -0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b18" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 -0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b19" type="box" size="0.004000 0.028000 0.030000" pos="0.046000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b20" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 0.035000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="socket_b21" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
 
       <!-- four lift sites at top corners -->
       <site name="lift_fl" pos=" 0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>

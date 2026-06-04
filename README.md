@@ -1,229 +1,490 @@
-残差分层强化学习框架 — 完整使用手册
-本手册覆盖基于 PPO 的底层防摆 RL 控制器和高层残差 Planner 的训练、测试与评估。
+# Flexible_DDPGwB - Cable-Suspended Payload RL Framework
 
-目录
-1. 概述
+> 当前主线: **cruise** 负责 NMPC 抬升+平移到钢筋上方, **descent** 负责 PID+residual RL 对准、下降和物理插入。
+> 本 README 已合并原 `Architecture.md` 的架构说明和常用指令, 作为当前唯一主文档维护。
 
-2. 安装与依赖
+---
 
-3. 配置说明
+## 1. 快速开始
 
-4. 训练指令
+先进入 WSL 项目目录和 conda 环境:
 
-4.1 底层防摆控制器 (Swing Controller)
+```bash
+cd /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB
+conda activate vsdrl_env_5060
+```
 
-4.2 高层残差 Planner (Layered PPO)
+最常用的 pipeline 测试:
 
-4.3 端到端 PPO 训练（无分层）
+```bash
+# cruise 用 expert/NMPC, descent 用 PPO residual RL
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space
+```
 
-5. 测试指令
+加入可调恒定风力:
 
-5.1 测试底层控制器 (swing-only)
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
 
-5.2 测试分层策略 (layered)
+`--wind-speed` 单位是 m/s; `--wind-dir` 是弧度。`0.0` 约为 +x 方向, `1.5708` 约为 +y 方向。不写 `--wind-dir` 时使用随机方向。
 
-5.3 测试 NMPC 专家基准
+---
 
-5.4 测试端到端 PPO / TD3
+## 2. 当前架构
 
-5.5 手动控制
+### 2.1 Cruise: NMPC 抬升 + 平移
 
-6. 风力扰动专项测试
+Cruise 现在合并了原来的 lift 和水平 cruise:
 
-7. 完整训练流程建议
+```text
+payload 起点: (start_xy, z ~= 0.11)
+    |
+    | NMPC 垂直抬升
+    v
+(start_xy, z_cruise ~= 0.25)
+    |
+    | NMPC 水平平移
+    v
+(target_xy, z_cruise)  # 钢筋正上方
+```
 
-8. 常见问题
+核心控制路径:
 
-1. 概述
-本项目实现残差分层强化学习，用于索驱动机器人高精度钢筋插入任务：
+```python
+expert.compute_delta_q_target(obs, current_q, residual_acc=res3)
+```
 
-底层防摆 RL 控制器 (swing_controller.py)：接收局部观测（无全局地图），输出 Δq_base，负责路径跟踪与 payload 防摆。
+当 `cruise-algo expert` 时, `residual_acc=None`, 即纯 NMPC/expert。
+当 `cruise-algo ppo/sac` 时, residual RL 输出小幅 3D 加速度残差, 叠加在 NMPC 输出之前。
 
-高层残差 Planner (PPOlearn.py + agent.py)：接收全局观测（54D）并叠加底层输出，输出残差 Δq_res，合成最终动作 Δq = Δq_base + α·Δq_res，负责避障与精细插入。
+当前 NMPC 的关键优化:
 
-环境 (mujoco_env_new.py)：带缓慢连续变化的风力扰动，支持课程学习。
+- 代价函数中加入 `U_prev` 和 jerk 惩罚, 抑制控制量第一拍突变和来回翻转。
+- 平滑前瞻参考点 `ref_smoothing_alpha`, 避免 waypoint 切换导致参考点跳变。
+- action smoothing + rate limit, 限制 NMPC 输出小范围高速抖动。
+- 终点附近 settle deadband, 在 payload 足够接近、速度和摆动都较小时压掉微小控制量。
+- pipeline 中的 cruise expert 已与单独 `--phase cruise --algo expert` 对齐, 不再使用 pipeline-only controller/ee_control 覆盖。
 
-测试脚本 (test.py)：支持多种模式，自动输出防摆指标并与 NMPC 专家对比。
+### 2.2 Descent: PID base + residual RL 插入
 
-2. 安装与依赖
-# 核心依赖
-pip install torch numpy scipy mujoco
-# 控制器依赖（可选，用于 NMPC 专家）
-pip install casadi
-# 日志与可视化（可选）
-pip install tensorboard wandb
-首次运行前会自动生成绳索模型（assets/generate_four_cables_with_plate.py），确保 assets/ 目录完整。
+Descent 从钢筋上方开始:
 
-3. 配置说明
-所有超参数集中在 config.py，关键新增配置节：
+```text
+payload 起点: (target_xy + small noise, z_cruise)
+    |
+    | PID base 控制下降和对准
+    | PPO/SAC residual RL 修正 xy/z
+    v
+物理插入钢筋
+```
 
-wind ：风力扰动参数（F_max, theta_rate_std, force_rate_std, curriculum_start/end）
+成功判定已从“只到达钢筋位置”改为更接近真实任务:
 
-swing_controller ：底层控制器的网络结构、PPO 参数
+- xy、z、tilt、yaw 等指标在容差内;
+- 并且检测到训练 reward 使用的物理插入/地面接触成功条件;
+- 若 payload 卡在钢筋上且不再产生有效插入进展, 会提前判负。
 
-swing_controller_reward ：底层专属奖励系数
+这保证渲染里能看到吊装物真正插入钢筋, 而不是停在钢筋上方。
 
-residual ：残差缩放系数 alpha 及 BC 零目标模式
+### 2.3 Pipeline
 
-修改配置时可直接编辑 config.py 或通过命令行覆盖部分参数（如 --wind-fmax）。
+Pipeline 当前是两阶段:
 
-4. 训练指令
-4.1 底层防摆控制器 (Swing Controller)
-# 完整训练（推荐）—— 包含 BC 暖启动 + PPO，风力逐步增强
-python train_swing_controller.py --log-dir saves/swing_ctrl --timesteps 1000000
+```text
+cruise:  NMPC/expert 或 NMPC + residual RL
+handoff: 到达钢筋上方后切换
+descent: PID + residual RL 或纯 expert
+```
 
-# 跳过 BC 暖启动（直接 PPO）
-python train_swing_controller.py --no-bc --log-dir saves/swing_ctrl
+Pipeline 会禁用 3D 轨迹里的主动下降段:
 
-# 自定义最大风力
-python train_swing_controller.py --wind-fmax 2.5 --log-dir saves/swing_ctrl_highwind
+```python
+config["planning"]["disable_descent_segment"] = True
+```
 
-# 指定 GPU
-python train_swing_controller.py --gpu 1 --log-dir saves/swing_ctrl
-输出文件 (均保存在 --log-dir 下)：
+也就是说, cruise 的目标就是“稳定到达钢筋上方”, 下降和插入由 descent 阶段接管。
 
-ckpt_bc.pt : BC 后保存，可作暖启动结果
+---
 
-ckpt_best.pt : 基于 tilt RMS 最小的最优模型
+## 3. Reward 与 RL 设计
 
-ckpt_final.pt : 训练结束时最终模型
+### 3.1 Cruise residual RL
 
-swing_train_log.csv : 包含 tilt_rms, swing_vel, policy_loss 等
+Cruise residual RL 的目标不是替代 NMPC, 而是在 NMPC 出现风扰、小幅抖动、控制环效应时做小幅补偿。
 
-4.2 高层残差 Planner (Layered PPO)
-前提：已训练并保存底层控制器 (ckpt_best.pt)。
+观测中包含:
 
-# 标准分层残差训练（底层冻结，只训练高层）
-python PPOlearn.py --algo ppo \
-  --log-dir saves/ppo_layered \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --timesteps 5000000
+- 常规 EE / payload 状态;
+- NMPC 当前 base action;
+- 240 维绳索观测, 经过 cable encoder;
+- 风力观测。
 
-# 如果想继续训练已有 Planner
-python PPOlearn.py --algo ppo \
-  --log-dir saves/ppo_layered \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --bc-ckpt saves/ppo_layered/ckpt_bc_pretrained.pt
-说明：--swing-ckpt 一旦指定，训练自动进入分层模式；否则仍为原来的端到端 PPO。
+Reward 重点:
 
-输出：
+- `swing_energy_penalty`: 抑制 payload 摆动动能。
+- `cable_ke_penalty`: 抑制绳索高频振动。
+- `swing_improve`: 奖励每一步相对上一时刻的消摆改进。
+- `action_rms_free`: 给小 residual 一个免费区间, 让 RL 有空间介入。
+- `loop_counter_reward`: 当 NMPC base action 翻转/抖动时, 奖励 residual 反向抵消。
+- `rel_vel_damping_reward`: 奖励 residual 阻尼 payload 和 EE 的相对速度。
+- `loop_jitter_penalty`: 显式惩罚 NMPC base action 的抖动。
 
-ckpt_best.pt 等，保存的是 高层 Planner 的权重（与底层的 SwingControllerAgent 分离）。
+碰撞障碍物只给很小惩罚, 不再把 collision reward 与高度强绑定。原因是 cruise collision 多数是 base NMPC 轨迹/控制表现导致, 不希望 RL 学成“为了避免碰撞强行改变高度或破坏稳定性”。
 
-CSV 日志同原有格式。
-
-4.3 端到端 PPO 训练（无分层）
-# 不加载底层控制器，训练原始 54D 输入 PPO
-python PPOlearn.py --algo ppo --log-dir saves/ppo_e2e
-其他参数可参考原有训练流程（课程学习、BC 预训练等均不变）。
-
-5. 测试指令
-所有测试使用 test.py，通过 --mode 指定评估模式。
-
-5.1 测试底层控制器 (swing-only)
-# 基础评估（20 回合，默认风力）
-python test.py --mode swing-only \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --episodes 20
+### 3.2 Descent residual RL
 
-# 渲染并加大风力
-python test.py --mode swing-only \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --episodes 10 --render --wind-fmax 2.0
-
-# 改变风向游走速率
-python test.py --mode swing-only \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --wind-theta-std 0.4
-自动对比 NMPC：测试结束后，脚本会自动运行相同场景的 NMPC 专家，并打印 tilt RMS 对比表（RL / NMPC 比值），无需额外操作。
-
-输出指标：
-
-成功率、碰撞率、平均步数
-
-Tilt RMS、Max Tilt、Swing Velocity、Swing Offset、Path Error RMS
-
-5.2 测试分层策略 (layered)
-# 需要同时提供高层 Planner 和底层 Controller checkpoint
-python test.py --mode layered \
-  --ckpt saves/ppo_layered/ckpt_best.pt \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --episodes 20
-
-# 渲染模式
-python test.py --mode layered \
-  --ckpt saves/ppo_layered/ckpt_best.pt \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --render --episodes 5
-参数：--alpha 可覆盖残差缩放系数（代码中暂未加入，如需可修改 test.py 添加）。
-
-5.3 测试 NMPC 专家基准
-# 默认风力 (F_max=1.0)
-python test.py --mode nmpc --episodes 20
-
-# 强风下的 NMPC
-python test.py --mode nmpc --episodes 10 --wind-fmax 2.5
-
-# 剧烈风向变化
-python test.py --mode nmpc --episodes 10 --wind-theta-std 0.3
-
-# 带渲染
-python test.py --mode nmpc --episodes 5 --render
-输出：每回合奖励、步数、成功/碰撞，最终汇总成功率、碰撞率、平均步数。
-
-5.4 测试端到端 PPO / TD3
-# 测试端到端 PPO
-python test.py --mode ppo --ckpt saves/ppo_e2e/ckpt_best.pt --episodes 20
-
-# 测试 TD3
-python test.py --mode td3 --ckpt saves/td3_run/ckpt_best.pt
-5.5 手动控制
-bash
-python test.py --mode manual --render
-键盘方向键控制 EE 移动，空格暂停，关闭窗口退出。
-
-6. 风力扰动专项测试
-# 1. 微风 (F_max=0.5)
-python test.py --mode nmpc --episodes 10 --wind-fmax 0.5
-
-# 2. 强风 (F_max=2.5)
-python test.py --mode nmpc --episodes 10 --wind-fmax 2.5
-
-# 3. 风向剧烈变化
-python test.py --mode nmpc --episodes 10 --wind-theta-std 0.4
-
-# 4. 组合
-python test.py --mode nmpc --episodes 10 --wind-fmax 2.0 --wind-theta-std 0.25
-底层控制器对比：将上述命令中的 --mode nmpc 替换为 --mode swing-only --swing-ckpt saves/swing_ctrl/ckpt_best.pt，即可比较 RL 与 NMPC 的抗风性能。
-
-7. 完整训练流程建议
-# Step 1: 训练底层防摆控制器
-python train_swing_controller.py --log-dir saves/swing_ctrl --timesteps 1000000
-
-# Step 2: 评估底层防摆性能（可对比 NMPC）
-python test.py --mode swing-only --swing-ckpt saves/swing_ctrl/ckpt_best.pt --episodes 30
-
-# Step 3: 训练高层残差 Planner
-python PPOlearn.py --algo ppo --log-dir saves/ppo_layered \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt --timesteps 5000000
-
-# Step 4: 测试完整分层策略
-python test.py --mode layered \
-  --ckpt saves/ppo_layered/ckpt_best.pt \
-  --swing-ckpt saves/swing_ctrl/ckpt_best.pt \
-  --episodes 30 --render
-8. 常见问题
-Q: 训练时 GPU 内存不足？
-A: 可减小 n_steps (如 1024) 或 batch_size (256 → 128)，或减小 hidden_dim。
-
-Q: 底层控制器训练不稳定，reward 不升？
-A: 尝试降低 lr_actor (如 2e-4)，增加 BC 预训练轮数，或检查风力课程是否过早开启。
-
-Q: 分层 Planner 残差输出很小，几乎无修正？
-A: 确认 bc_target_zero=True 且 BC 权重 (bc_coef_init_residual) 不要过大（建议 0.3），同时 residual_scale 初始值 0.1 是合理的。适当增加 entropy_coef 也可促进探索。
-
-Q: 测试时找不到 checkpoint？
-A: 将 checkpoint 路径写全，或放入默认的 saves/ 目录下；test.py 会自动查找 ckpt_latest.pt / ckpt_best.pt，也可通过 --ckpt 和 --swing-ckpt 明确指定。
-
-Q: 想用 NMPC 模式评估防摆指标？
-A: 目前 NMPC 模式仅输出总奖励、成功率等，如需详细 tilt RMS，可修改 test.py 中对应部分，或使用 swing-only 模式并加载一个未训练的底层控制器（随机动作）作为对比，但不建议。更好的方式是在 test.py 的 NMPC 分支中添加指标记录。
+Descent 的设计保持当前成功版本:
+
+- PID 提供稳定下降和粗对准;
+- residual RL 保持足够控制权威, 不随 PID 收敛而消失;
+- reward 主要关注插入误差、xy 精度、z 进度、姿态稳定、物理插入;
+- 当前 descent 测试表现很好, 后续默认不要轻易改 reward 和成功判定。
+
+### 3.3 课程学习
+
+Cruise 使用连续风力课程, 从极小风力开始逐步增加, 让 residual RL 先学“在近似无扰下不破坏 NMPC”, 再学“有风时消摆和阻尼”。
+
+Descent 使用精度固定的课程, 重点保持最终 5mm 对准能力, 风力逐步增强。
+
+---
+
+## 4. 日志与 W&B 指标
+
+为了能看出 RL 是否真的改善移动过程稳定性, 训练日志窗口已加大:
+
+- `train.log_smooth_win = 200`
+- `train.log_trend_windows = [50, 200, 500]`
+- `train.log_baseline_episodes = 50`
+
+重点关注这些指标:
+
+```text
+stab/{phase}/avg_ke_mJ
+stab/{phase}/max_ke_mJ
+stab/{phase}/p95_ke_mJ
+stab/{phase}/integral_ke_mJs
+stab/{phase}/avg_angle_deg
+stab/{phase}/max_angle_deg
+stab/{phase}/p95_angle_deg
+stab/{phase}/cable_ke_peak
+stab/{phase}/cable_ke_avg
+stab/{phase}/pl_vel_peak
+stab/{phase}/avg_acc
+stab/{phase}/max_acc
+stab/{phase}/rl_action_mag_mean
+stab/{phase}/rl_action_mag_peak
+```
+
+Cruise reward 还会记录:
+
+```text
+cruise/rew/action_rms_norm
+cruise/rew/loop_counter_reward
+cruise/rew/rel_vel_damping_reward
+cruise/rew/loop_jitter_penalty
+cruise/rew/swing_energy_penalty
+cruise/rew/cable_ke_penalty
+```
+
+判断 cruise residual RL 是否有效时, 不只看平均 reward, 更要看 `max/p95 swing angle`, `integral_ke_mJs`, `cable_ke_peak`, `pl_vel_peak` 是否随训练下降。
+
+---
+
+## 5. 常用命令
+
+### 5.1 RL 训练
+
+Cruise PPO:
+
+```bash
+python train_phase.py --phase cruise \
+  --algo ppo \
+  --n-envs 8 \
+  --timesteps 2500000 \
+  --log-dir saves/cruise_ppo_next
+```
+
+Descent PPO:
+
+```bash
+python train_phase.py --phase descent \
+  --algo ppo \
+  --n-envs 8 \
+  --timesteps 3000000 \
+  --log-dir saves/descent_ppo_next
+```
+
+注意: 当前成功的 descent checkpoint 在 `saves/descent_ppo/`, 不要无意中覆盖。新训练建议写入 `saves/descent_ppo_next` 或其他新目录。
+
+### 5.2 单阶段测试
+
+Cruise 纯 expert/NMPC:
+
+```bash
+python test_phase.py --phase cruise \
+  --algo expert \
+  --episodes 30 --render --wait-for-space
+```
+
+Cruise residual RL:
+
+```bash
+python test_phase.py --phase cruise \
+  --algo ppo \
+  --ckpt saves/cruise_ppo/ckpt_latest.pt \
+  --episodes 30 --render --wait-for-space
+```
+
+Descent residual RL:
+
+```bash
+python test_phase.py --phase descent \
+  --algo ppo \
+  --ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 30 --render --wait-for-space
+```
+
+Descent 纯 expert/PID:
+
+```bash
+python test_phase.py --phase descent \
+  --algo expert \
+  --episodes 30 --render --wait-for-space
+```
+
+### 5.3 阶段风力测试
+
+Cruise expert 加风:
+
+```bash
+python test_phase.py --phase cruise \
+  --algo expert \
+  --episodes 30 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+Cruise RL 加风:
+
+```bash
+python test_phase.py --phase cruise \
+  --algo ppo \
+  --ckpt saves/cruise_ppo/ckpt_latest.pt \
+  --episodes 30 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+Descent RL 加风:
+
+```bash
+python test_phase.py --phase descent \
+  --algo ppo \
+  --ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 30 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+风力扫描:
+
+```bash
+for wind in 0 2 4 6 8 10; do
+  python test_phase.py --phase descent \
+    --algo ppo \
+    --ckpt saves/descent_ppo/ckpt_latest.pt \
+    --episodes 30 \
+    --wind-speed $wind
+done
+```
+
+### 5.4 Pipeline 测试
+
+Cruise expert + descent RL:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space
+```
+
+Cruise expert + descent RL + 风力:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+全程 RL, 即 cruise residual RL + descent residual RL:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo ppo \
+  --cruise-ckpt saves/cruise_ppo/ckpt_latest.pt \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space
+```
+
+全程 RL + 风力:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo ppo \
+  --cruise-ckpt saves/cruise_ppo/ckpt_latest.pt \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+纯 expert 全流程 + 风力:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo expert \
+  --episodes 10 --render --wait-for-space \
+  --wind-speed 10 --wind-dir 0.0
+```
+
+Pipeline 风力扫描, cruise expert + descent RL:
+
+```bash
+for wind in 0 2 4 6 8 10; do
+  python test_phase.py --phase pipeline \
+    --cruise-algo expert \
+    --descent-algo ppo \
+    --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+    --episodes 10 \
+    --wind-speed $wind
+done
+```
+
+Pipeline 风力扫描, 全程 RL:
+
+```bash
+for wind in 0 2 4 6 8 10; do
+  python test_phase.py --phase pipeline \
+    --cruise-algo ppo \
+    --cruise-ckpt saves/cruise_ppo/ckpt_latest.pt \
+    --descent-algo ppo \
+    --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+    --episodes 10 \
+    --wind-speed $wind
+done
+```
+
+### 5.5 可视化暂停
+
+只有在命令中显式加入下面参数时才会暂停:
+
+```bash
+--wait-for-space
+```
+
+必须同时开 `--render`。每个 episode 初始化和第一帧同步后, 点击 MuJoCo 渲染窗口并按 `Space` 才开始执行。默认不等待, 保持原来的自动运行行为。
+
+### 5.6 插入目标和 cruise 高度调节
+
+Pipeline 默认使用:
+
+```text
+--pipeline-cruise-z 0.25
+--pipeline-insert-target-z 0.10
+--pipeline-insert-depth-min 0.025
+```
+
+测试阶段不再追加独立收尾控制段; 若要观察更深插入, 应调低训练/测试共用的目标 z, 例如:
+
+```bash
+python test_phase.py --phase pipeline \
+  --cruise-algo expert \
+  --descent-algo ppo \
+  --descent-ckpt saves/descent_ppo/ckpt_latest.pt \
+  --episodes 10 --render --wait-for-space \
+  --pipeline-insert-target-z 0.09
+```
+
+---
+
+## 6. 主要文件
+
+```text
+config.py             # 全局配置: controller/reward/curriculum/train/test
+controller.py         # JointSpaceExpert, NMPCTrajectoryTracker, NMPCController4D
+ee_acc_controller.py  # EE acceleration controller, cruise z/yaw PID, swing damping
+mujoco_env_new.py     # MuJoCo 环境、路径生成、风力、接触、物理 step
+phase_agent.py        # PPO/SAC agent, cable encoder, phase obs 构建
+phase_reward.py       # cruise/descent reward 和 success 判定
+train_phase.py        # 训练入口、reset_for_phase、课程、W&B logging
+test_phase.py         # 单阶段测试、pipeline 测试、渲染暂停、风力测试
+vec_env.py            # 并行环境, 与单环境训练路径保持一致
+stability_metrics.py  # 稳定性指标统计
+```
+
+---
+
+## 7. 最近关键修改记录
+
+| 模块 | 修改 |
+|------|------|
+| `controller.py` | NMPC 加入 U_prev jerk 惩罚、参考点低通、action rate limit、终点 settle deadband。 |
+| `test_phase.py` | pipeline cruise expert 与单独 cruise expert 对齐, 删除 pipeline-only controller 覆盖。 |
+| `test_phase.py` | 新增 `--wait-for-space`, 渲染初始化后按空格开始。 |
+| `phase_reward.py` | cruise reward 新增 base action 相关项: loop counter, relative velocity damping, loop jitter。 |
+| `phase_reward.py` | descent 成功判定保留物理插入/地面接触逻辑。 |
+| `phase_agent.py` | cruise 观测包含 NMPC action、绳索、风力; 支持 residual RL。 |
+| `train_phase.py` | W&B 平均窗口和趋势窗口增大, 更容易观察稳定性指标改善。 |
+| `vec_env.py` | 并行训练路径同步 cruise NMPC residual 和 reward 所需 base action。 |
+
+---
+
+## 8. 使用建议
+
+1. 改 cruise NMPC 前, 先跑:
+
+```bash
+python test_phase.py --phase cruise --algo expert --episodes 30 --render
+```
+
+如果单段 cruise expert 表现好, pipeline 表现差, 优先检查 pipeline 是否又引入了额外 controller 覆盖或 handoff 条件过严。
+
+2. 改 descent reward 前, 先保护当前成功 ckpt:
+
+```bash
+cp -r saves/descent_ppo saves/descent_ppo_backup
+```
+
+Descent 当前表现很好, 默认只做测试和小范围可视化参数调整。
+
+3. 观察 RL 是否有帮助时, 不只看 SR。Cruise 尤其要看:
+
+```text
+p95/max swing angle
+integral_ke_mJs
+cable_ke_peak
+pl_vel_peak
+loop_counter_reward
+rel_vel_damping_reward
+```
+
+4. 如果 VS Code/WSL 出问题, 最稳的打开方式是:
+
+```bash
+cd /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB
+code .
+```

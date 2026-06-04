@@ -164,6 +164,7 @@ class CableRobotEnvWithObstacles:
         self.wind_rng   = np.random.default_rng(wind_seed)
         self.wind_theta = 0.0          # 风向角 (rad)
         self.wind_F     = 0.0          # 风力大小 (N)
+        self.wind_speed = 0.0          # user-facing wind speed (m/s)
         self._wind_curriculum_frac = 1.0  # 训练时的风力倍率（0→1）
         self._force_noise_sigma    = 0.0  # [v8] 环境噪声力 σ (N)
 
@@ -341,20 +342,31 @@ class CableRobotEnvWithObstacles:
 
     # ── [WIND] 风力扰动方法 ──────────────────────────────────────────────────
 
+    def _wind_speed_to_force(self, speed_mps: float) -> float:
+        """Convert wind speed (m/s) to horizontal force (N)."""
+        v = max(0.0, float(speed_mps))
+        rho = float(self.cfg_wind.get("air_density", 1.225))
+        cd = float(self.cfg_wind.get("drag_coefficient", 1.30))
+        area = float(self.cfg_wind.get("projected_area", 0.020))
+        force = 0.5 * rho * cd * area * v * v
+        return float(min(force, float(self.cfg_wind.get("F_max", force))))
+
     def _update_wind(self):
         """缓慢随机游走更新风向和风力大小（每个物理子步调用）。"""
+        if getattr(self, '_test_wind_mode', False):
+            return
         if not self.cfg_wind.get("enabled", False):
             return
         dt = self.physics_dt
         theta_std = self.cfg_wind.get("theta_rate_std", 0.15)
-        force_std = self.cfg_wind.get("force_rate_std", 0.1)
-        F_max     = self.cfg_wind.get("F_max", 1.0)
-
         self.wind_theta += dt * self.wind_rng.normal(0, theta_std)
-        self.wind_F     += dt * self.wind_rng.normal(0, force_std)
-        self.wind_F      = float(np.clip(self.wind_F, 0, F_max))
+        speed_std = self.cfg_wind.get("speed_rate_std", 0.50)
+        speed_max = self.cfg_wind.get("speed_max", 16.5)
+        self.wind_speed += dt * self.wind_rng.normal(0, speed_std)
+        self.wind_speed = float(np.clip(self.wind_speed, 0, speed_max))
+        self.wind_F = self._wind_speed_to_force(self.wind_speed)
 
-    def _apply_wind_force(self):
+    def _apply_wind_load(self):
         """将风力作为外力施加到 payload body 上（每个物理子步调用）。"""
         if not self.cfg_wind.get("enabled", False):
             return
@@ -369,35 +381,25 @@ class CableRobotEnvWithObstacles:
         self._wind_curriculum_frac = float(np.clip(frac, 0.0, 1.0))
         if self._wind_curriculum_frac <= 0.0:
             self.wind_F = 0.0
+            self.wind_speed = 0.0
             if hasattr(self, 'data') and hasattr(self, 'prefab_body_id'):
                 self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
 
-    def set_wind_force(self, force_n: float, direction_rad: float = 0.0):
-        """
-        测试专用：直接施加恒定风力，**绕过 cfg_wind["enabled"] 检查**。
-
-        训练时风力走随机游走（_update_wind），且需要 enabled=True 才生效。
-        测试时我们希望施加确定性的固定风力来做系统性对比，不依赖 config。
-
-        原理：
-          - 直接写 data.xfrc_applied[prefab_body_id]
-          - 设置 _test_wind_mode=True，step() 中保持该值不被随机游走覆盖
-
-        参数:
-            force_n:       风力大小 (N)
-            direction_rad: 风向角 (rad)，0=+x 方向，π/2=+y 方向
-        """
-        if abs(float(force_n)) <= 1e-12:
-            self.clear_wind_force()
+    def set_wind_speed(self, speed_mps: float, direction_rad: float = 0.0):
+        """Apply a fixed wind speed (m/s), converting it to payload force."""
+        if abs(float(speed_mps)) <= 1e-12:
+            self.clear_wind()
             return
 
-        self.wind_F     = float(force_n)
+        self.wind_speed = float(speed_mps)
+        self.wind_F     = self._wind_speed_to_force(self.wind_speed)
         self.wind_theta = float(direction_rad)
-        self._test_wind_force = float(force_n)
+        self._test_wind_speed = float(speed_mps)
         self._test_wind_dir = float(direction_rad)
+        self._test_wind_initial_speed = float(speed_mps)
+        self._test_wind_initial_dir = float(direction_rad)
         self._wind_curriculum_frac = 1.0
         self._test_wind_mode = True
-        # 立即写入（reset 后 data 已存在）
         self._apply_test_wind()
 
     def _apply_test_wind(self):
@@ -406,32 +408,65 @@ class CableRobotEnvWithObstacles:
             return
         if not (hasattr(self, 'data') and hasattr(self, 'prefab_body_id')):
             return
-        force = float(getattr(self, '_test_wind_force', self.wind_F))
+        speed = float(getattr(self, '_test_wind_speed', self.wind_speed))
         theta = float(getattr(self, '_test_wind_dir', self.wind_theta))
+        if bool(self.cfg_wind.get("test_wind_variable", False)):
+            dt = float(getattr(self, "physics_dt", 0.002))
+            init_speed = float(getattr(
+                self, '_test_wind_initial_speed', speed))
+            speed_band = max(
+                float(self.cfg_wind.get("test_speed_band_abs", 0.50)),
+                abs(init_speed) * float(self.cfg_wind.get(
+                    "test_speed_band_frac", 0.15)))
+            speed_pull = float(self.cfg_wind.get(
+                "test_speed_mean_reversion", 0.80))
+            speed_std = float(self.cfg_wind.get("test_speed_rate_std", 0.25))
+            speed += speed_pull * (init_speed - speed) * dt
+            speed += speed_std * np.sqrt(max(dt, 1e-9)) * self.wind_rng.normal()
+            speed_max = float(self.cfg_wind.get("speed_max", 16.5))
+            speed = float(np.clip(
+                speed,
+                max(0.0, init_speed - speed_band),
+                min(speed_max, init_speed + speed_band)))
+
+            init_theta = float(getattr(
+                self, '_test_wind_initial_dir', theta))
+            dir_pull = float(self.cfg_wind.get(
+                "test_dir_mean_reversion", 0.50))
+            dir_std = float(self.cfg_wind.get("test_dir_rate_std", 0.08))
+            dir_band = float(self.cfg_wind.get("test_dir_band_rad", 0.35))
+            wrap = lambda a: (a + np.pi) % (2.0 * np.pi) - np.pi
+            theta += dir_pull * wrap(init_theta - theta) * dt
+            theta += dir_std * np.sqrt(max(dt, 1e-9)) * self.wind_rng.normal()
+            theta = init_theta + float(np.clip(
+                wrap(theta - init_theta), -dir_band, dir_band))
+            self._test_wind_speed = speed
+            self._test_wind_dir = theta
+        force = self._wind_speed_to_force(speed)
+        self.wind_speed = speed
+        self.wind_F = force
+        self.wind_theta = theta
         fx = force * np.cos(theta)
         fy = force * np.sin(theta)
         self.data.xfrc_applied[self.prefab_body_id, :3] = [fx, fy, 0.0]
 
-    def clear_wind_force(self):
+    def clear_wind(self):
         """Disable externally forced wind and clear any residual xfrc."""
         self._test_wind_mode = False
-        self._test_wind_force = 0.0
+        self._test_wind_speed = 0.0
         self._test_wind_dir = 0.0
         self._wind_curriculum_frac = 0.0
         self.wind_F = 0.0
+        self.wind_speed = 0.0
         self.wind_theta = 0.0
         if hasattr(self, 'data') and hasattr(self, 'prefab_body_id'):
             self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
-
-
-
-    def get_wind_state(self):
-        """返回当前风力状态 (wind_F, wind_theta)，供观测构建使用。"""
+    def get_wind_speed_state(self):
+        """返回当前风速状态 (m/s, direction)，供观测构建和日志使用。"""
         if getattr(self, '_test_wind_mode', False):
-            return (float(getattr(self, '_test_wind_force', self.wind_F)),
-                    float(getattr(self, '_test_wind_dir', self.wind_theta)))
-        effective_F = self.wind_F * self._wind_curriculum_frac
-        return float(effective_F), float(self.wind_theta)
+            return float(self.wind_speed), float(self.wind_theta)
+        effective_speed = self.wind_speed * self._wind_curriculum_frac
+        return float(effective_speed), float(self.wind_theta)
 
     # ── [v8] 环境噪声力 (force_noise) ────────────────────────────────────────
     def set_force_noise(self, sigma_n: float):
@@ -784,7 +819,7 @@ class CableRobotEnvWithObstacles:
         self._termination_reason = None
 
         # [TEST-WIND] reset 时清除测试风力（不影响训练）
-        # 若测试需要保留风力，应在 reset 后重新调用 set_wind_force
+        # 若测试需要保留风速扰动，应在 reset 后重新调用 set_wind_speed
         if not getattr(self, '_test_wind_mode', False):
             self.data.xfrc_applied[self.prefab_body_id, :3] = [0.0, 0.0, 0.0]
 
@@ -821,8 +856,9 @@ class CableRobotEnvWithObstacles:
 
         # ── [WIND] 风力状态重置 ──────────────────────────────────────────────
         self.wind_theta = float(self.wind_rng.uniform(0, 2 * np.pi))
-        F_max = self.cfg_wind.get("F_max", 1.0)
-        self.wind_F = 0.2 * F_max
+        speed_max = self.cfg_wind.get("speed_max", 16.5)
+        self.wind_speed = 0.2 * speed_max
+        self.wind_F = self._wind_speed_to_force(self.wind_speed)
 
         if self.render_mode:
             if self.viewer is not None:
@@ -873,7 +909,7 @@ class CableRobotEnvWithObstacles:
 
         for _ in range(self.sim_steps):
             self._update_wind()
-            self._apply_wind_force()
+            self._apply_wind_load()
             self._apply_test_wind()   # 测试风力：覆盖随机游走，施加恒定风
             self._apply_force_noise() # [v8] 环境噪声力
             mujoco.mj_step(self.model, self.data)
@@ -1000,7 +1036,39 @@ class CableRobotEnvWithObstacles:
 
         return hit_obstacle, hit_rebar
 
-    def _check_prefab_floor_contact(self):
+    def _prefab_floor_clearance(self):
+        """Return the lowest prefab geometry clearance above the z=0 floor."""
+        if not hasattr(self, '_prefab_geom_ids'):
+            self._reresolve_ids()
+
+        min_bottom_z = np.inf
+        for gid in self._prefab_geom_ids:
+            gtype = int(self.model.geom_type[gid])
+            size = self.model.geom_size[gid]
+            xpos = self.data.geom_xpos[gid]
+            xmat = self.data.geom_xmat[gid].reshape(3, 3)
+
+            if gtype == int(mujoco.mjtGeom.mjGEOM_BOX):
+                support_z = float(np.dot(np.abs(xmat[2, :]), size[:3]))
+            elif gtype == int(mujoco.mjtGeom.mjGEOM_SPHERE):
+                support_z = float(size[0])
+            elif gtype in (
+                    int(mujoco.mjtGeom.mjGEOM_CYLINDER),
+                    int(mujoco.mjtGeom.mjGEOM_CAPSULE)):
+                radius = float(size[0])
+                half_len = float(size[1])
+                support_z = (abs(float(xmat[2, 2])) * half_len +
+                             radius * float(np.linalg.norm(xmat[2, :2])))
+            else:
+                support_z = float(np.max(size))
+
+            min_bottom_z = min(min_bottom_z, float(xpos[2]) - support_z)
+
+        if not np.isfinite(min_bottom_z):
+            return np.inf
+        return float(min_bottom_z)
+
+    def _check_prefab_floor_contact(self, allow_z_fallback=None):
         """
         [INS-NEW] 检查 payload 底部是否真实触碰到地面。
         成功判定的一部分：用户要求"平稳接触地面则任务成功"。
@@ -1019,6 +1087,17 @@ class CableRobotEnvWithObstacles:
             other = g2 if g1 in self._prefab_geom_ids else g1
             if other in self._floor_geom_ids:
                 return True
+
+        cfg_ins = self.config.get("insertion", {})
+        if allow_z_fallback is None:
+            allow_z_fallback = bool(
+                cfg_ins.get("floor_contact_allow_z_fallback", True))
+        if bool(allow_z_fallback):
+            tol = float(cfg_ins.get("floor_contact_z_tolerance", 0.004))
+            try:
+                return self._prefab_floor_clearance() <= tol
+            except Exception:
+                return False
         return False
 
     # ── _compute_reward V3 ──────────────────────────────────────────────────
