@@ -1,0 +1,31 @@
+[profile] descent_10hz_vision_pred_small_endpoint_fast_zgate_ft: Fine-tune the 10Hz RGB-D vision+predictor policy with small endpoint randomization and conservative z descent gates to reduce rebar-top sticking.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_cable_latpred_asymcritic_recover_l0_startwind0_resume_20260617_090630
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+  [v11 Path 3] 启用 vectorized PPO with n_envs=8
+
+============================================================
+  PPO [VEC n_envs=8] | DESCENT | 500000 steps | saves/descent_ppo_10hz_vision_cable_latpred_asymcritic_recover_l0_startwind0_resume_20260617_090630
+============================================================
+
+  Resumed: saves/descent_ppo_10hz_vision_cable_latpred_asymcritic_recover_l0_startwind0_20260616_143530/ckpt_latest.pt
+  [Adam reset] @ step 231154 (reset_optimizer_on_resume)
+  [AsymCritic] critic cable encoder loaded from saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best.pt
+  [CableLatPred-VEC] enabled: visible history -> cable latent; actor cable slot uses predicted latent
+  [AsymCritic-VEC] actor_obs_dim=76, critic_obs_dim=76, critic_base_obs_dim=76
+[VecEnv] SubprocVecEnv 启动 8 个 worker (method=spawn)
+  [Curriculum-descent] start at L0/8, wind=0.00/10.0m/s
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run s7em091r
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_cable_latpred_asymcritic_recover_l0_startwind0_resume_20260617_090630/wandb/run-20260617_090710-s7em091r
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo_vec
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/s7em091r
+  Resumed checkpoint progress: ts=231154 (new log dir, no CSV to append)
+  [Resume target] descent-ppo-vec: target_total_steps=500000, remaining_steps=268846
+  [CableLatPred-VEC] visible_dim=44, latent_dim=32, predictors=8
+  [CableLatPred-VEC] resumed from saves/descent_ppo_10hz_vision_cable_latpred_asymcritic_recover_l0_startwind0_20260616_143530/ckpt_latest_cable_latent_predictor.pt

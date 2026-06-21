@@ -1,0 +1,597 @@
+[profile] descent_10hz_vision_pred_small_endpoint_fast_zgate_ft: Fine-tune the 10Hz RGB-D vision+predictor policy with small endpoint randomization and conservative z descent gates to reduce rebar-top sticking.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_cable_latpred_l0_20260615_151647
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+  [v11 Path 3] 启用 vectorized PPO with n_envs=8
+
+============================================================
+  PPO [VEC n_envs=8] | DESCENT | 600000 steps | saves/descent_ppo_10hz_vision_cable_latpred_l0_20260615_151647
+============================================================
+
+  Resumed: saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best.pt
+  [Adam reset] @ step 14887338 (reset_optimizer_on_resume)
+  [CableLatPred-VEC] enabled: visible history -> cable latent; actor cable slot uses predicted latent
+[VecEnv] SubprocVecEnv 启动 8 个 worker (method=spawn)
+  [Curriculum-descent] start at L0/8, wind=0.50/10.0m/s
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run xw7hkotu
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_cable_latpred_l0_20260615_151647/wandb/run-20260615_151731-xw7hkotu
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo_vec
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/xw7hkotu
+  Resumed checkpoint progress: ts=14887338 (new log dir, no CSV to append)
+  [Resume target] descent-ppo-vec: new log dir starts at ts=14887338; treating --timesteps=600000 as additional steps -> target_total_steps=15487338
+  [CableLatPred-VEC] visible_dim=44, latent_dim=32, predictors=8
+  [CableLatPred-VEC] checkpoint not found: saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_cable_latent_predictor.pt
+[w7] Ep   0 [14888306] ❌ R:-53.82(-53.82) SR:   0% S:121 W:0.09m/s [L0/8 ep1 W[0.0,0.5]] | stuck_on_rebar:dtf=8.1mm,rebar=8.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.90 reproj:0.19/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.1999 rmse:0.4683 rmse_norm:0.4683
+[w2] Ep   1 [14888325] ❌ R:-62.29(-58.06) SR:   0% S:124 W:0.08m/s [L0/8 ep2 W[0.0,0.5]] | stuck_on_rebar:dtf=10.6mm,rebar=12.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.90 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.2148 rmse:0.4830 rmse_norm:0.4830
+[w3] Ep   2 [14888334] ❌ R:-58.35(-58.16) SR:   0% S:125 W:0.03m/s [L0/8 ep3 W[0.0,0.5]] | stuck_on_rebar:dtf=8.0mm,rebar=9.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.89 reproj:0.18/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.1952 rmse:0.4507 rmse_norm:0.4507
+[w1] Ep   3 [14888388] ❌ R:-60.73(-58.80) SR:   0% S:132 W:0.37m/s [L0/8 ep4 W[0.0,0.5]] | stuck_on_rebar:dtf=8.1mm,rebar=8.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.88 reproj:0.17/0.30px depth:0.5/0.9mm fail:0 -
+       CableLatPred w1 loss:0.2020 rmse:0.4641 rmse_norm:0.4641
+[w0] Ep   4 [14888419] ❌ R:-63.55(-59.75) SR:   0% S:136 W:0.19m/s [L0/8 ep5 W[0.0,0.5]] | stuck_on_rebar:dtf=14.0mm,rebar=17.2mm,z=119.3mm,insert=0.7/25mm,gap=-0.7mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.91 reproj:0.21/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.1784 rmse:0.4190 rmse_norm:0.4190
+[w5] Ep   5 [14888432] ✅ R: 24.72(-45.67) SR:  17% S:137 W:0.01m/s [L0/8 ep6 W[0.0,0.5]] | insertion_success:z=104mm,dtf=3.5mm,tilt=0.035,yaw=0.010,insert=16.4/25mm,rebar=3.9/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w5 valid:100.0% cams:2.91 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.1908 rmse:0.4372 rmse_norm:0.4372
+[w6] Ep   6 [14888561] ❌ R:-65.29(-48.47) SR:  14% S:153 W:0.42m/s [L0/8 ep7 W[0.0,0.5]] | stuck_on_rebar:dtf=7.4mm,rebar=7.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.95 reproj:0.18/0.33px depth:0.5/0.9mm fail:0 -
+       CableLatPred w6 loss:0.1942 rmse:0.4469 rmse_norm:0.4469
+[w4] Ep   7 [14888903] ❌ R:-44.79(-48.01) SR:  12% S:196 W:0.30m/s [L0/8 ep8 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=2.9mm,tilt=0.026,yaw=0.034,insert=18.6/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.97 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.1336 rmse:0.3437 rmse_norm:0.3437
+[w7] Ep   8 [14889242] ❌ R:-28.98(-45.90) SR:  11% S:117 W:0.15m/s [L0/8 ep9 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=1.4mm,tilt=0.012,yaw=0.031,insert=17.7/25mm,rebar=2.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.91 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0442 rmse:0.2172 rmse_norm:0.2172
+[w2] Ep   9 [14889277] ❌ R:-49.45(-46.25) SR:  10% S:119 W:0.22m/s [L0/8 ep10 W[0.0,0.5]] | stuck_on_rebar:dtf=7.7mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.92 reproj:0.18/0.34px depth:0.5/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0439 rmse:0.2216 rmse_norm:0.2216
+[w3] Ep  10 [14889302] ❌ R:-53.42(-46.90) SR:   9% S:121 W:0.31m/s [L0/8 ep11 W[0.0,0.5]] | stuck_on_rebar:dtf=9.6mm,rebar=10.1mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.94 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0369 rmse:0.1944 rmse_norm:0.1944
+[w0] Ep  11 [14889395] ❌ R:-38.09(-46.17) SR:   8% S:122 W:0.47m/s [L0/8 ep12 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=2.5mm,tilt=0.030,yaw=0.034,insert=17.4/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.94 reproj:0.21/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0718 rmse:0.2836 rmse_norm:0.2836
+[w1] Ep  12 [14889412] ❌ R:-51.71(-46.60) SR:   8% S:128 W:0.39m/s [L0/8 ep13 W[0.0,0.5]] | stuck_on_rebar:dtf=8.8mm,rebar=10.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.91 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0587 rmse:0.2415 rmse_norm:0.2415
+[w6] Ep  13 [14889497] ✅ R: 38.05(-40.55) SR:  14% S:117 W:0.09m/s [L0/8 ep14 W[0.0,0.5]] | insertion_success:z=103mm,dtf=1.2mm,tilt=0.036,yaw=0.023,insert=16.6/25mm,rebar=2.3/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w6 valid:100.0% cams:2.91 reproj:0.18/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0433 rmse:0.2068 rmse_norm:0.2068
+[w5] Ep  14 [14889560] ❌ R:-47.28(-41.00) SR:  13% S:141 W:0.44m/s [L0/8 ep15 W[0.0,0.5]] | stuck_on_rebar:dtf=5.8mm,rebar=6.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.91 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0510 rmse:0.2199 rmse_norm:0.2199
+[w3] Ep  15 [14890238] ❌ R:-47.40(-41.40) SR:  12% S:117 W:0.24m/s [L0/8 ep16 W[0.0,0.5]] | stuck_on_rebar:dtf=7.5mm,rebar=8.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.91 reproj:0.21/0.36px depth:0.6/0.9mm fail:0 -
+       CableLatPred w3 loss:0.0454 rmse:0.2302 rmse_norm:0.2302
+[w2] Ep  16 [14890325] ❌ R:-55.41(-42.22) SR:  12% S:131 W:0.47m/s [L0/8 ep17 W[0.0,0.5]] | stuck_on_rebar:dtf=13.0mm,rebar=14.3mm,z=119.4mm,insert=0.6/25mm,gap=-0.6mm,vz=1.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.90 reproj:0.19/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0460 rmse:0.2243 rmse_norm:0.2243
+[w0] Ep  17 [14890363] ❌ R:-28.78(-41.48) SR:  11% S:121 W:0.27m/s [L0/8 ep18 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.5mm,tilt=0.032,yaw=0.054,insert=14.7/25mm,rebar=4.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.93 reproj:0.20/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0412 rmse:0.1896 rmse_norm:0.1896
+[w7] Ep  18 [14890530] ❌ R:-37.67(-41.28) SR:  11% S:161 W:0.26m/s [L0/8 ep19 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=4.0mm,tilt=0.022,yaw=0.010,insert=18.9/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.94 reproj:0.21/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0363 rmse:0.1949 rmse_norm:0.1949
+[w6] Ep  19 [14890625] ❌ R:-50.07(-41.72) SR:  10% S:141 W:0.14m/s [L0/8 ep20 W[0.0,0.5]] | stuck_on_rebar:dtf=8.2mm,rebar=9.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.94 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0428 rmse:0.2005 rmse_norm:0.2005
+[w5] Ep  20 [14890672] ❌ R:-47.45(-41.99) SR:  10% S:139 W:0.19m/s [L0/8 ep21 W[0.0,0.5]] | stuck_on_rebar:dtf=8.2mm,rebar=8.8mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.94 reproj:0.17/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0354 rmse:0.1999 rmse_norm:0.1999
+[w4] Ep  21 [14891031] ❌ R:-60.93(-42.85) SR:   9% S:266 W:0.02m/s [L0/8 ep22 W[0.0,0.5]] | stuck_on_rebar:dtf=14.1mm,rebar=15.2mm,z=115.9mm,insert=4.1/25mm,gap=-4.1mm,vz=4.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.96 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0268 rmse:0.1517 rmse_norm:0.1517
+[w1] Ep  22 [14891140] ❌ R:-39.45(-42.70) SR:   9% S:216 W:0.45m/s [L0/8 ep23 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.1mm,tilt=0.019,yaw=0.017,insert=14.9/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.95 reproj:0.20/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0319 rmse:0.1743 rmse_norm:0.1743
+[w2] Ep  23 [14891245] ❌ R:-29.92(-42.17) SR:   8% S:115 W:0.03m/s [L0/8 ep24 W[0.0,0.5]] | lucky_rebar_insert_failure:z=106mm,dtf=1.0mm,tilt=0.035,yaw=0.003,insert=14.2/25mm,rebar=1.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.89 reproj:0.18/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0502 rmse:0.2244 rmse_norm:0.2244
+[w0] Ep  24 [14891443] ❌ R:-46.29(-42.33) SR:   8% S:135 W:0.09m/s [L0/8 ep25 W[0.0,0.5]] | stuck_on_rebar:dtf=6.4mm,rebar=6.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.90 reproj:0.18/0.31px depth:0.6/1.0mm fail:0 -
+       CableLatPred w0 loss:0.0353 rmse:0.1831 rmse_norm:0.1831
+[w7] Ep  25 [14891466] ❌ R:-33.90(-42.01) SR:   8% S:117 W:0.40m/s [L0/8 ep26 W[0.0,0.5]] | lucky_rebar_insert_failure:z=106mm,dtf=1.8mm,tilt=0.035,yaw=0.025,insert=14.5/25mm,rebar=3.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.93 reproj:0.19/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0513 rmse:0.2253 rmse_norm:0.2253
+[w6] Ep  26 [14891641] ❌ R:-56.90(-42.56) SR:   7% S:127 W:0.06m/s [L0/8 ep27 W[0.0,0.5]] | stuck_on_rebar:dtf=11.9mm,rebar=12.6mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.94 reproj:0.17/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0502 rmse:0.2245 rmse_norm:0.2245
+[w4] Ep  27 [14891871] ❌ R:-36.56(-42.35) SR:   7% S:105 W:0.15m/s [L0/8 ep28 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.5mm,tilt=0.022,yaw=0.003,insert=15.3/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.90 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0518 rmse:0.2375 rmse_norm:0.2375
+[w5] Ep  28 [14891872] ❌ R:-53.79(-42.74) SR:   7% S:150 W:0.17m/s [L0/8 ep29 W[0.0,0.5]] | stuck_on_rebar:dtf=7.9mm,rebar=9.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.93 reproj:0.18/0.29px depth:0.5/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0361 rmse:0.1834 rmse_norm:0.1834
+[w1] Ep  29 [14892076] ❌ R:-33.75(-42.44) SR:   7% S:117 W:0.33m/s [L0/8 ep30 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.2mm,tilt=0.035,yaw=0.022,insert=14.8/25mm,rebar=3.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.91 reproj:0.20/0.35px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0451 rmse:0.2131 rmse_norm:0.2131
+[w3] Ep  30 [14892166] ❌ R:-36.66(-42.25) SR:   6% S:241 W:0.13m/s [L0/8 ep31 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.3mm,tilt=0.000,yaw=0.024,insert=20.0/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.95 reproj:0.21/0.28px depth:0.6/0.7mm fail:0 -
+       CableLatPred w3 loss:0.0249 rmse:0.1522 rmse_norm:0.1522
+[w2] Ep  31 [14892221] ❌ R:-47.31(-42.41) SR:   6% S:122 W:0.47m/s [L0/8 ep32 W[0.0,0.5]] | stuck_on_rebar:dtf=7.0mm,rebar=8.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.93 reproj:0.18/0.28px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0419 rmse:0.2071 rmse_norm:0.2071
+[w0] Ep  32 [14892403] ❌ R:-39.06(-42.31) SR:   6% S:120 W:0.03m/s [L0/8 ep33 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=3.9mm,tilt=0.030,yaw=0.009,insert=17.2/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.92 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0423 rmse:0.2074 rmse_norm:0.2074
+[w7] Ep  33 [14892538] ✅ R: 32.10(-40.12) SR:   9% S:134 W:0.31m/s [L0/8 ep34 W[0.0,0.5]] | insertion_success:z=104mm,dtf=3.5mm,tilt=0.031,yaw=0.019,insert=15.5/25mm,rebar=4.3/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w7 valid:100.0% cams:2.91 reproj:0.19/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0390 rmse:0.1999 rmse_norm:0.1999
+[w6] Ep  34 [14892745] ❌ R:-45.84(-40.29) SR:   9% S:138 W:0.34m/s [L0/8 ep35 W[0.0,0.5]] | stuck_on_rebar:dtf=5.8mm,rebar=6.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.91 reproj:0.19/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0458 rmse:0.2153 rmse_norm:0.2153
+[w5] Ep  35 [14892792] ❌ R:-33.21(-40.09) SR:   8% S:115 W:0.41m/s [L0/8 ep36 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.2mm,tilt=0.012,yaw=0.008,insert=19.4/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0458 rmse:0.2291 rmse_norm:0.2291
+[w4] Ep  36 [14892943] ❌ R:-44.35(-40.20) SR:   8% S:134 W:0.01m/s [L0/8 ep37 W[0.0,0.5]] | stuck_on_rebar:dtf=6.2mm,rebar=7.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.90 reproj:0.18/0.27px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0397 rmse:0.2044 rmse_norm:0.2044
+[w3] Ep  37 [14893126] ❌ R:-32.27(-40.00) SR:   8% S:120 W:0.14m/s [L0/8 ep38 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.7mm,tilt=0.018,yaw=0.054,insert=19.1/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.94 reproj:0.18/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0469 rmse:0.2228 rmse_norm:0.2228
+[w1] Ep  38 [14893140] ❌ R:-48.04(-40.20) SR:   8% S:133 W:0.48m/s [L0/8 ep39 W[0.0,0.5]] | stuck_on_rebar:dtf=6.6mm,rebar=8.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.91 reproj:0.17/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0428 rmse:0.2110 rmse_norm:0.2110
+[w7] Ep  39 [14893482] ✅ R: 35.17(-38.32) SR:  10% S:118 W:0.31m/s [L0/8 ep40 W[0.0,0.5]] | insertion_success:z=102mm,dtf=2.1mm,tilt=0.035,yaw=0.021,insert=17.6/25mm,rebar=3.2/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w7 valid:100.0% cams:2.89 reproj:0.18/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0488 rmse:0.2219 rmse_norm:0.2219
+[w2] Ep  40 [14893533] ❌ R:-48.76(-38.57) SR:  10% S:164 W:0.40m/s [L0/8 ep41 W[0.0,0.5]] | stuck_on_rebar:dtf=7.7mm,rebar=9.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.93 reproj:0.17/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0275 rmse:0.1607 rmse_norm:0.1607
+[w0] Ep  41 [14893659] ❌ R:-36.85(-38.53) SR:  10% S:157 W:0.32m/s [L0/8 ep42 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.3mm,tilt=0.016,yaw=0.003,insert=19.3/25mm,rebar=3.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.94 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0381 rmse:0.2006 rmse_norm:0.2006
+[w6] Ep  42 [14893665] ❌ R:-32.49(-38.39) SR:   9% S:115 W:0.12m/s [L0/8 ep43 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.8mm,tilt=0.028,yaw=0.030,insert=15.2/25mm,rebar=3.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.97 reproj:0.19/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0411 rmse:0.2056 rmse_norm:0.2056
+[w4] Ep  43 [14893999] ❌ R:-47.56(-38.60) SR:   9% S:132 W:0.07m/s [L0/8 ep44 W[0.0,0.5]] | stuck_on_rebar:dtf=8.3mm,rebar=9.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.96 reproj:0.18/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w4 loss:0.0352 rmse:0.1913 rmse_norm:0.1913
+[w1] Ep  44 [14894220] ❌ R:-39.67(-38.62) SR:   9% S:135 W:0.35m/s [L0/8 ep45 W[0.0,0.5]] | stuck_on_rebar:dtf=5.7mm,rebar=6.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.91 reproj:0.19/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0379 rmse:0.1931 rmse_norm:0.1931
+[w5] Ep  45 [14894408] ❌ R:-37.66(-38.60) SR:   9% S:202 W:0.38m/s [L0/8 ep46 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=3.4mm,tilt=0.025,yaw=0.011,insert=17.1/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.96 reproj:0.22/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0259 rmse:0.1676 rmse_norm:0.1676
+[w7] Ep  46 [14894578] ✅ R: 35.13(-37.03) SR:  11% S:137 W:0.48m/s [L0/8 ep47 W[0.0,0.5]] | insertion_success:z=103mm,dtf=1.2mm,tilt=0.035,yaw=0.019,insert=16.6/25mm,rebar=2.0/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w7 valid:100.0% cams:2.91 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0421 rmse:0.2056 rmse_norm:0.2056
+[w2] Ep  47 [14894605] ❌ R:-47.12(-37.24) SR:  10% S:134 W:0.06m/s [L0/8 ep48 W[0.0,0.5]] | stuck_on_rebar:dtf=7.9mm,rebar=9.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.93 reproj:0.20/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0367 rmse:0.2049 rmse_norm:0.2049
+[w0] Ep  48 [14894667] ✅ R: 38.61(-35.70) SR:  12% S:126 W:0.37m/s [L0/8 ep49 W[0.0,0.5]] | insertion_success:z=105mm,dtf=1.0mm,tilt=0.037,yaw=0.015,insert=14.9/25mm,rebar=1.6/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w0 valid:100.0% cams:2.91 reproj:0.20/0.32px depth:0.6/1.0mm fail:0 -
+       CableLatPred w0 loss:0.0362 rmse:0.1914 rmse_norm:0.1914
+[w6] Ep  49 [14894745] ❌ R:-41.93(-35.82) SR:  12% S:135 W:0.27m/s [L0/8 ep50 W[0.0,0.5]] | stuck_on_rebar:dtf=5.3mm,rebar=5.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.90 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0389 rmse:0.2059 rmse_norm:0.2059
+[w4] Ep  50 [14894983] ❌ R:-50.95(-36.12) SR:  12% S:123 W:0.19m/s [L0/8 ep51 W[0.0,0.5]] | stuck_on_rebar:dtf=8.4mm,rebar=8.8mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.89 reproj:0.18/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0479 rmse:0.2273 rmse_norm:0.2273
+[w1] Ep  51 [14895028] ✅ R: 33.53(-34.78) SR:  13% S:101 W:0.07m/s [L0/8 ep52 W[0.0,0.5]] | insertion_success:z=101mm,dtf=2.9mm,tilt=0.024,yaw=0.025,insert=19.0/25mm,rebar=4.1/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w1 valid:100.0% cams:2.87 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0570 rmse:0.2482 rmse_norm:0.2482
+[w5] Ep  52 [14895288] ✅ R: 35.29(-33.46) SR:  15% S:110 W:0.23m/s [L0/8 ep53 W[0.0,0.5]] | insertion_success:z=106mm,dtf=1.5mm,tilt=0.031,yaw=0.051,insert=14.3/25mm,rebar=3.9/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w5 valid:100.0% cams:2.88 reproj:0.19/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0460 rmse:0.2160 rmse_norm:0.2160
+[w7] Ep  53 [14895506] ❌ R:-35.43(-33.49) SR:  15% S:116 W:0.06m/s [L0/8 ep54 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=3.6mm,tilt=0.012,yaw=0.018,insert=16.7/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.91 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0368 rmse:0.1970 rmse_norm:0.1970
+[w3] Ep  54 [14895518] ❌ R:-59.55(-33.97) SR:  15% S:299 W:0.18m/s [L0/8 ep55 W[0.0,0.5]] | timeout:dtf=12.8mm,z=116mm,tilt=0.091,yaw=0.049
+       Vision w3 valid:100.0% cams:2.97 reproj:0.17/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0296 rmse:0.1850 rmse_norm:0.1850
+[w0] Ep  55 [14895563] ✅ R: 37.24(-32.69) SR:  16% S:112 W:0.42m/s [L0/8 ep56 W[0.0,0.5]] | insertion_success:z=106mm,dtf=3.2mm,tilt=0.029,yaw=0.020,insert=14.2/25mm,rebar=4.1/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w0 valid:100.0% cams:2.90 reproj:0.20/0.35px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0410 rmse:0.1985 rmse_norm:0.1985
+[w2] Ep  56 [14895781] ❌ R:-47.63(-32.96) SR:  16% S:147 W:0.12m/s [L0/8 ep57 W[0.0,0.5]] | stuck_on_rebar:dtf=5.7mm,rebar=5.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.90 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0429 rmse:0.2076 rmse_norm:0.2076
+[w6] Ep  57 [14895849] ✅ R: 31.85(-31.84) SR:  17% S:138 W:0.31m/s [L0/8 ep58 W[0.0,0.5]] | insertion_success:z=104mm,dtf=3.0mm,tilt=0.035,yaw=0.026,insert=16.4/25mm,rebar=4.3/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w6 valid:100.0% cams:2.90 reproj:0.17/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0439 rmse:0.2024 rmse_norm:0.2024
+[w4] Ep  58 [14895999] ❌ R:-51.40(-32.17) SR:  17% S:127 W:0.05m/s [L0/8 ep59 W[0.0,0.5]] | stuck_on_rebar:dtf=8.1mm,rebar=9.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.88 reproj:0.19/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0468 rmse:0.2220 rmse_norm:0.2220
+[w1] Ep  59 [14896052] ❌ R:-32.01(-32.17) SR:  17% S:128 W:0.07m/s [L0/8 ep60 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.8mm,tilt=0.025,yaw=0.045,insert=14.8/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.93 reproj:0.20/0.35px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0357 rmse:0.1927 rmse_norm:0.1927
+[w5] Ep  60 [14896288] ❌ R:-44.24(-32.37) SR:  16% S:125 W:0.32m/s [L0/8 ep61 W[0.0,0.5]] | stuck_on_rebar:dtf=6.7mm,rebar=7.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.90 reproj:0.18/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0404 rmse:0.2103 rmse_norm:0.2103
+[w7] Ep  61 [14896442] ✅ R: 33.23(-31.31) SR:  18% S:117 W:0.49m/s [L0/8 ep62 W[0.0,0.5]] | insertion_success:z=104mm,dtf=2.9mm,tilt=0.033,yaw=0.001,insert=16.3/25mm,rebar=2.9/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w7 valid:100.0% cams:2.90 reproj:0.20/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0471 rmse:0.2189 rmse_norm:0.2189
+[w3] Ep  62 [14896510] ❌ R:-47.72(-31.57) SR:  17% S:124 W:0.39m/s [L0/8 ep63 W[0.0,0.5]] | stuck_on_rebar:dtf=6.8mm,rebar=7.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.90 reproj:0.19/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0425 rmse:0.2131 rmse_norm:0.2131
+[w0] Ep  63 [14896579] ❌ R:-46.41(-31.80) SR:  17% S:127 W:0.00m/s [L0/8 ep64 W[0.0,0.5]] | stuck_on_rebar:dtf=8.2mm,rebar=9.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.93 reproj:0.19/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0394 rmse:0.1954 rmse_norm:0.1954
+[w2] Ep  64 [14896805] ❌ R:-26.60(-31.72) SR:  17% S:128 W:0.28m/s [L0/8 ep65 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=0.5mm,tilt=0.018,yaw=0.063,insert=16.4/25mm,rebar=3.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.91 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0331 rmse:0.1860 rmse_norm:0.1860
+[w6] Ep  65 [14896889] ✅ R: 32.82(-30.74) SR:  18% S:130 W:0.41m/s [L0/8 ep66 W[0.0,0.5]] | insertion_success:z=105mm,dtf=2.2mm,tilt=0.036,yaw=0.021,insert=15.3/25mm,rebar=3.2/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w6 valid:100.0% cams:2.94 reproj:0.19/0.33px depth:0.6/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0418 rmse:0.2053 rmse_norm:0.2053
+[w1] Ep  66 [14896988] ❌ R:-38.02(-30.85) SR:  18% S:117 W:0.27m/s [L0/8 ep67 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=4.0mm,tilt=0.023,yaw=0.009,insert=16.0/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.90 reproj:0.17/0.26px depth:0.5/0.7mm fail:0 -
+       CableLatPred w1 loss:0.0413 rmse:0.2102 rmse_norm:0.2102
+[w4] Ep  67 [14897103] ❌ R:-49.53(-31.13) SR:  18% S:138 W:0.12m/s [L0/8 ep68 W[0.0,0.5]] | stuck_on_rebar:dtf=7.9mm,rebar=8.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.93 reproj:0.18/0.27px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0354 rmse:0.1977 rmse_norm:0.1977
+[w5] Ep  68 [14897296] ❌ R:-24.57(-31.03) SR:  17% S:126 W:0.32m/s [L0/8 ep69 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=0.8mm,tilt=0.028,yaw=0.036,insert=14.9/25mm,rebar=2.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.94 reproj:0.20/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0286 rmse:0.1740 rmse_norm:0.1740
+[w7] Ep  69 [14897434] ❌ R:-34.88(-31.09) SR:  17% S:124 W:0.29m/s [L0/8 ep70 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=2.8mm,tilt=0.021,yaw=0.002,insert=19.1/25mm,rebar=2.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0426 rmse:0.2031 rmse_norm:0.2031
+[w3] Ep  70 [14897438] ❌ R:-35.47(-31.15) SR:  17% S:116 W:0.25m/s [L0/8 ep71 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.5mm,tilt=0.018,yaw=0.007,insert=19.1/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.88 reproj:0.18/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w3 loss:0.0533 rmse:0.2333 rmse_norm:0.2333
+[w0] Ep  71 [14897747] ❌ R:-33.22(-31.18) SR:  17% S:146 W:0.19m/s [L0/8 ep72 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=1.8mm,tilt=0.033,yaw=0.007,insert=15.5/25mm,rebar=2.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0374 rmse:0.1913 rmse_norm:0.1913
+[w2] Ep  72 [14897845] ❌ R:-35.43(-31.23) SR:  16% S:130 W:0.26m/s [L0/8 ep73 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.5mm,tilt=0.029,yaw=0.015,insert=15.2/25mm,rebar=3.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.90 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0393 rmse:0.1923 rmse_norm:0.1923
+[w1] Ep  73 [14898012] ❌ R:-44.09(-31.41) SR:  16% S:128 W:0.20m/s [L0/8 ep74 W[0.0,0.5]] | stuck_on_rebar:dtf=6.9mm,rebar=7.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.92 reproj:0.18/0.28px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0460 rmse:0.2169 rmse_norm:0.2169
+[w6] Ep  74 [14898025] ❌ R:-46.63(-31.61) SR:  16% S:142 W:0.00m/s [L0/8 ep75 W[0.0,0.5]] | stuck_on_rebar:dtf=7.1mm,rebar=9.4mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.89 reproj:0.18/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0421 rmse:0.2039 rmse_norm:0.2039
+[w4] Ep  75 [14898071] ❌ R:-36.56(-31.68) SR:  16% S:121 W:0.22m/s [L0/8 ep76 W[0.0,0.5]] | lucky_rebar_insert_failure:z=106mm,dtf=2.8mm,tilt=0.028,yaw=0.033,insert=14.4/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.92 reproj:0.20/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0406 rmse:0.2137 rmse_norm:0.2137
+[w5] Ep  76 [14898256] ❌ R:-29.59(-31.65) SR:  16% S:120 W:0.20m/s [L0/8 ep77 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=0.4mm,tilt=0.016,yaw=0.027,insert=21.2/25mm,rebar=1.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.91 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0450 rmse:0.2148 rmse_norm:0.2148
+[w7] Ep  77 [14898434] ❌ R:-46.38(-31.84) SR:  15% S:125 W:0.40m/s [L0/8 ep78 W[0.0,0.5]] | stuck_on_rebar:dtf=7.1mm,rebar=8.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.96 reproj:0.18/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0366 rmse:0.1988 rmse_norm:0.1988
+[w3] Ep  78 [14898494] ✅ R: 33.78(-31.01) SR:  16% S:132 W:0.38m/s [L0/8 ep79 W[0.0,0.5]] | insertion_success:z=101mm,dtf=3.9mm,tilt=0.018,yaw=0.012,insert=19.3/25mm,rebar=4.3/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w3 valid:100.0% cams:2.94 reproj:0.19/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0395 rmse:0.1955 rmse_norm:0.1955
+[w0] Ep  79 [14898675] ❌ R:-45.15(-31.18) SR:  16% S:116 W:0.18m/s [L0/8 ep80 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=8.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.91 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0395 rmse:0.2079 rmse_norm:0.2079
+[w2] Ep  80 [14898717] ✅ R: 38.12(-30.33) SR:  17% S:109 W:0.15m/s [L0/8 ep81 W[0.0,0.5]] | insertion_success:z=104mm,dtf=1.7mm,tilt=0.030,yaw=0.020,insert=15.7/25mm,rebar=2.5/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w2 valid:100.0% cams:2.92 reproj:0.20/0.36px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0383 rmse:0.2070 rmse_norm:0.2070
+[w4] Ep  81 [14899263] ❌ R:-38.59(-30.43) SR:  17% S:149 W:0.02m/s [L0/8 ep82 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.8mm,tilt=0.007,yaw=0.001,insert=19.7/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.91 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0435 rmse:0.2087 rmse_norm:0.2087
+[w1] Ep  82 [14899268] ❌ R:-53.11(-30.70) SR:  17% S:157 W:0.15m/s [L0/8 ep83 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=10.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0351 rmse:0.1823 rmse_norm:0.1823
+[w5] Ep  83 [14899320] ✅ R: 33.37(-29.94) SR:  18% S:133 W:0.17m/s [L0/8 ep84 W[0.0,0.5]] | insertion_success:z=104mm,dtf=0.7mm,tilt=0.036,yaw=0.028,insert=16.1/25mm,rebar=2.0/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w5 valid:100.0% cams:2.89 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0438 rmse:0.2049 rmse_norm:0.2049
+[w6] Ep  84 [14899361] ❌ R:-35.38(-30.00) SR:  18% S:167 W:0.06m/s [L0/8 ep85 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.8mm,tilt=0.026,yaw=0.014,insert=18.5/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.95 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0332 rmse:0.1726 rmse_norm:0.1726
+[w3] Ep  85 [14899510] ❌ R:-41.87(-30.14) SR:  17% S:127 W:0.49m/s [L0/8 ep86 W[0.0,0.5]] | stuck_on_rebar:dtf=6.5mm,rebar=7.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.91 reproj:0.17/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w3 loss:0.0417 rmse:0.2063 rmse_norm:0.2063
+[w2] Ep  86 [14899733] ❌ R:-42.20(-30.28) SR:  17% S:127 W:0.10m/s [L0/8 ep87 W[0.0,0.5]] | stuck_on_rebar:dtf=6.9mm,rebar=8.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.92 reproj:0.19/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0379 rmse:0.2047 rmse_norm:0.2047
+[w0] Ep  87 [14899803] ❌ R:-44.58(-30.44) SR:  17% S:141 W:0.36m/s [L0/8 ep88 W[0.0,0.5]] | stuck_on_rebar:dtf=7.5mm,rebar=8.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.89 reproj:0.16/0.28px depth:0.5/0.7mm fail:0 -
+       CableLatPred w0 loss:0.0354 rmse:0.1847 rmse_norm:0.1847
+[w4] Ep  88 [14900263] ❌ R:-48.29(-30.64) SR:  17% S:125 W:0.47m/s [L0/8 ep89 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=11.0mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.92 reproj:0.18/0.28px depth:0.6/0.9mm fail:0 -
+       CableLatPred w4 loss:0.0316 rmse:0.1791 rmse_norm:0.1791
+[w1] Ep  89 [14900276] ✅ R: 39.21(-29.87) SR:  18% S:126 W:0.13m/s [L0/8 ep90 W[0.0,0.5]] | insertion_success:z=103mm,dtf=2.6mm,tilt=0.032,yaw=0.033,insert=16.7/25mm,rebar=4.2/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w1 valid:100.0% cams:2.91 reproj:0.19/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0308 rmse:0.1753 rmse_norm:0.1753
+[w6] Ep  90 [14900401] ❌ R:-48.04(-30.07) SR:  18% S:130 W:0.35m/s [L0/8 ep91 W[0.0,0.5]] | stuck_on_rebar:dtf=7.4mm,rebar=8.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.91 reproj:0.19/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0399 rmse:0.2042 rmse_norm:0.2042
+[w3] Ep  91 [14900518] ❌ R:-44.39(-30.22) SR:  17% S:126 W:0.20m/s [L0/8 ep92 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=10.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.90 reproj:0.18/0.28px depth:0.5/0.7mm fail:0 -
+       CableLatPred w3 loss:0.0424 rmse:0.2089 rmse_norm:0.2089
+[w7] Ep  92 [14900690] ❌ R:-41.06(-30.34) SR:  17% S:282 W:0.20m/s [L0/8 ep93 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=4.2mm,tilt=0.030,yaw=0.006,insert=17.8/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.95 reproj:0.22/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0223 rmse:0.1397 rmse_norm:0.1397
+[w2] Ep  93 [14900845] ❌ R:-35.05(-30.39) SR:  17% S:139 W:0.27m/s [L0/8 ep94 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.3mm,tilt=0.024,yaw=0.024,insert=15.4/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.94 reproj:0.20/0.35px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0342 rmse:0.1852 rmse_norm:0.1852
+[w0] Ep  94 [14900899] ❌ R:-35.51(-30.44) SR:  17% S:137 W:0.17m/s [L0/8 ep95 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.1mm,tilt=0.042,yaw=0.015,insert=14.7/25mm,rebar=2.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.92 reproj:0.19/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0427 rmse:0.2162 rmse_norm:0.2162
+[w5] Ep  95 [14900928] ❌ R:-38.72(-30.53) SR:  17% S:201 W:0.45m/s [L0/8 ep96 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=4.3mm,tilt=0.024,yaw=0.001,insert=18.9/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.93 reproj:0.18/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0280 rmse:0.1612 rmse_norm:0.1612
+[w4] Ep  96 [14901287] ✅ R: 33.17(-29.87) SR:  18% S:128 W:0.27m/s [L0/8 ep97 W[0.0,0.5]] | insertion_success:z=105mm,dtf=2.9mm,tilt=0.029,yaw=0.024,insert=15.4/25mm,rebar=4.1/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w4 valid:100.0% cams:2.91 reproj:0.19/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0384 rmse:0.1964 rmse_norm:0.1964
+[w6] Ep  97 [14901297] ✅ R: 32.92(-29.23) SR:  18% S:112 W:0.12m/s [L0/8 ep98 W[0.0,0.5]] | insertion_success:z=103mm,dtf=1.3mm,tilt=0.038,yaw=0.049,insert=17.4/25mm,rebar=3.5/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w6 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0383 rmse:0.2075 rmse_norm:0.2075
+[w1] Ep  98 [14901300] ❌ R:-47.75(-29.42) SR:  18% S:128 W:0.13m/s [L0/8 ep99 W[0.0,0.5]] | stuck_on_rebar:dtf=8.2mm,rebar=9.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.89 reproj:0.19/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0441 rmse:0.2127 rmse_norm:0.2127
+  [Curriculum-descent] ep=100 wind=[0.00,0.50]/10.0m/s SR=18% n=100/100 pause=100
+[w3] Ep  99 [14901622] ❌ R:-51.77(-29.64) SR:  18% S:138 W:0.49m/s [L0/8 ep100 W[0.0,0.5]] | stuck_on_rebar:dtf=8.8mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.94 reproj:0.18/0.31px depth:0.5/0.9mm fail:0 -
+       CableLatPred w3 loss:0.0382 rmse:0.1961 rmse_norm:0.1961
+[w7] Ep 100 [14901818] ❌ R:-34.71(-29.69) SR:  18% S:141 W:0.11m/s [L0/8 ep101 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.9mm,tilt=0.022,yaw=0.003,insert=19.0/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.94 reproj:0.19/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0306 rmse:0.1819 rmse_norm:0.1819
+[w2] Ep 101 [14901893] ❌ R:-45.46(-29.85) SR:  18% S:131 W:0.38m/s [L0/8 ep102 W[0.0,0.5]] | stuck_on_rebar:dtf=6.3mm,rebar=6.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.94 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0412 rmse:0.2091 rmse_norm:0.2091
+[w0] Ep 102 [14901987] ❌ R:-46.10(-30.00) SR:  17% S:136 W:0.14m/s [L0/8 ep103 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=8.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.92 reproj:0.16/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0366 rmse:0.1955 rmse_norm:0.1955
+[w4] Ep 103 [14902247] ❌ R:-33.30(-30.04) SR:  17% S:120 W:0.14m/s [L0/8 ep104 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.6mm,tilt=0.022,yaw=0.024,insert=19.2/25mm,rebar=2.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.88 reproj:0.19/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0450 rmse:0.2113 rmse_norm:0.2113
+[w1] Ep 104 [14902308] ❌ R:-55.57(-30.28) SR:  17% S:126 W:0.49m/s [L0/8 ep105 W[0.0,0.5]] | stuck_on_rebar:dtf=12.7mm,rebar=12.9mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.93 reproj:0.18/0.28px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0374 rmse:0.1985 rmse_norm:0.1985
+[w5] Ep 105 [14902328] ❌ R:-37.56(-30.35) SR:  17% S:175 W:0.16m/s [L0/8 ep106 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.8mm,tilt=0.019,yaw=0.025,insert=16.2/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.93 reproj:0.20/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0327 rmse:0.1823 rmse_norm:0.1823
+[w6] Ep 106 [14902385] ❌ R:-34.95(-30.39) SR:  17% S:136 W:0.49m/s [L0/8 ep107 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.9mm,tilt=0.035,yaw=0.039,insert=14.5/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.93 reproj:0.20/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0346 rmse:0.1939 rmse_norm:0.1939
+[w3] Ep 107 [14902790] ❌ R:-46.73(-30.54) SR:  17% S:146 W:0.41m/s [L0/8 ep108 W[0.0,0.5]] | stuck_on_rebar:dtf=6.0mm,rebar=6.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.90 reproj:0.18/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0381 rmse:0.1986 rmse_norm:0.1986
+[w2] Ep 108 [14902949] ❌ R:-45.99(-30.68) SR:  17% S:132 W:0.02m/s [L0/8 ep109 W[0.0,0.5]] | stuck_on_rebar:dtf=7.0mm,rebar=9.2mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.89 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0416 rmse:0.2035 rmse_norm:0.2035
+[w0] Ep 109 [14903235] ❌ R:-52.12(-30.88) SR:  16% S:156 W:0.41m/s [L0/8 ep110 W[0.0,0.5]] | stuck_on_rebar:dtf=8.3mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.94 reproj:0.19/0.28px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0344 rmse:0.1890 rmse_norm:0.1890
+[w4] Ep 110 [14903287] ❌ R:-54.71(-31.09) SR:  16% S:130 W:0.23m/s [L0/8 ep111 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=11.8mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.93 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0427 rmse:0.2181 rmse_norm:0.2181
+[w6] Ep 111 [14903417] ❌ R:-36.55(-31.14) SR:  16% S:129 W:0.15m/s [L0/8 ep112 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.6mm,tilt=0.023,yaw=0.018,insert=15.4/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.94 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0370 rmse:0.1888 rmse_norm:0.1888
+[w1] Ep 112 [14903428] ❌ R:-39.65(-31.22) SR:  16% S:140 W:0.01m/s [L0/8 ep113 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=4.0mm,tilt=0.041,yaw=0.009,insert=17.8/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.93 reproj:0.19/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0462 rmse:0.2218 rmse_norm:0.2218
+[w5] Ep 113 [14903432] ❌ R:-33.99(-31.24) SR:  16% S:138 W:0.28m/s [L0/8 ep114 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=3.6mm,tilt=0.019,yaw=0.018,insert=17.6/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.91 reproj:0.20/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0353 rmse:0.1891 rmse_norm:0.1891
+[w3] Ep 114 [14903798] ❌ R:-34.80(-31.27) SR:  16% S:126 W:0.46m/s [L0/8 ep115 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.3mm,tilt=0.028,yaw=0.023,insert=18.6/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.89 reproj:0.20/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0455 rmse:0.2097 rmse_norm:0.2097
+[w2] Ep 115 [14903949] ❌ R:-46.55(-31.40) SR:  16% S:125 W:0.30m/s [L0/8 ep116 W[0.0,0.5]] | stuck_on_rebar:dtf=7.4mm,rebar=8.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.90 reproj:0.19/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0412 rmse:0.2148 rmse_norm:0.2148
+[w0] Ep 116 [14904115] ❌ R:-34.92(-31.44) SR:  15% S:110 W:0.43m/s [L0/8 ep117 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=3.2mm,tilt=0.037,yaw=0.021,insert=18.2/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.91 reproj:0.19/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0461 rmse:0.2172 rmse_norm:0.2172
+[w7] Ep 117 [14904210] ❌ R:-61.35(-31.69) SR:  15% S:299 W:0.12m/s [L0/8 ep118 W[0.0,0.5]] | timeout:dtf=12.8mm,z=117mm,tilt=0.084,yaw=0.038
+       Vision w7 valid:100.0% cams:2.96 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0248 rmse:0.1501 rmse_norm:0.1501
+[w4] Ep 118 [14904343] ❌ R:-42.57(-31.78) SR:  15% S:132 W:0.31m/s [L0/8 ep119 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=9.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.92 reproj:0.18/0.29px depth:0.5/0.7mm fail:0 -
+       CableLatPred w4 loss:0.0346 rmse:0.1897 rmse_norm:0.1897
+[w6] Ep 119 [14904361] ❌ R:-30.48(-31.77) SR:  15% S:118 W:0.43m/s [L0/8 ep120 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.8mm,tilt=0.007,yaw=0.009,insert=20.3/25mm,rebar=2.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.92 reproj:0.19/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w6 loss:0.0396 rmse:0.2094 rmse_norm:0.2094
+[w1] Ep 120 [14904492] ❌ R:-42.09(-31.85) SR:  15% S:133 W:0.03m/s [L0/8 ep121 W[0.0,0.5]] | stuck_on_rebar:dtf=6.3mm,rebar=6.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.89 reproj:0.20/0.36px depth:0.6/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0384 rmse:0.2015 rmse_norm:0.2015
+[w3] Ep 121 [14904846] ❌ R:-51.31(-32.01) SR:  15% S:131 W:0.12m/s [L0/8 ep122 W[0.0,0.5]] | stuck_on_rebar:dtf=8.5mm,rebar=8.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.89 reproj:0.18/0.28px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0491 rmse:0.2253 rmse_norm:0.2253
+[w0] Ep 122 [14905099] ❌ R:-31.80(-32.01) SR:  15% S:123 W:0.33m/s [L0/8 ep123 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.1mm,tilt=0.024,yaw=0.038,insert=15.4/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.90 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0353 rmse:0.1938 rmse_norm:0.1938
+[w2] Ep 123 [14905133] ❌ R:-54.51(-32.19) SR:  15% S:148 W:0.49m/s [L0/8 ep124 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=10.3mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.91 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0402 rmse:0.1939 rmse_norm:0.1939
+[w7] Ep 124 [14905202] ❌ R:-33.87(-32.21) SR:  14% S:124 W:0.22m/s [L0/8 ep125 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=2.5mm,tilt=0.010,yaw=0.003,insert=20.6/25mm,rebar=2.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.90 reproj:0.18/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0420 rmse:0.2124 rmse_norm:0.2124
+[w6] Ep 125 [14905353] ❌ R:-31.99(-32.21) SR:  14% S:124 W:0.48m/s [L0/8 ep126 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.3mm,tilt=0.004,yaw=0.009,insert=20.5/25mm,rebar=2.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.91 reproj:0.18/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0362 rmse:0.1965 rmse_norm:0.1965
+[w1] Ep 126 [14905508] ❌ R:-44.60(-32.30) SR:  14% S:127 W:0.48m/s [L0/8 ep127 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=8.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.94 reproj:0.18/0.29px depth:0.5/0.9mm fail:0 -
+       CableLatPred w1 loss:0.0367 rmse:0.2024 rmse_norm:0.2024
+[w4] Ep 127 [14905575] ❌ R:-38.25(-32.35) SR:  14% S:154 W:0.22m/s [L0/8 ep128 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=2.8mm,tilt=0.029,yaw=0.031,insert=16.6/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.93 reproj:0.19/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0310 rmse:0.1776 rmse_norm:0.1776
+[w5] Ep 128 [14905824] ❌ R:-57.85(-32.55) SR:  14% S:299 W:0.25m/s [L0/8 ep129 W[0.0,0.5]] | timeout:dtf=13.7mm,z=116mm,tilt=0.094,yaw=0.028
+       Vision w5 valid:100.0% cams:2.96 reproj:0.17/0.27px depth:0.5/0.7mm fail:0 -
+       CableLatPred w5 loss:0.0204 rmse:0.1370 rmse_norm:0.1370
+[w3] Ep 129 [14905846] ❌ R:-45.75(-32.65) SR:  14% S:125 W:0.14m/s [L0/8 ep130 W[0.0,0.5]] | stuck_on_rebar:dtf=6.7mm,rebar=7.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.94 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0385 rmse:0.2114 rmse_norm:0.2114
+[w0] Ep 130 [14906131] ❌ R:-43.05(-32.73) SR:  14% S:129 W:0.15m/s [L0/8 ep131 W[0.0,0.5]] | stuck_on_rebar:dtf=6.2mm,rebar=6.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.91 reproj:0.18/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0325 rmse:0.1884 rmse_norm:0.1884
+[w2] Ep 131 [14906245] ✅ R: 32.58(-32.23) SR:  14% S:139 W:0.41m/s [L0/8 ep132 W[0.0,0.5]] | insertion_success:z=105mm,dtf=1.8mm,tilt=0.021,yaw=0.028,insert=14.7/25mm,rebar=3.1/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w2 valid:100.0% cams:2.93 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0380 rmse:0.1960 rmse_norm:0.1960
+[w7] Ep 132 [14906266] ❌ R:-44.76(-32.33) SR:  14% S:133 W:0.24m/s [L0/8 ep133 W[0.0,0.5]] | stuck_on_rebar:dtf=7.3mm,rebar=8.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.93 reproj:0.20/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0315 rmse:0.1743 rmse_norm:0.1743
+[w6] Ep 133 [14906313] ❌ R:-31.18(-32.32) SR:  14% S:120 W:0.40m/s [L0/8 ep134 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.2mm,tilt=0.033,yaw=0.020,insert=15.4/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.92 reproj:0.19/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0311 rmse:0.1823 rmse_norm:0.1823
+[w1] Ep 134 [14906596] ❌ R:-33.19(-32.33) SR:  14% S:136 W:0.36m/s [L0/8 ep135 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.2mm,tilt=0.027,yaw=0.012,insert=14.8/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.92 reproj:0.18/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0260 rmse:0.1595 rmse_norm:0.1595
+[w4] Ep 135 [14906711] ❌ R:-47.98(-32.44) SR:  14% S:142 W:0.47m/s [L0/8 ep136 W[0.0,0.5]] | stuck_on_rebar:dtf=8.5mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.92 reproj:0.18/0.31px depth:0.5/0.7mm fail:0 -
+       CableLatPred w4 loss:0.0334 rmse:0.1722 rmse_norm:0.1722
+[w3] Ep 136 [14906878] ❌ R:-40.03(-32.50) SR:  14% S:129 W:0.04m/s [L0/8 ep137 W[0.0,0.5]] | lucky_rebar_insert_failure:z=106mm,dtf=3.5mm,tilt=0.030,yaw=0.002,insert=14.5/25mm,rebar=3.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.90 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0437 rmse:0.2111 rmse_norm:0.2111
+[w5] Ep 137 [14906960] ❌ R:-39.33(-32.55) SR:  14% S:142 W:0.03m/s [L0/8 ep138 W[0.0,0.5]] | stuck_on_rebar:dtf=6.5mm,rebar=7.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.94 reproj:0.19/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0276 rmse:0.1666 rmse_norm:0.1666
+[w7] Ep 138 [14907266] ❌ R:-33.35(-32.55) SR:  14% S:125 W:0.27m/s [L0/8 ep139 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=4.2mm,tilt=0.028,yaw=0.007,insert=16.8/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.90 reproj:0.20/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0326 rmse:0.1884 rmse_norm:0.1884
+[w6] Ep 139 [14907273] ❌ R:-42.72(-32.62) SR:  14% S:120 W:0.26m/s [L0/8 ep140 W[0.0,0.5]] | stuck_on_rebar:dtf=7.5mm,rebar=7.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.90 reproj:0.17/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0368 rmse:0.2010 rmse_norm:0.2010
+[w2] Ep 140 [14907349] ❌ R:-29.27(-32.60) SR:  13% S:138 W:0.03m/s [L0/8 ep141 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.5mm,tilt=0.032,yaw=0.014,insert=14.8/25mm,rebar=2.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.91 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0293 rmse:0.1782 rmse_norm:0.1782
+[w1] Ep 141 [14907620] ❌ R:-46.78(-32.70) SR:  13% S:128 W:0.45m/s [L0/8 ep142 W[0.0,0.5]] | stuck_on_rebar:dtf=8.3mm,rebar=8.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.92 reproj:0.19/0.31px depth:0.6/1.0mm fail:0 -
+       CableLatPred w1 loss:0.0329 rmse:0.1868 rmse_norm:0.1868
+[w3] Ep 142 [14907886] ❌ R:-43.43(-32.77) SR:  13% S:126 W:0.19m/s [L0/8 ep143 W[0.0,0.5]] | stuck_on_rebar:dtf=6.8mm,rebar=8.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.90 reproj:0.16/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0380 rmse:0.2019 rmse_norm:0.2019
+[w5] Ep 143 [14907920] ❌ R:-27.17(-32.74) SR:  13% S:120 W:0.31m/s [L0/8 ep144 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=2.0mm,tilt=0.026,yaw=0.039,insert=18.6/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.91 reproj:0.18/0.28px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0312 rmse:0.1832 rmse_norm:0.1832
+[w4] Ep 144 [14908095] ❌ R:-36.47(-32.76) SR:  13% S:173 W:0.45m/s [L0/8 ep145 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=3.9mm,tilt=0.034,yaw=0.010,insert=17.0/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.94 reproj:0.19/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0275 rmse:0.1689 rmse_norm:0.1689
+[w0] Ep 145 [14908251] ❌ R:-45.10(-32.85) SR:  13% S:265 W:0.36m/s [L0/8 ep146 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.1mm,tilt=0.023,yaw=0.011,insert=15.1/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w0 valid:100.0% cams:2.96 reproj:0.20/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0278 rmse:0.1739 rmse_norm:0.1739
+[w7] Ep 146 [14908274] ❌ R:-35.96(-32.87) SR:  13% S:126 W:0.10m/s [L0/8 ep147 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.5mm,tilt=0.028,yaw=0.040,insert=14.6/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.89 reproj:0.18/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0396 rmse:0.2009 rmse_norm:0.2009
+[w6] Ep 147 [14908393] ❌ R:-36.74(-32.89) SR:  13% S:140 W:0.32m/s [L0/8 ep148 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=4.2mm,tilt=0.021,yaw=0.005,insert=19.0/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.90 reproj:0.19/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0394 rmse:0.2161 rmse_norm:0.2161
+[w2] Ep 148 [14908549] ❌ R:-50.47(-33.01) SR:  13% S:150 W:0.47m/s [L0/8 ep149 W[0.0,0.5]] | stuck_on_rebar:dtf=7.0mm,rebar=8.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.93 reproj:0.18/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0310 rmse:0.1828 rmse_norm:0.1828
+[w5] Ep 149 [14908976] ❌ R:-47.45(-33.11) SR:  13% S:132 W:0.43m/s [L0/8 ep150 W[0.0,0.5]] | stuck_on_rebar:dtf=6.7mm,rebar=7.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w5 valid:100.0% cams:2.90 reproj:0.18/0.28px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0373 rmse:0.1948 rmse_norm:0.1948
+[w4] Ep 150 [14909087] ❌ R:-39.73(-33.15) SR:  13% S:124 W:0.14m/s [L0/8 ep151 W[0.0,0.5]] | stuck_on_rebar:dtf=6.7mm,rebar=7.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.89 reproj:0.19/0.29px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0292 rmse:0.1788 rmse_norm:0.1788
+[w3] Ep 151 [14909158] ❌ R:-39.95(-33.20) SR:  12% S:159 W:0.21m/s [L0/8 ep152 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.2mm,tilt=0.022,yaw=0.017,insert=15.2/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.92 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0389 rmse:0.1945 rmse_norm:0.1945
+[w1] Ep 152 [14909212] ❌ R:-50.10(-33.31) SR:  12% S:199 W:0.11m/s [L0/8 ep153 W[0.0,0.5]] | stuck_on_rebar:dtf=6.0mm,rebar=6.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.93 reproj:0.19/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0247 rmse:0.1496 rmse_norm:0.1496
+[w0] Ep 153 [14909275] ❌ R:-41.84(-33.36) SR:  12% S:128 W:0.05m/s [L0/8 ep154 W[0.0,0.5]] | stuck_on_rebar:dtf=5.7mm,rebar=6.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.89 reproj:0.17/0.28px depth:0.5/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0373 rmse:0.2099 rmse_norm:0.2099
+[w7] Ep 154 [14909402] ❌ R:-47.89(-33.46) SR:  12% S:141 W:0.42m/s [L0/8 ep155 W[0.0,0.5]] | stuck_on_rebar:dtf=6.9mm,rebar=8.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.91 reproj:0.15/0.27px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0445 rmse:0.2062 rmse_norm:0.2062
+[w6] Ep 155 [14909441] ❌ R:-53.52(-33.58) SR:  12% S:131 W:0.45m/s [L0/8 ep156 W[0.0,0.5]] | stuck_on_rebar:dtf=9.3mm,rebar=10.1mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.91 reproj:0.18/0.29px depth:0.5/0.7mm fail:0 -
+       CableLatPred w6 loss:0.0399 rmse:0.2061 rmse_norm:0.2061
+[w2] Ep 156 [14909581] ❌ R:-50.67(-33.69) SR:  12% S:129 W:0.10m/s [L0/8 ep157 W[0.0,0.5]] | stuck_on_rebar:dtf=10.5mm,rebar=11.2mm,z=119.6mm,insert=0.4/25mm,gap=-0.4mm,vz=1.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.92 reproj:0.20/0.31px depth:0.6/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0404 rmse:0.2088 rmse_norm:0.2088
+[w1] Ep 157 [14910172] ❌ R:-45.81(-33.77) SR:  12% S:120 W:0.02m/s [L0/8 ep158 W[0.0,0.5]] | stuck_on_rebar:dtf=6.6mm,rebar=7.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.93 reproj:0.20/0.30px depth:0.7/1.1mm fail:0 -
+       CableLatPred w1 loss:0.0448 rmse:0.2244 rmse_norm:0.2244
+[w3] Ep 158 [14910270] ❌ R:-31.70(-33.76) SR:  12% S:139 W:0.37m/s [L0/8 ep159 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=3.3mm,tilt=0.029,yaw=0.008,insert=16.3/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w3 valid:100.0% cams:2.93 reproj:0.18/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0298 rmse:0.1809 rmse_norm:0.1809
+[w0] Ep 159 [14910275] ✅ R: 34.37(-33.33) SR:  12% S:125 W:0.49m/s [L0/8 ep160 W[0.0,0.5]] | insertion_success:z=104mm,dtf=2.8mm,tilt=0.029,yaw=0.023,insert=15.5/25mm,rebar=3.7/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w0 valid:100.0% cams:2.90 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0387 rmse:0.1832 rmse_norm:0.1832
+[w4] Ep 160 [14910279] ❌ R:-35.38(-33.34) SR:  12% S:149 W:0.32m/s [L0/8 ep161 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.8mm,tilt=0.018,yaw=0.011,insert=20.0/25mm,rebar=3.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.95 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w4 loss:0.0392 rmse:0.2080 rmse_norm:0.2080
+[w5] Ep 161 [14910360] ❌ R:-40.38(-33.39) SR:  12% S:173 W:0.31m/s [L0/8 ep162 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.2mm,tilt=0.005,yaw=0.029,insert=19.8/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.92 reproj:0.19/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0388 rmse:0.2035 rmse_norm:0.2035
+[w6] Ep 162 [14910473] ❌ R:-50.10(-33.49) SR:  12% S:129 W:0.17m/s [L0/8 ep163 W[0.0,0.5]] | stuck_on_rebar:dtf=8.0mm,rebar=8.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w6 valid:100.0% cams:2.91 reproj:0.17/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0412 rmse:0.2044 rmse_norm:0.2044
+[w7] Ep 163 [14910562] ❌ R:-39.08(-33.52) SR:  12% S:145 W:0.09m/s [L0/8 ep164 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.9mm,tilt=0.023,yaw=0.010,insert=19.0/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.91 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0442 rmse:0.2106 rmse_norm:0.2106
+[w2] Ep 164 [14910605] ❌ R:-43.92(-33.59) SR:  12% S:128 W:0.13m/s [L0/8 ep165 W[0.0,0.5]] | stuck_on_rebar:dtf=5.7mm,rebar=6.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.93 reproj:0.19/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0307 rmse:0.1817 rmse_norm:0.1817
+[w0] Ep 165 [14911219] ✅ R: 36.37(-33.17) SR:  13% S:118 W:0.24m/s [L0/8 ep166 W[0.0,0.5]] | insertion_success:z=105mm,dtf=3.6mm,tilt=0.023,yaw=0.012,insert=14.9/25mm,rebar=4.1/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w0 valid:100.0% cams:2.90 reproj:0.18/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0334 rmse:0.1892 rmse_norm:0.1892
+[w3] Ep 166 [14911262] ❌ R:-44.52(-33.23) SR:  13% S:124 W:0.32m/s [L0/8 ep167 W[0.0,0.5]] | stuck_on_rebar:dtf=6.5mm,rebar=6.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.91 reproj:0.18/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w3 loss:0.0437 rmse:0.2186 rmse_norm:0.2186
+[w4] Ep 167 [14911311] ❌ R:-32.94(-33.23) SR:  12% S:129 W:0.06m/s [L0/8 ep168 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=2.7mm,tilt=0.020,yaw=0.015,insert=15.1/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.89 reproj:0.19/0.34px depth:0.5/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0363 rmse:0.1840 rmse_norm:0.1840
+[w5] Ep 168 [14911440] ❌ R:-32.26(-33.23) SR:  12% S:135 W:0.10m/s [L0/8 ep169 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=1.7mm,tilt=0.032,yaw=0.027,insert=14.8/25mm,rebar=2.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.91 reproj:0.20/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w5 loss:0.0387 rmse:0.1987 rmse_norm:0.1987
+[w2] Ep 169 [14911637] ❌ R:-48.74(-33.32) SR:  12% S:129 W:0.05m/s [L0/8 ep170 W[0.0,0.5]] | stuck_on_rebar:dtf=7.0mm,rebar=7.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w2 valid:100.0% cams:2.90 reproj:0.18/0.30px depth:0.5/0.8mm fail:0 -
+       CableLatPred w2 loss:0.0471 rmse:0.2194 rmse_norm:0.2194
+[w1] Ep 170 [14911772] ❌ R:-38.95(-33.35) SR:  12% S:200 W:0.31m/s [L0/8 ep171 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.5mm,tilt=0.033,yaw=0.008,insert=14.7/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.94 reproj:0.20/0.34px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0223 rmse:0.1476 rmse_norm:0.1476
+[w7] Ep 171 [14911810] ❌ R:-50.68(-33.45) SR:  12% S:156 W:0.42m/s [L0/8 ep172 W[0.0,0.5]] | stuck_on_rebar:dtf=13.2mm,rebar=14.8mm,z=119.4mm,insert=0.6/25mm,gap=-0.6mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.92 reproj:0.18/0.29px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0294 rmse:0.1808 rmse_norm:0.1808
+[w0] Ep 172 [14912203] ❌ R:-44.68(-33.52) SR:  12% S:123 W:0.41m/s [L0/8 ep173 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=8.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.90 reproj:0.21/0.33px depth:0.6/0.9mm fail:0 -
+       CableLatPred w0 loss:0.0349 rmse:0.1919 rmse_norm:0.1919
+[w3] Ep 173 [14912358] ✅ R: 40.36(-33.09) SR:  13% S:137 W:0.25m/s [L0/8 ep174 W[0.0,0.5]] | insertion_success:z=103mm,dtf=1.7mm,tilt=0.034,yaw=0.003,insert=16.7/25mm,rebar=1.9/4.5mm,floor=1,xy_tol=5.0mm
+       Vision w3 valid:100.0% cams:2.93 reproj:0.19/0.31px depth:0.5/0.9mm fail:0 -
+       CableLatPred w3 loss:0.0336 rmse:0.1856 rmse_norm:0.1856
+[w4] Ep 174 [14912391] ❌ R:-49.22(-33.18) SR:  13% S:135 W:0.35m/s [L0/8 ep175 W[0.0,0.5]] | stuck_on_rebar:dtf=8.4mm,rebar=9.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w4 valid:100.0% cams:2.92 reproj:0.20/0.30px depth:0.6/0.8mm fail:0 -
+       CableLatPred w4 loss:0.0334 rmse:0.1827 rmse_norm:0.1827
+[w5] Ep 175 [14912552] ❌ R:-31.16(-33.17) SR:  12% S:139 W:0.26m/s [L0/8 ep176 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=2.2mm,tilt=0.024,yaw=0.014,insert=19.1/25mm,rebar=2.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.92 reproj:0.20/0.32px depth:0.5/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0291 rmse:0.1762 rmse_norm:0.1762
+[w2] Ep 176 [14912645] ❌ R:-35.68(-33.19) SR:  12% S:126 W:0.32m/s [L0/8 ep177 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=2.4mm,tilt=0.035,yaw=0.023,insert=18.3/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.90 reproj:0.19/0.34px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0417 rmse:0.2052 rmse_norm:0.2052
+[w1] Ep 177 [14912788] ❌ R:-29.02(-33.16) SR:  12% S:127 W:0.29m/s [L0/8 ep178 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=1.1mm,tilt=0.035,yaw=0.021,insert=16.0/25mm,rebar=2.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w1 valid:100.0% cams:2.92 reproj:0.20/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w1 loss:0.0360 rmse:0.1903 rmse_norm:0.1903
+[w7] Ep 178 [14912794] ❌ R:-47.55(-33.24) SR:  12% S:123 W:0.26m/s [L0/8 ep179 W[0.0,0.5]] | stuck_on_rebar:dtf=6.5mm,rebar=6.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w7 valid:100.0% cams:2.91 reproj:0.18/0.30px depth:0.6/0.9mm fail:0 -
+       CableLatPred w7 loss:0.0487 rmse:0.2366 rmse_norm:0.2366
+[w6] Ep 179 [14912865] ❌ R:-58.71(-33.38) SR:  12% S:299 W:0.03m/s [L0/8 ep180 W[0.0,0.5]] | timeout:dtf=11.8mm,z=117mm,tilt=0.074,yaw=0.059
+       Vision w6 valid:100.0% cams:2.96 reproj:0.16/0.26px depth:0.5/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0275 rmse:0.1802 rmse_norm:0.1802
+[w0] Ep 180 [14913315] ❌ R:-42.99(-33.44) SR:  12% S:139 W:0.46m/s [L0/8 ep181 W[0.0,0.5]] | stuck_on_rebar:dtf=7.7mm,rebar=9.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.94 reproj:0.19/0.28px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0256 rmse:0.1657 rmse_norm:0.1657
+[w3] Ep 181 [14913414] ❌ R:-43.13(-33.49) SR:  12% S:132 W:0.50m/s [L0/8 ep182 W[0.0,0.5]] | stuck_on_rebar:dtf=6.9mm,rebar=7.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w3 valid:100.0% cams:2.92 reproj:0.18/0.31px depth:0.5/0.7mm fail:0 -
+       CableLatPred w3 loss:0.0345 rmse:0.1899 rmse_norm:0.1899
+[w4] Ep 182 [14913463] ❌ R:-32.99(-33.49) SR:  12% S:134 W:0.07m/s [L0/8 ep183 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.4mm,tilt=0.014,yaw=0.003,insert=19.0/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w4 valid:100.0% cams:2.91 reproj:0.19/0.32px depth:0.6/0.9mm fail:0 -
+       CableLatPred w4 loss:0.0351 rmse:0.1854 rmse_norm:0.1854
+[w5] Ep 183 [14913552] ❌ R:-34.78(-33.50) SR:  12% S:125 W:0.47m/s [L0/8 ep184 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=2.5mm,tilt=0.029,yaw=0.038,insert=16.5/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w5 valid:100.0% cams:2.90 reproj:0.18/0.29px depth:0.6/0.8mm fail:0 -
+       CableLatPred w5 loss:0.0361 rmse:0.1934 rmse_norm:0.1934
+[w2] Ep 184 [14913701] ❌ R:-38.04(-33.52) SR:  12% S:132 W:0.01m/s [L0/8 ep185 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.4mm,tilt=0.019,yaw=0.017,insert=19.1/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w2 valid:100.0% cams:2.93 reproj:0.19/0.31px depth:0.6/0.9mm fail:0 -
+       CableLatPred w2 loss:0.0438 rmse:0.2207 rmse_norm:0.2207
+[w6] Ep 185 [14913729] ❌ R:-30.04(-33.50) SR:  12% S:108 W:0.37m/s [L0/8 ep186 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.6mm,tilt=0.026,yaw=0.026,insert=16.0/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w6 valid:100.0% cams:2.91 reproj:0.20/0.33px depth:0.6/0.8mm fail:0 -
+       CableLatPred w6 loss:0.0389 rmse:0.2076 rmse_norm:0.2076
+[w1] Ep 186 [14913812] ❌ R:-42.90(-33.55) SR:  12% S:128 W:0.02m/s [L0/8 ep187 W[0.0,0.5]] | stuck_on_rebar:dtf=7.3mm,rebar=9.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w1 valid:100.0% cams:2.95 reproj:0.18/0.30px depth:0.5/0.7mm fail:0 -
+       CableLatPred w1 loss:0.0354 rmse:0.1992 rmse_norm:0.1992
+[w7] Ep 187 [14913818] ❌ R:-39.07(-33.58) SR:  12% S:128 W:0.19m/s [L0/8 ep188 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.6mm,tilt=0.020,yaw=0.005,insert=14.9/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       Vision w7 valid:100.0% cams:2.91 reproj:0.17/0.31px depth:0.5/0.8mm fail:0 -
+       CableLatPred w7 loss:0.0409 rmse:0.2015 rmse_norm:0.2015
+[w0] Ep 188 [14914363] ❌ R:-50.96(-33.67) SR:  12% S:131 W:0.14m/s [L0/8 ep189 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=7.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       Vision w0 valid:100.0% cams:2.89 reproj:0.19/0.32px depth:0.6/0.8mm fail:0 -
+       CableLatPred w0 loss:0.0413 rmse:0.2140 rmse_norm:0.2140

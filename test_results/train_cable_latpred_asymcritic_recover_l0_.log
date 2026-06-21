@@ -1,0 +1,4 @@
+Traceback (most recent call last):
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 22, in <module>
+    import numpy as np
+ModuleNotFoundError: No module named 'numpy'

@@ -1,0 +1,91 @@
+[profile] descent_10hz_joint_pred_target_random_ft: Continue the best 10Hz predictor+residual PPO with randomized start/target XY for arm dead-zone robustness.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_004655
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+  [v11 Path 3] 启用 vectorized PPO with n_envs=8
+
+============================================================
+  PPO [VEC n_envs=8] | DESCENT | 300000 steps | saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_004655
+============================================================
+
+  Resumed: saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_090431/ckpt_best.pt
+  [Adam reset] @ step 14277318 (reset_optimizer_on_resume)
+[VecEnv] SubprocVecEnv 启动 8 个 worker (method=spawn)
+  [Curriculum-descent] start at L0/8, wind=0.50/10.0m/s
+  [ObsPredictor-VEC] enabled: true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent, predictors=8
+  [ObsPredictor-VEC] resumed from saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_090431/ckpt_best_obs_predictor.pt
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 1e0yzynd
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_004655/wandb/run-20260607_004736-1e0yzynd
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo_vec
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/1e0yzynd
+  Resumed checkpoint progress: ts=14277318 (new log dir, no CSV to append)
+  [Resume target] descent-ppo-vec: new log dir starts at ts=14277318; treating --timesteps=300000 as additional steps -> target_total_steps=14577318
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[VecEnv] SubprocVecEnv 关闭 8 个 worker
+wandb: updating run metadata
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml
+wandb: 🚀 View run descent_ppo_vec at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/1e0yzynd
+wandb: ⭐️ View project at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_004655/wandb/run-20260607_004736-1e0yzynd/logs
+Traceback (most recent call last):
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 4454, in <module>
+    train(args.phase, ld, algo=args.algo, custom_config=cc or None,
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 3990, in train
+    return train_ppo_vec(phase, log_dir, config,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 2984, in train_ppo_vec
+    results = [vec._check_recv(vec.remotes[i].recv(), i)
+              ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 2984, in <listcomp>
+    results = [vec._check_recv(vec.remotes[i].recv(), i)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/vec_env.py", line 803, in _check_recv
+    raise RuntimeError(f"Worker {idx} error: {x[1]}")
+RuntimeError: Worker 6 error: Worker 6 crashed: 'success_bonus'
+Traceback (most recent call last):
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/vec_env.py", line 320, in _vec_env_worker
+    reward, done, success, ri = compute_descent_reward(
+                                ^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/phase_reward.py", line 1032, in compute_descent_reward
+    r_bonus = float(rcfg["success_bonus"])
+                    ~~~~^^^^^^^^^^^^^^^^^
+KeyError: 'success_bonus'
+

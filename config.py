@@ -52,6 +52,15 @@ DEFAULT_CONFIG = {
         "default_target_xy":  [-0.3, 0.2],
         "init_position_range": 0.02,
         "init_velocity_scale": 0.08,
+        # Optional endpoint domain randomization. Defaults are disabled so the
+        # original fixed task remains unchanged unless a training profile opts in.
+        "target_xy_randomize": False,
+        "target_xy_range":     [0.0, 0.0],
+        "target_xy_min_start_dist": 0.35,
+        "target_xy_min_norm":  0.18,
+        "target_xy_workspace_margin": 0.12,
+        "target_xy_dead_zones": [],
+        "target_xy_max_tries": 64,
     },
 
     # ==========================================================================
@@ -189,11 +198,56 @@ DEFAULT_CONFIG = {
         "num_segments":    10,
         "segment_length":  0.04,
         "damping":         0.05,
-        "capsule_radius":  0.004,
+        # Visual/physical radius of each rope capsule. Keep it visible in
+        # RGB-D renders, but closer to a lab-scale lifting cable.
+        "capsule_radius":  0.002,
         "segment_mass":    0.01,
         "plate_half_size": [0.05, 0.05, 0.01],
         "plate_mass":      0.1,
         "hook_offset":     0.05,
+    },
+
+    # Visual-only rope markers for sim2real sensing studies. These are not
+    # policy inputs by default; they are rendered and exposed through a
+    # diagnostic API so we can verify camera coverage before using marker data
+    # as CableLatPred supervision.
+    "rope_markers": {
+        "enabled":          True,
+        "markers_per_rope": 5,
+        "lower_half_only":  True,
+        "position_fraction": 0.55,
+        "marker_radius":   0.004,
+        "ring_radius":     0.006,
+        "geom_group":      2,
+        "site_group":      2,
+        "visibility_depth_tolerance": 0.035,
+        "visibility_depth_window": 2,
+        # Feature source used by CableLatPred when rope marker features are
+        # enabled. "site" is the oracle MuJoCo site position baseline; "rgbd"
+        # uses ideal marker-center projection + rendered depth back-projection;
+        # "opencv_rgbd" detects colored marker blobs in rendered RGB first.
+        "feature_source":   "site",
+        "feature_pos_noise_std": [0.0, 0.0, 0.0],
+        "feature_dropout_prob": 0.0,
+        "feature_outlier_prob": 0.0,
+        "feature_outlier_std": 0.0,
+        "feature_pixel_noise_std": 0.0,
+        "feature_quantize_px": False,
+        "opencv_hue_tolerance": 12,
+        "opencv_min_saturation": 70,
+        "opencv_min_value": 70,
+        "opencv_min_area_px": 4.0,
+        "opencv_max_area_px": 2000.0,
+        "opencv_morph_kernel": 3,
+        "opencv_cluster_px": 16.0,
+        "opencv_world_cluster_m": 0.025,
+        "opencv_depth_window": 2,
+        "colors": {
+            "rope_fl": [1.0, 0.15, 0.15, 1.0],
+            "rope_fr": [0.10, 0.95, 0.20, 1.0],
+            "rope_rl": [1.0, 0.85, 0.05, 1.0],
+            "rope_rr": [0.95, 0.20, 1.0, 1.0],
+        },
     },
 
     # ==========================================================================
@@ -378,6 +432,13 @@ DEFAULT_CONFIG = {
     # 方案: 用 2 层 MLP encoder 压缩到 32 维, 再与其他 obs concat
     # 文献: Peng et al. 2017 (privileged info), Miki et al. 2022 (encoder for terrain)
     "cable_encoder": {
+        "enabled":               True,
+        # Set zero_obs=True to keep the old policy/network width but remove
+        # cable information. For checkpoint-compatible ablations, fill the
+        # pre-normalized cable features with obs_norm.mean so normalized cable
+        # inputs are neutral zeros instead of an out-of-distribution constant.
+        "zero_obs":              False,
+        "zero_obs_fill":         "obs_norm_mean",
         "raw_dim":               240,   # 4 根 × 10 段 × 6 维
         "hidden_dim":            128,   # encoder 隐藏层
         "output_dim":            32,    # encoder 输出维度 (接入 actor/critic)
@@ -397,7 +458,95 @@ DEFAULT_CONFIG = {
     },
 
     # ==========================================================================
-    # 17e. Observation Predictor (real-device latency model)
+    # 17e. RGB-D Vision Observation Model
+    # ==========================================================================
+    # Real-device alignment will not see MuJoCo privileged prefab state. When
+    # enabled, the policy/controller receives payload position, velocity, tilt
+    # and yaw through a fused three-camera RGB-D measurement. The simulator's
+    # true state is still available to physics, contacts, reward and diagnostics.
+    "vision": {
+        "enabled":               False,
+        # opencv_rgbd: render/read RGB-D frames, detect payload markers, solve
+        # camera pose, and transform to lab/world coordinates. truth_noise is
+        # kept only as an explicit debug mode.
+        "source":                "opencv_rgbd",
+        "allow_truth_fallback":  False,
+        "apply_to_env_obs":      True,
+        "render_width":          640,
+        "render_height":         480,
+        "reuse_rendered_rgbd_frames": True,
+        "measurement_period_steps": 1,
+        "latency_steps":         1,
+        "processing_delay_steps": 1,
+        "dropout_prob":          0.01,
+        "outlier_prob":          0.002,
+        "outlier_pos_std":       0.030,
+        "position_noise_std":    [0.0030, 0.0030, 0.0045],
+        "depth_noise_per_m":     0.0015,
+        "velocity_noise_std":    [0.010, 0.010, 0.014],
+        "tilt_noise_std":        0.010,
+        "yaw_noise_std":         0.012,
+        "position_bias_std":     [0.0040, 0.0040, 0.0060],
+        "velocity_bias_std":     [0.0030, 0.0030, 0.0040],
+        "tilt_bias_std":         0.004,
+        "yaw_bias_std":          0.006,
+        "velocity_lowpass_alpha": 0.55,
+        "min_active_cameras":    1,
+        "occlusion_penalty":     0.35,
+        "initial_payload_z":      0.25,
+        "opencv": {
+            # AprilTag dictionaries are available through OpenCV's aruco module
+            # in opencv-contrib-python. The fallback keeps older builds usable.
+            "dictionary":              "DICT_APRILTAG_36h11",
+            "dictionary_fallback":     "DICT_4X4_50",
+            "corner_refine":           True,
+            "max_reprojection_error_px": 8.0,
+            "max_depth_rmse_m":        0.050,
+            "depth_translation_refine": True,
+            "depth_window":            2,
+            "min_detected_markers":    1,
+            "markers": [
+                {
+                    "id": 23,
+                    "length": 0.080,
+                    # Side-mounted tag on the payload +Y face. This avoids
+                    # rope/lift-site interference on the top face while keeping
+                    # the marker rigidly attached to the payload frame.
+                    "center": [0.0, 0.052, 0.020],
+                    "x_axis": [-1.0, 0.0, 0.0],
+                    "y_axis": [0.0, 0.0, 1.0],
+                    "board_margin": 0.006,
+                },
+            ],
+        },
+        "render_markers":        True,
+        "marker_render_mode":    "geom_grid",
+        "marker_board_margin":   0.008,
+        "debug_dump_dir":        "",
+        "debug_dump_frames":     0,
+        "debug_dump_start_step":  0,
+        "debug_dump_end_step":    -1,
+        "show_camera_models":    True,
+        "camera_model_geom_group": 1,
+        "hide_sites_in_vision":   True,
+        "hide_tendons_in_vision": True,
+        "camera_lookat":         [-0.30, 0.252, 0.270],
+        "marker_texture_px":     512,
+        "cameras": [
+            {"name": "rgbd_front", "pos": [-0.30,  0.82, 0.42],
+             "euler": [0.0, 1.15, 1.5708], "fovy": 52.0,
+             "max_range": 1.2},
+            {"name": "rgbd_left",  "pos": [-0.62,  0.68, 0.46],
+             "euler": [0.0, 1.10, 3.1416], "fovy": 55.0,
+             "max_range": 1.2},
+            {"name": "rgbd_right", "pos": [ 0.02,  0.68, 0.46],
+             "euler": [0.0, 1.10, 0.0], "fovy": 58.0,
+             "max_range": 1.2},
+        ],
+    },
+
+    # ==========================================================================
+    # 17f. Observation Predictor (real-device latency model)
     # ==========================================================================
     # When enabled, RL/base controllers receive a true env observation at step
     # 0, 2, 4, ... and an LSTM-predicted raw env observation at intermediate
@@ -456,6 +605,41 @@ DEFAULT_CONFIG = {
         "include_obs_age":          True,
         "action_history_steps":     4,
         "action_dim":               7,
+    },
+    "asymmetric_critic": {
+        "enabled":                  False,
+        "critic_obs_dim":           76,
+        "cable_output_dim":         32,
+        "cable_encoder_ckpt":       "",
+    },
+    "adaptation_history": {
+        "enabled":                  False,
+        "action_history_steps":     8,
+        "action_dim":               7,
+    },
+    "cable_latent_predictor": {
+        # Separate from observation_predictor. ObsPred fills missing/low-rate
+        # visible observations; CableLatPred estimates the frozen 32D
+        # CableEncoder latent from deployable visible observations/history.
+        "enabled":                  False,
+        "train_enabled":            True,
+        "latent_dim":               32,
+        "action_dim":               7,
+        "hidden_dim":               128,
+        "n_layers":                 1,
+        "dropout":                  0.0,
+        "lr":                       3e-4,
+        "huber_coef":               1.0,
+        "mse_coef":                 0.1,
+        "grad_clip":                1.0,
+        "visible_norm_clip":        8.0,
+        "action_norm_clip":         2.0,
+        "latent_norm_clip":         8.0,
+        "latent_scale":             1.0,
+        "use_rope_marker_features": False,
+        "rope_marker_feature_reference": "ee",
+        "rope_marker_feature_source": "",
+        "checkpoint":               "",
     },
     "cruise_z_pid": {
         "kp_z":               3.0,
@@ -968,6 +1152,312 @@ DEFAULT_CONFIG = {
                 },
                 "wind_obs": {
                     "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_10hz_joint_pred_target_random_ft": {
+            "description": "Continue the best 10Hz predictor+residual PPO with randomized start/target XY for arm dead-zone robustness.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_10hz_joint_pred_target_random_ft",
+            "resume_ckpt": "saves/descent_ppo_10hz_joint_pred_nclatent_refine_strict_20260602_194843/ckpt_latest.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 2_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "ppo": {
+                    "lr_actor": 3e-5,
+                    "lr_critic": 8e-5,
+                },
+                "task": {
+                    "init_position_range": 0.035,
+                    "target_xy_randomize": True,
+                    "target_xy_range": [0.060, 0.060],
+                    "target_xy_min_start_dist": 0.45,
+                    "target_xy_min_norm": 0.24,
+                    "target_xy_workspace_margin": 0.12,
+                    "target_xy_dead_zones": [
+                        [0.0, 0.0, 0.20],
+                    ],
+                    "target_xy_max_tries": 128,
+                },
+                "descent_rl": {
+                    "init_xy_range": 0.030,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "checkpoint": "saves/descent_ppo_10hz_joint_pred_nclatent_refine_strict_20260602_194843/ckpt_latest_obs_predictor.pt",
+                    "target_mode": "non_cable_latent",
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "insertion": {
+                    "strict_lucky_reject_always": True,
+                    "train_reject_lucky_rebar_insert": True,
+                    "lucky_reject_auto_enable": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_levels": [
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 0.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 1.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 1.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 2.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 3.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 5.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 6.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 8.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 10.0},
+                    ],
+                    "descent_start_level": 5,
+                    "descent_start_wind": 5.0,
+                    "descent_ramp_sr_threshold": 0.60,
+                    "descent_ramp_warmup_sr_threshold": 0.50,
+                    "descent_ramp_warmup_scale": 0.05,
+                    "descent_ramp_min_window": 100,
+                },
+            },
+        },
+        "descent_10hz_vision_pred_small_endpoint_fast_zgate_ft": {
+            "description": "Fine-tune the 10Hz RGB-D vision+predictor policy with small endpoint randomization and conservative z descent gates to reduce rebar-top sticking.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft",
+            "resume_ckpt": "saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_005307/ckpt_latest.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 300_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "ppo": {
+                    "lr_actor": 2e-5,
+                    "lr_critic": 6e-5,
+                },
+                "task": {
+                    "init_position_range": 0.035,
+                    "target_xy_randomize": True,
+                    "target_xy_range": [0.010, 0.010],
+                    "target_xy_min_start_dist": 0.45,
+                    "target_xy_min_norm": 0.24,
+                    "target_xy_workspace_margin": 0.12,
+                    "target_xy_dead_zones": [
+                        [0.0, 0.0, 0.20],
+                    ],
+                    "target_xy_max_tries": 128,
+                },
+                "vision": {
+                    "enabled": True,
+                    "measurement_period_steps": 2,
+                    "latency_steps": 1,
+                    "processing_delay_steps": 1,
+                },
+                "descent_rl": {
+                    "init_xy_range": 0.030,
+                    # Conservative z descent gates: require tighter XY alignment
+                    # before full descent, while keeping a small outer trickle.
+                    "z_soft_gate_full": 0.008,
+                    "z_hard_gate": 0.020,
+                    "z_min_speed_frac": 0.10,
+                    "reward": {
+                        "action_rms_free": 0.40,
+                        "action_magnitude_coef": 0.18,
+                        "alignment_z_gate": 0.007,
+                        "premature_descent_xy_gate": 0.007,
+                    },
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "checkpoint": "saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_ft_20260607_005307/ckpt_latest_obs_predictor.pt",
+                    "target_mode": "non_cable_latent",
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "insertion": {
+                    "strict_lucky_reject_always": True,
+                    "train_reject_lucky_rebar_insert": True,
+                    "lucky_reject_auto_enable": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_levels": [
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 0.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 1.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 1.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 2.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 3.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 5.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 6.5},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 8.0},
+                        {"init_xy": 0.030, "init_vel": 0.012, "init_tilt": 0.005, "xy_tol": 0.005,
+                         "wind_max": 10.0},
+                    ],
+                    "descent_start_level": 0,
+                    "descent_start_wind": 0.5,
+                    "descent_ramp_sr_threshold": 0.60,
+                    "descent_ramp_warmup_sr_threshold": 0.50,
+                    "descent_ramp_warmup_scale": 0.05,
+                    "descent_ramp_min_window": 100,
+                },
+            },
+        },
+        "descent_10hz_vision_zero_cable_ablation_ft": {
+            "description": "Resume a strong 10Hz descent policy with RGB-D vision state and zeroed cable features for checkpoint-compatible cable ablation.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_10hz_vision_zero_cable_ablation_ft",
+            "resume_ckpt": "saves/descent_ppo_10hz_joint_pred_nclatent_refine_strict_20260602_194843/ckpt_latest.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 1_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "ppo": {
+                    "lr_actor": 2e-5,
+                    "lr_critic": 6e-5,
+                },
+                "vision": {
+                    "enabled": True,
+                    "measurement_period_steps": 1,
+                    "latency_steps": 1,
+                    "processing_delay_steps": 1,
+                    "dropout_prob": 0.01,
+                },
+                "cable_encoder": {
+                    "enabled": True,
+                    "zero_obs": True,
+                    "output_dim": 32,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_start_level": 5,
+                    "descent_start_wind": 5.0,
+                    "descent_ramp_sr_threshold": 0.60,
+                    "descent_ramp_warmup_sr_threshold": 0.50,
+                    "descent_ramp_warmup_scale": 0.05,
+                    "descent_ramp_min_window": 100,
+                },
+            },
+        },
+        "descent_10hz_vision_no_cable_scratch": {
+            "description": "Train a true no-cable-observation descent policy from vision-localized payload state; obs_dim drops from 76 to 44.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ppo_10hz_vision_no_cable_scratch",
+            "config": {
+                "train": {
+                    "total_timesteps": 3_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "obs_dim": 44,
+                },
+                "cable_encoder": {
+                    "enabled": False,
+                    "zero_obs": True,
+                    "output_dim": 0,
+                },
+                "vision": {
+                    "enabled": True,
+                    "measurement_period_steps": 1,
+                    "latency_steps": 1,
+                    "processing_delay_steps": 1,
+                    "dropout_prob": 0.01,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+                "curriculum": {
+                    "descent_start_level": 0,
+                    "descent_start_wind": 0.5,
+                    "descent_ramp_sr_threshold": 0.65,
+                    "descent_ramp_warmup_sr_threshold": 0.55,
+                    "descent_ramp_warmup_scale": 0.05,
+                    "descent_ramp_min_window": 100,
                 },
             },
         },

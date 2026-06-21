@@ -79,6 +79,18 @@ def delay_mdp_extra_dim(config):
     return int(dim)
 
 
+def adaptation_history_extra_dim(config):
+    """Extra deployable action-history features for no-cable adaptation."""
+    if bool(config.get("cable_latent_predictor", {}).get("enabled", False)):
+        return 0
+    cfg = config.get("adaptation_history", {})
+    if not bool(cfg.get("enabled", False)):
+        return 0
+    hist_steps = max(0, int(cfg.get("action_history_steps", 8)))
+    action_dim = max(0, int(cfg.get("action_dim", 7)))
+    return int(hist_steps * action_dim)
+
+
 # ==============================================================================
 # LSTM 用观测历史缓冲
 # ==============================================================================
@@ -102,6 +114,24 @@ class ObsHistoryBuffer:
 # ==============================================================================
 # [v14.0] Cable Encoder — 压缩 240 维绳索 obs 到低维隐特征
 # ==============================================================================
+
+def _zero_cable_feature(agent, core_size):
+    out_dim = int(getattr(agent, "_cable_out_dim", 0))
+    if out_dim <= 0:
+        return np.zeros(0, dtype=np.float32)
+
+    fill_mode = str(getattr(agent, "_zero_cable_fill", "obs_norm_mean")).lower()
+    if fill_mode in ("obs_norm_mean", "norm_mean", "mean"):
+        obs_norm = getattr(agent, "obs_norm", None)
+        use_obs_norm = bool(getattr(agent, "use_obs_norm", False))
+        if use_obs_norm and obs_norm is not None and int(getattr(obs_norm, "n", 0)) > 0:
+            start = int(core_size)
+            end = start + out_dim
+            mean = getattr(obs_norm, "mean", None)
+            if mean is not None and len(mean) >= end:
+                return np.asarray(mean[start:end], dtype=np.float32).copy()
+    return np.zeros(out_dim, dtype=np.float32)
+
 
 class CableEncoder(nn.Module):
     """
@@ -450,14 +480,17 @@ class PhaseCritic(nn.Module):
 
 class SequenceRolloutBuffer:
     def __init__(self, n_steps, obs_dim, action_dim, seq_len, device,
-                 cable_raw_dim=240):
+                 cable_raw_dim=240, critic_obs_dim=None):
         self.n_steps = n_steps; self.obs_dim = obs_dim
+        self.critic_obs_dim = int(critic_obs_dim or obs_dim)
         self.action_dim = action_dim; self.seq_len = seq_len
         self.device = device
         self._cable_raw_dim = cable_raw_dim  # [v14.1]
         self.clear()
     def clear(self):
         self.obs_seqs   = np.zeros((self.n_steps, self.seq_len, self.obs_dim), np.float32)
+        self.critic_obs_seqs = np.zeros(
+            (self.n_steps, self.seq_len, self.critic_obs_dim), np.float32)
         self.actions    = np.zeros((self.n_steps, self.action_dim), np.float32)
         self.rewards    = np.zeros(self.n_steps, np.float32)
         self.dones      = np.zeros(self.n_steps, np.float32)
@@ -472,11 +505,19 @@ class SequenceRolloutBuffer:
             (self.n_steps, self.seq_len, self._cable_raw_dim), np.float32)
         self.ptr = 0; self.full = False
     def add(self, obs_seq, action, reward, done, value, log_prob,
-            cable_raw_seq=None, next_value=None, env_id=-1):
+            cable_raw_seq=None, next_value=None, env_id=-1,
+            critic_obs_seq=None):
         if self.ptr >= self.n_steps:
             self.full = True
             return False
         i = self.ptr; self.obs_seqs[i] = obs_seq
+        if critic_obs_seq is None:
+            if self.critic_obs_dim == self.obs_dim:
+                critic_obs_seq = obs_seq
+            else:
+                critic_obs_seq = np.zeros(
+                    (self.seq_len, self.critic_obs_dim), np.float32)
+        self.critic_obs_seqs[i] = critic_obs_seq
         self.actions[i] = action
         self.rewards[i] = reward; self.dones[i] = float(done)
         self.values[i] = value; self.log_probs[i] = log_prob
@@ -519,6 +560,7 @@ class SequenceRolloutBuffer:
         for start in range(0, self.n_steps, batch_size):
             idx = indices[start:start+batch_size]
             yield (np_to_tensor(self.obs_seqs[idx], self.device),
+                   np_to_tensor(self.critic_obs_seqs[idx], self.device),
                    np_to_tensor(self.actions[idx], self.device),
                    np_to_tensor(self.returns[idx], self.device).view(-1, 1),
                    np_to_tensor(adv[idx], self.device),
@@ -528,13 +570,15 @@ class SequenceRolloutBuffer:
 
 class RolloutBuffer:
     def __init__(self, n_steps, obs_dim, action_dim, device,
-                 cable_raw_dim=240):
+                 cable_raw_dim=240, critic_obs_dim=None):
         self.n_steps = n_steps; self.obs_dim = obs_dim
+        self.critic_obs_dim = int(critic_obs_dim or obs_dim)
         self.action_dim = action_dim; self.device = device
         self._cable_raw_dim = cable_raw_dim  # [v14.1]
         self.clear()
     def clear(self):
         self.obs        = np.zeros((self.n_steps, self.obs_dim), np.float32)
+        self.critic_obs = np.zeros((self.n_steps, self.critic_obs_dim), np.float32)
         self.actions    = np.zeros((self.n_steps, self.action_dim), np.float32)
         self.rewards    = np.zeros(self.n_steps, np.float32)
         self.dones      = np.zeros(self.n_steps, np.float32)
@@ -548,11 +592,16 @@ class RolloutBuffer:
             (self.n_steps, self._cable_raw_dim), np.float32)  # [v14.1]
         self.ptr = 0; self.full = False
     def add(self, obs, action, reward, done, value, log_prob,
-            cable_raw=None, next_value=None, env_id=-1):
+            cable_raw=None, next_value=None, env_id=-1, critic_obs=None):
         if self.ptr >= self.n_steps:
             self.full = True
             return False
-        i = self.ptr; self.obs[i] = obs; self.actions[i] = action
+        i = self.ptr; self.obs[i] = obs
+        if critic_obs is None:
+            critic_obs = obs if self.critic_obs_dim == self.obs_dim else np.zeros(
+                self.critic_obs_dim, np.float32)
+        self.critic_obs[i] = critic_obs
+        self.actions[i] = action
         self.rewards[i] = reward
         self.dones[i] = float(done); self.values[i] = value; self.log_probs[i] = log_prob
         if next_value is not None:
@@ -594,6 +643,7 @@ class RolloutBuffer:
         for start in range(0, self.n_steps, batch_size):
             idx = indices[start:start+batch_size]
             yield (np_to_tensor(self.obs[idx], self.device),
+                   np_to_tensor(self.critic_obs[idx], self.device),
                    np_to_tensor(self.actions[idx], self.device),
                    np_to_tensor(self.returns[idx], self.device).view(-1, 1),
                    np_to_tensor(adv[idx], self.device),
@@ -619,7 +669,20 @@ class PPOPhaseAgent:
         phase_cfg = config[f"{phase_name}_rl"]; cfg_ppo = config["ppo"]
         self.base_obs_dim = int(phase_cfg["obs_dim"])
         self.delay_mdp_extra_dim = delay_mdp_extra_dim(config)
-        self.obs_dim = self.base_obs_dim + self.delay_mdp_extra_dim
+        self.adaptation_history_extra_dim = adaptation_history_extra_dim(config)
+        self.obs_dim = (self.base_obs_dim + self.delay_mdp_extra_dim +
+                        self.adaptation_history_extra_dim)
+        ac_cfg = config.get("asymmetric_critic", {})
+        self.use_asymmetric_critic = bool(ac_cfg.get("enabled", False))
+        default_critic_base_dim = int(DEFAULT_CONFIG.get(
+            f"{phase_name}_rl", {}).get("obs_dim", self.base_obs_dim))
+        self.critic_base_obs_dim = int(ac_cfg.get(
+            "critic_obs_dim", ac_cfg.get(
+                "critic_base_obs_dim", default_critic_base_dim)))
+        self.critic_obs_dim = (
+            self.critic_base_obs_dim + self.delay_mdp_extra_dim +
+            self.adaptation_history_extra_dim
+        ) if self.use_asymmetric_critic else self.obs_dim
         self.action_dim = int(phase_cfg["action_dim"])
         self.gamma = float(cfg_ppo["gamma"])
         self.gae_lambda = float(cfg_ppo["gae_lambda"])
@@ -651,6 +714,10 @@ class PPOPhaseAgent:
         self.use_obs_norm = bool(cfg_ppo["use_obs_norm"])
         self.obs_norm = RunningMeanStd(
             shape=(self.obs_dim,),
+            warm_start=int(cfg_ppo.get("obs_norm_warm_start", 5000)),
+            clip=float(cfg_ppo["obs_norm_clip"]))
+        self.critic_obs_norm = RunningMeanStd(
+            shape=(self.critic_obs_dim,),
             warm_start=int(cfg_ppo.get("obs_norm_warm_start", 5000)),
             clip=float(cfg_ppo["obs_norm_clip"]))
         self._freeze_obs_norm = bool(cfg_ppo.get("freeze_obs_norm", False))
@@ -715,11 +782,11 @@ class PPOPhaseAgent:
                 log_std_min=_log_std_min,
                 log_std_max=_log_std_max).to(self.device)
             self.critic = LSTMPhaseCritic(
-                self.obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
+                self.critic_obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
                 lstm_dim=lstm_dim, n_layers=2, seq_len=self.seq_len).to(self.device)
             self.buffer = SequenceRolloutBuffer(
                 self.n_steps, self.obs_dim, self.action_dim, self.seq_len, self.device,
-                cable_raw_dim=240)  # [v14.1]
+                cable_raw_dim=240, critic_obs_dim=self.critic_obs_dim)  # [v14.1]
         else:
             self.actor = PhaseActor(
                 self.obs_dim, self.action_dim, action_scale,
@@ -729,35 +796,68 @@ class PPOPhaseAgent:
                 log_std_min=_log_std_min,
                 log_std_max=_log_std_max).to(self.device)
             self.critic = PhaseCritic(
-                self.obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
+                self.critic_obs_dim, hidden_dim=int(cfg_ppo["hidden_dim"]),
                 n_layers=int(cfg_ppo["n_layers"])).to(self.device)
             self.buffer = RolloutBuffer(
                 self.n_steps, self.obs_dim, self.action_dim, self.device,
-                cable_raw_dim=240)  # [v14.1]
+                cable_raw_dim=240, critic_obs_dim=self.critic_obs_dim)  # [v14.1]
 
         self.obs_history = ObsHistoryBuffer(self.obs_dim, self.seq_len)
         self._lr_actor  = float(cfg_ppo["lr_actor"])
         self._lr_critic = float(cfg_ppo["lr_critic"])
 
-        # ── [v14.0] CableEncoder — 压缩 240 维 cable obs ─────────────────────
+        # Cable observation modes:
+        #   enabled=True, zero_obs=False: encode raw cable state to a latent.
+        #   enabled=True, zero_obs=True : keep latent dims but neutralize them
+        #       using cable_encoder.zero_obs_fill.
+        #   enabled=False/output_dim<=0 : remove cable latent dims entirely.
         ce_cfg = config.get("cable_encoder", {})
         self._cable_raw_dim = int(ce_cfg.get("raw_dim", 240))
+        self._zero_cable_obs = bool(ce_cfg.get("zero_obs", False))
+        self._zero_cable_fill = str(ce_cfg.get("zero_obs_fill", "obs_norm_mean"))
+        self._cable_obs_enabled = bool(ce_cfg.get("enabled", True))
         self._cable_out_dim = int(ce_cfg.get("output_dim", 32))
+        if not self._cable_obs_enabled:
+            self._cable_out_dim = 0
         self._wind_dim = 3
-        self.cable_encoder = CableEncoder(
-            raw_dim=self._cable_raw_dim,
-            hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
-            output_dim=self._cable_out_dim,
-            n_layers=int(ce_cfg.get("n_layers", 2)),
-            normalize_input=bool(ce_cfg.get("normalize_input", True)),
-        ).to(self.device)
-        # [v14.2] 冻结 CableEncoder (随机投影)
-        # v14.1 尝试解冻端到端训练, 但导致 approx_kl 极端尖峰 (>2.0)
-        # 原因: PPO update 时 encoder 参数变化导致 obs re-encode 与 collect 不一致
-        # 冻结的随机投影已足够解决 240 维淹没问题, 且训练完全稳定
-        for p in self.cable_encoder.parameters():
-            p.requires_grad = False
-        self.cable_encoder.eval()
+        self._use_cable_encoder = (
+            self._cable_obs_enabled and self._cable_out_dim > 0 and
+            not self._zero_cable_obs)
+        if self._use_cable_encoder:
+            self.cable_encoder = CableEncoder(
+                raw_dim=self._cable_raw_dim,
+                hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
+                output_dim=self._cable_out_dim,
+                n_layers=int(ce_cfg.get("n_layers", 2)),
+                normalize_input=bool(ce_cfg.get("normalize_input", True)),
+            ).to(self.device)
+            for p in self.cable_encoder.parameters():
+                p.requires_grad = False
+            self.cable_encoder.eval()
+        else:
+            self.cable_encoder = None
+
+        self._critic_cable_out_dim = int(ac_cfg.get(
+            "cable_output_dim", DEFAULT_CONFIG.get("cable_encoder", {}).get(
+                "output_dim", 32)))
+        self._critic_use_cable_encoder = (
+            self.use_asymmetric_critic and self._critic_cable_out_dim > 0)
+        if self._critic_use_cable_encoder:
+            if self.cable_encoder is not None and self._cable_out_dim == self._critic_cable_out_dim:
+                self.critic_cable_encoder = self.cable_encoder
+            else:
+                self.critic_cable_encoder = CableEncoder(
+                    raw_dim=self._cable_raw_dim,
+                    hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
+                    output_dim=self._critic_cable_out_dim,
+                    n_layers=int(ce_cfg.get("n_layers", 2)),
+                    normalize_input=bool(ce_cfg.get("normalize_input", True)),
+                ).to(self.device)
+                for p in self.critic_cable_encoder.parameters():
+                    p.requires_grad = False
+                self.critic_cable_encoder.eval()
+        else:
+            self.critic_cable_encoder = None
 
         self.opt_actor  = torch.optim.Adam(self.actor.parameters(),  lr=self._lr_actor,  eps=1e-5)
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=self._lr_critic, eps=1e-5)
@@ -800,18 +900,59 @@ class PPOPhaseAgent:
         Returns:
             final_obs: np.array, shape (obs_dim,)
         """
-        cable_arr = np.asarray(cable_raw, dtype=np.float32).reshape(-1)
-        if cable_arr.size == self._cable_out_dim:
-            cable_feat = cable_arr
+        core = np.asarray(core_obs, dtype=np.float32).reshape(-1)
+        wind = np.asarray(wind_obs, dtype=np.float32).reshape(-1)
+        if self._cable_out_dim <= 0:
+            cable_feat = np.zeros(0, dtype=np.float32)
+        elif self._zero_cable_obs:
+            cable_feat = _zero_cable_feature(self, core.size)
         else:
-            cable_feat = self.encode_cable(cable_arr)
-        return np.concatenate([core_obs, cable_feat, wind_obs]).astype(np.float32)
+            cable_arr = np.asarray(cable_raw, dtype=np.float32).reshape(-1)
+            if cable_arr.size == self._cable_out_dim:
+                cable_feat = cable_arr
+            else:
+                cable_feat = self.encode_cable(cable_arr)
+        out = np.concatenate([core, cable_feat, wind]).astype(np.float32)
+        if out.size != self.base_obs_dim:
+            raise ValueError(
+                f"{self.phase_name} encoded obs dim mismatch: got {out.size}, "
+                f"expected base_obs_dim={self.base_obs_dim} "
+                f"(core={core.size}, cable={cable_feat.size}, wind={wind.size})")
+        return out
 
     def encode_cable(self, cable_raw):
+        if self._cable_out_dim <= 0:
+            return np.zeros(0, dtype=np.float32)
+        if self._zero_cable_obs or self.cable_encoder is None:
+            return np.zeros(self._cable_out_dim, dtype=np.float32)
         cable_t = torch.from_numpy(
             np.asarray(cable_raw, dtype=np.float32).reshape(1, -1)).to(self.device)
         with torch.no_grad():
             return self.cable_encoder(cable_t).cpu().numpy().flatten()
+
+    def encode_critic_cable(self, cable_raw):
+        if (not self._critic_use_cable_encoder or
+                self.critic_cable_encoder is None):
+            return np.zeros(0, dtype=np.float32)
+        cable_t = torch.from_numpy(
+            np.asarray(cable_raw, dtype=np.float32).reshape(1, -1)).to(self.device)
+        with torch.no_grad():
+            return self.critic_cable_encoder(cable_t).cpu().numpy().flatten()
+
+    @torch.no_grad()
+    def encode_critic_obs(self, core_obs, cable_raw, wind_obs):
+        if not self.use_asymmetric_critic:
+            return self.encode_obs(core_obs, cable_raw, wind_obs)
+        core = np.asarray(core_obs, dtype=np.float32).reshape(-1)
+        wind = np.asarray(wind_obs, dtype=np.float32).reshape(-1)
+        cable_feat = self.encode_critic_cable(cable_raw)
+        out = np.concatenate([core, cable_feat, wind]).astype(np.float32)
+        if out.size != self.critic_base_obs_dim:
+            raise ValueError(
+                f"{self.phase_name} critic obs dim mismatch: got {out.size}, "
+                f"expected critic_base_obs_dim={self.critic_base_obs_dim} "
+                f"(core={core.size}, cable={cable_feat.size}, wind={wind.size})")
+        return out
 
     def normalize_obs(self, obs, update=True):
         if self._freeze_obs_norm: update = False
@@ -820,6 +961,17 @@ class PPOPhaseAgent:
             return self.obs_norm.normalize(obs)
         return obs.astype(np.float32)
 
+    def normalize_critic_obs(self, obs, update=True):
+        if not self.use_asymmetric_critic:
+            return self.normalize_obs(obs, update=update)
+        if self._freeze_obs_norm:
+            update = False
+        if self.use_obs_norm:
+            if update:
+                self.critic_obs_norm.update(obs)
+            return self.critic_obs_norm.normalize(obs)
+        return np.asarray(obs, dtype=np.float32)
+
     def reset_history(self):
         self.obs_history.reset()
         # [v14.1] cable_raw 历史 (LSTM 模式下存最近 seq_len 步的 cable_raw)
@@ -827,6 +979,9 @@ class PPOPhaseAgent:
 
     def make_obs_history(self):
         return ObsHistoryBuffer(self.obs_dim, self.seq_len)
+
+    def make_critic_obs_history(self):
+        return ObsHistoryBuffer(self.critic_obs_dim, self.seq_len)
 
     def make_cable_history(self):
         return deque(maxlen=self.seq_len)
@@ -844,16 +999,23 @@ class PPOPhaseAgent:
             obs_seq = self.obs_history.get_sequence()
             s = np_to_tensor(obs_seq, self.device).unsqueeze(0)
             action, log_prob, _, _ = self.actor.get_action(s, deterministic=deterministic)
-            value = self.critic(s)
+            if self.use_asymmetric_critic:
+                value = torch.zeros((1, 1), device=self.device)
+            else:
+                value = self.critic(s)
             return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
         else:
             s = np_to_tensor(norm_obs.reshape(1, -1), self.device)
             action, log_prob, _ = self.actor.get_action(s, deterministic=deterministic)
-            value = self.critic(s)
+            if self.use_asymmetric_critic:
+                value = torch.zeros((1, 1), device=self.device)
+            else:
+                value = self.critic(s)
             return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
 
     @torch.no_grad()
-    def act_with_history(self, norm_obs, obs_history, deterministic=False):
+    def act_with_history(self, norm_obs, obs_history, deterministic=False,
+                         critic_norm_obs=None, critic_obs_history=None):
         """PPO inference with caller-owned history, used by vectorized envs."""
         if obs_history is None:
             return self.act(norm_obs, deterministic=deterministic)
@@ -862,15 +1024,33 @@ class PPOPhaseAgent:
             obs_seq = obs_history.get_sequence()
             s = np_to_tensor(obs_seq, self.device).unsqueeze(0)
             action, log_prob, _, _ = self.actor.get_action(s, deterministic=deterministic)
-            value = self.critic(s)
+            if self.use_asymmetric_critic:
+                if critic_norm_obs is None or critic_obs_history is None:
+                    value = torch.zeros((1, 1), device=self.device)
+                else:
+                    critic_obs_history.push(critic_norm_obs)
+                    cseq = critic_obs_history.get_sequence()
+                    cs = np_to_tensor(cseq, self.device).unsqueeze(0)
+                    value = self.critic(cs)
+            else:
+                value = self.critic(s)
             return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
         s = np_to_tensor(norm_obs.reshape(1, -1), self.device)
         action, log_prob, _ = self.actor.get_action(s, deterministic=deterministic)
-        value = self.critic(s)
+        if self.use_asymmetric_critic:
+            if critic_norm_obs is None:
+                value = torch.zeros((1, 1), device=self.device)
+            else:
+                cs = np_to_tensor(critic_norm_obs.reshape(1, -1), self.device)
+                value = self.critic(cs)
+        else:
+            value = self.critic(s)
         return action.cpu().numpy().flatten(), log_prob.cpu().item(), value.cpu().item()
 
     @torch.no_grad()
     def get_value_for_state(self, norm_obs):
+        if self.use_asymmetric_critic:
+            return 0.0
         if self.use_lstm:
             obs_seq = self.obs_history.get_sequence()
             s = np_to_tensor(obs_seq, self.device).unsqueeze(0)
@@ -881,7 +1061,23 @@ class PPOPhaseAgent:
 
     @torch.no_grad()
     def get_value_for_obs_sequence(self, obs_seq):
+        if self.use_asymmetric_critic:
+            return 0.0
         s = np_to_tensor(np.asarray(obs_seq, np.float32), self.device).unsqueeze(0)
+        return self.critic(s).cpu().item()
+
+    @torch.no_grad()
+    def get_value_for_critic_state(self, critic_norm_obs):
+        s = np_to_tensor(
+            np.asarray(critic_norm_obs, np.float32).reshape(1, -1),
+            self.device)
+        return self.critic(s).cpu().item()
+
+    @torch.no_grad()
+    def get_value_for_critic_obs_sequence(self, critic_obs_seq):
+        s = np_to_tensor(
+            np.asarray(critic_obs_seq, np.float32),
+            self.device).unsqueeze(0)
         return self.critic(s).cpu().item()
 
     def get_log_std_per_dim(self): return self.actor.get_log_std_per_dim()
@@ -902,7 +1098,7 @@ class PPOPhaseAgent:
         return np.array(seq, dtype=np.float32)
 
     def add_to_buffer(self, norm_obs, action, reward, done, value, log_prob,
-                      cable_raw=None):
+                      cable_raw=None, critic_norm_obs=None):
         """[v14.1] 新增 cable_raw 参数, 存入 buffer 供 update 时 re-encode."""
         if self.use_lstm:
             obs_seq = self.obs_history.get_sequence()
@@ -911,26 +1107,33 @@ class PPOPhaseAgent:
                             cable_raw_seq=cable_raw_seq)
         else:
             self.buffer.add(norm_obs, action, reward, done, value, log_prob,
-                            cable_raw=cable_raw)
+                            cable_raw=cable_raw, critic_obs=critic_norm_obs)
 
     def add_to_buffer_with_history(self, norm_obs, action, reward, done, value,
                                    log_prob, obs_history=None,
                                    cable_history=None, cable_raw=None,
-                                   next_value=None, env_id=-1):
+                                   next_value=None, env_id=-1,
+                                   critic_obs_history=None,
+                                   critic_norm_obs=None):
         if obs_history is None:
             return self.add_to_buffer(norm_obs, action, reward, done, value,
-                                      log_prob, cable_raw=cable_raw)
+                                      log_prob, cable_raw=cable_raw,
+                                      critic_norm_obs=critic_norm_obs)
         if self.use_lstm:
             obs_seq = obs_history.get_sequence()
+            critic_seq = (critic_obs_history.get_sequence()
+                          if critic_obs_history is not None else None)
             cable_seq = (self._get_cable_raw_sequence_from(cable_history)
                          if cable_history is not None else None)
             self.buffer.add(obs_seq, action, reward, done, value, log_prob,
                             cable_raw_seq=cable_seq,
-                            next_value=next_value, env_id=env_id)
+                            next_value=next_value, env_id=env_id,
+                            critic_obs_seq=critic_seq)
         else:
             self.buffer.add(norm_obs, action, reward, done, value, log_prob,
                             cable_raw=cable_raw,
-                            next_value=next_value, env_id=env_id)
+                            next_value=next_value, env_id=env_id,
+                            critic_obs=critic_norm_obs)
 
     def _maybe_reset_plasticity(self):
         if self._plasticity_reset_interval <= 0: return
@@ -981,11 +1184,11 @@ class PPOPhaseAgent:
         for epoch in range(self.n_epochs):
             if stop_early: break
             for batch in self.buffer.get_minibatches(self.batch_size, self.norm_adv):
-                obs_b, act_b, ret_b, adv_b, old_lp_b, _cable_b = batch
+                obs_b, critic_obs_b, act_b, ret_b, adv_b, old_lp_b, _cable_b = batch
                 # [v14.2] encoder 冻结, obs_b 中的 cable_feat 已经是正确的
                 # _cable_b 不使用 (保留 buffer 接口兼容性)
 
-                value = self.critic(obs_b)
+                value = self.critic(critic_obs_b)
                 value_loss = F.huber_loss(value, ret_b)
                 self.opt_critic.zero_grad()
                 (self.value_loss_coef * value_loss).backward()
@@ -1025,12 +1228,67 @@ class PPOPhaseAgent:
             "actor": self.actor.state_dict(), "critic": self.critic.state_dict(),
             "opt_actor": self.opt_actor.state_dict(), "opt_critic": self.opt_critic.state_dict(),
             "total_steps": self.total_steps,
-            "obs_norm": self.obs_norm.state_dict(), "phase_name": self.phase_name,
+            "obs_norm": self.obs_norm.state_dict(),
+            "critic_obs_norm": self.critic_obs_norm.state_dict(),
+            "phase_name": self.phase_name,
             "entropy_coef": self.entropy_coef, "use_lstm": self.use_lstm,
-            "cable_encoder": self.cable_encoder.state_dict(),  # [v14.0]
+            "cable_encoder": (
+                self.cable_encoder.state_dict()
+                if self.cable_encoder is not None else {}),
+            "critic_cable_encoder": (
+                self.critic_cable_encoder.state_dict()
+                if self.critic_cable_encoder is not None else {}),
             "base_obs_dim": self.base_obs_dim,
+            "critic_base_obs_dim": self.critic_base_obs_dim,
             "delay_mdp_extra_dim": self.delay_mdp_extra_dim,
+            "adaptation_history_extra_dim": self.adaptation_history_extra_dim,
+            "use_asymmetric_critic": self.use_asymmetric_critic,
         }, path)
+
+    def _obs_layout_slices(self, cols):
+        """Infer [core, cable, wind, extra] slices for old/new obs tensors."""
+        cols = int(cols)
+        wind = int(getattr(self, "_wind_dim", 3))
+        actor_cable = int(getattr(self, "_cable_out_dim", 0))
+        critic_cable = int(getattr(self, "_critic_cable_out_dim", 0))
+        core = max(0, int(self.base_obs_dim) - actor_cable - wind)
+        no_base = core + wind
+        full_base = core + critic_cable + wind
+        actor_extra = max(0, int(self.obs_dim) - int(self.base_obs_dim))
+        critic_extra = max(0, int(self.critic_obs_dim) -
+                           int(self.critic_base_obs_dim))
+        full_sizes = {full_base, full_base + actor_extra,
+                      full_base + critic_extra}
+        has_cable = critic_cable > 0 and cols in full_sizes
+        cable = critic_cable if has_cable else 0
+        base = core + cable + wind
+        if cols < no_base:
+            core = max(0, cols - wind)
+            cable = 0
+            base = min(cols, core + wind)
+        return {
+            "core": slice(0, min(core, cols)),
+            "cable": slice(core, min(core + cable, cols)),
+            "wind": slice(core + cable, min(core + cable + wind, cols)),
+            "extra": slice(min(base, cols), cols),
+            "has_cable": has_cable,
+        }
+
+    def _adapt_input_weight_by_obs_layout(self, src, dst):
+        new_tensor = dst.clone()
+        new_tensor.zero_()
+        src_l = self._obs_layout_slices(src.shape[1])
+        dst_l = self._obs_layout_slices(dst.shape[1])
+        for name in ("core", "cable", "wind", "extra"):
+            ss = src_l[name]; ds = dst_l[name]
+            sw = max(0, ss.stop - ss.start)
+            dw = max(0, ds.stop - ds.start)
+            width = min(sw, dw)
+            if width <= 0:
+                continue
+            new_tensor[:, ds.start:ds.start + width] = src[:, ss.start:ss.start + width].to(
+                device=dst.device, dtype=dst.dtype)
+        return new_tensor
 
     def _load_module_state_adapt_obs_dim(self, module, state, name):
         target = module.state_dict()
@@ -1048,12 +1306,7 @@ class PPOPhaseAgent:
                                  "net.0.weight"}
             if (key in input_weight_keys and src.ndim == 2 and dst.ndim == 2 and
                     src.shape[0] == dst.shape[0]):
-                new_tensor = dst.clone()
-                cols = min(src.shape[1], dst.shape[1])
-                new_tensor[:, :cols] = src[:, :cols].to(
-                    device=dst.device, dtype=dst.dtype)
-                if dst.shape[1] > cols:
-                    new_tensor[:, cols:] = 0.0
+                new_tensor = self._adapt_input_weight_by_obs_layout(src, dst)
                 adapted[key] = new_tensor
                 changed_shape = True
                 continue
@@ -1064,23 +1317,36 @@ class PPOPhaseAgent:
                   f"obs_dim={self.obs_dim}.")
         return bool(changed_shape or skipped)
 
-    def _load_obs_norm_adapt_obs_dim(self, state):
+    def _copy_obs_norm_by_layout(self, state, target_norm, label):
         mean = np.asarray(state.get("mean", []), dtype=np.float64).reshape(-1)
         S = np.asarray(state.get("S", []), dtype=np.float64).reshape(-1)
-        if mean.shape == self.obs_norm.mean.shape and S.shape == self.obs_norm.S.shape:
-            self.obs_norm.load_state_dict(state)
+        if mean.shape == target_norm.mean.shape and S.shape == target_norm.S.shape:
+            target_norm.load_state_dict(state)
             return
-        self.obs_norm.n = int(state.get("n", 0))
-        self.obs_norm.mean.fill(0.0)
-        self.obs_norm.S.fill(max(self.obs_norm.n - 1, 1))
-        cols = min(mean.size, self.obs_norm.mean.size)
-        if cols > 0:
-            self.obs_norm.mean[:cols] = mean[:cols]
-        cols = min(S.size, self.obs_norm.S.size)
-        if cols > 0:
-            self.obs_norm.S[:cols] = S[:cols]
-        print(f"  [PPO load] obs_norm adapted from {mean.size} to "
-              f"{self.obs_norm.mean.size} dims.")
+        target_norm.n = int(state.get("n", 0))
+        target_norm.mean.fill(0.0)
+        target_norm.S.fill(max(target_norm.n - 1, 1))
+        src_l = self._obs_layout_slices(mean.size)
+        dst_l = self._obs_layout_slices(target_norm.mean.size)
+        for name in ("core", "cable", "wind", "extra"):
+            ss = src_l[name]; ds = dst_l[name]
+            sw = max(0, ss.stop - ss.start)
+            dw = max(0, ds.stop - ds.start)
+            width = min(sw, dw)
+            if width <= 0:
+                continue
+            target_norm.mean[ds.start:ds.start + width] = mean[ss.start:ss.start + width]
+            if S.size >= ss.start + width:
+                target_norm.S[ds.start:ds.start + width] = S[ss.start:ss.start + width]
+        print(f"  [PPO load] {label} adapted from {mean.size} to "
+              f"{target_norm.mean.size} dims.")
+
+    def _load_obs_norm_adapt_obs_dim(self, state):
+        self._copy_obs_norm_by_layout(state, self.obs_norm, "obs_norm")
+
+    def _load_critic_obs_norm_adapt_obs_dim(self, state):
+        self._copy_obs_norm_by_layout(
+            state, self.critic_obs_norm, "critic_obs_norm")
 
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
@@ -1105,9 +1371,20 @@ class PPOPhaseAgent:
         if "entropy_coef" in ck:
             self.entropy_coef = float(ck["entropy_coef"])
         if "obs_norm" in ck: self._load_obs_norm_adapt_obs_dim(ck["obs_norm"])
+        if "critic_obs_norm" in ck:
+            self._load_critic_obs_norm_adapt_obs_dim(ck["critic_obs_norm"])
+        elif "obs_norm" in ck:
+            self._load_critic_obs_norm_adapt_obs_dim(ck["obs_norm"])
         # [v14.0] cable encoder 加载 (保持 frozen 投影一致性)
-        if "cable_encoder" in ck:
+        if "cable_encoder" in ck and self.cable_encoder is not None and ck["cable_encoder"]:
             self.cable_encoder.load_state_dict(ck["cable_encoder"])
+        if self.critic_cable_encoder is not None:
+            _cc_state = ck.get("critic_cable_encoder") or ck.get("cable_encoder") or {}
+            if _cc_state:
+                try:
+                    self.critic_cable_encoder.load_state_dict(_cc_state)
+                except Exception as e:
+                    print(f"  [PPO load] skipped critic cable encoder: {e}")
 
 
 # ==============================================================================
@@ -1326,19 +1603,30 @@ class SACPhaseAgent:
             self._use_her = False
         self.total_steps = 0; self._last_result = SAC_ZERO
 
-        # ── [v14.2] CableEncoder for SAC (冻结随机投影) ─────────────────────
+        # Keep SAC cable-observation semantics aligned with PPO.
         ce_cfg = config.get("cable_encoder", {})
         self._cable_raw_dim = int(ce_cfg.get("raw_dim", 240))
+        self._zero_cable_obs = bool(ce_cfg.get("zero_obs", False))
+        self._zero_cable_fill = str(ce_cfg.get("zero_obs_fill", "obs_norm_mean"))
+        self._cable_obs_enabled = bool(ce_cfg.get("enabled", True))
         self._cable_out_dim = int(ce_cfg.get("output_dim", 32))
+        if not self._cable_obs_enabled:
+            self._cable_out_dim = 0
         self._wind_dim = 3
-        self.cable_encoder = CableEncoder(
-            raw_dim=self._cable_raw_dim,
-            hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
-            output_dim=self._cable_out_dim,
-        ).to(self.device)
-        for p in self.cable_encoder.parameters():
-            p.requires_grad = False
-        self.cable_encoder.eval()
+        self._use_cable_encoder = (
+            self._cable_obs_enabled and self._cable_out_dim > 0 and
+            not self._zero_cable_obs)
+        if self._use_cable_encoder:
+            self.cable_encoder = CableEncoder(
+                raw_dim=self._cable_raw_dim,
+                hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
+                output_dim=self._cable_out_dim,
+            ).to(self.device)
+            for p in self.cable_encoder.parameters():
+                p.requires_grad = False
+            self.cable_encoder.eval()
+        else:
+            self.cable_encoder = None
 
         # ── [v11 Path 1] Cruise SAC 残差: 输出层零初始化, 与 PPO 一致 ───────────
         # SAC 在 cruise 上的优势: off-policy + auto α 自动调整 entropy,
@@ -1368,14 +1656,31 @@ class SACPhaseAgent:
     @torch.no_grad()
     def encode_obs(self, core_obs, cable_raw, wind_obs):
         """[v14.0] Same as PPOPhaseAgent.encode_obs."""
-        cable_arr = np.asarray(cable_raw, dtype=np.float32).reshape(-1)
-        if cable_arr.size == self._cable_out_dim:
-            cable_feat = cable_arr
+        core = np.asarray(core_obs, dtype=np.float32).reshape(-1)
+        wind = np.asarray(wind_obs, dtype=np.float32).reshape(-1)
+        if self._cable_out_dim <= 0:
+            cable_feat = np.zeros(0, dtype=np.float32)
+        elif self._zero_cable_obs:
+            cable_feat = _zero_cable_feature(self, core.size)
         else:
-            cable_feat = self.encode_cable(cable_arr)
-        return np.concatenate([core_obs, cable_feat, wind_obs]).astype(np.float32)
+            cable_arr = np.asarray(cable_raw, dtype=np.float32).reshape(-1)
+            if cable_arr.size == self._cable_out_dim:
+                cable_feat = cable_arr
+            else:
+                cable_feat = self.encode_cable(cable_arr)
+        out = np.concatenate([core, cable_feat, wind]).astype(np.float32)
+        if out.size != self.obs_dim:
+            raise ValueError(
+                f"{self.phase_name} SAC encoded obs dim mismatch: got {out.size}, "
+                f"expected obs_dim={self.obs_dim} "
+                f"(core={core.size}, cable={cable_feat.size}, wind={wind.size})")
+        return out
 
     def encode_cable(self, cable_raw):
+        if self._cable_out_dim <= 0:
+            return np.zeros(0, dtype=np.float32)
+        if self._zero_cable_obs or self.cable_encoder is None:
+            return np.zeros(self._cable_out_dim, dtype=np.float32)
         cable_t = torch.from_numpy(
             np.asarray(cable_raw, dtype=np.float32).reshape(1, -1)).to(self.device)
         with torch.no_grad():
@@ -1485,7 +1790,9 @@ class SACPhaseAgent:
             "total_steps": self.total_steps,
             "obs_norm": self.obs_norm.state_dict(),
             "phase_name": self.phase_name,
-            "cable_encoder": self.cable_encoder.state_dict()}, path)  # [v14.0]
+            "cable_encoder": (
+                self.cable_encoder.state_dict()
+                if self.cable_encoder is not None else {})}, path)
 
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
@@ -1521,5 +1828,5 @@ class SACPhaseAgent:
         self.total_steps = ck.get("total_steps", 0)
         if "obs_norm" in ck:
             self.obs_norm.load_state_dict(ck["obs_norm"])
-        if "cable_encoder" in ck:  # [v14.0]
+        if "cable_encoder" in ck and self.cable_encoder is not None and ck["cable_encoder"]:
             self.cable_encoder.load_state_dict(ck["cable_encoder"])

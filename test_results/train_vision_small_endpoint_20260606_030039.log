@@ -1,0 +1,32 @@
+[profile] descent_10hz_joint_pred_target_random_ft: Continue the best 10Hz predictor+residual PPO with randomized start/target XY for arm dead-zone robustness.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_030040
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+============================================================
+  PPO | DESCENT | 100000 steps | saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_030040
+============================================================
+
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+  [Curriculum-descent] start at L0/8, wind=0.50/10.0m/s
+  Resumed from ckpt: saves/descent_ppo_10hz_joint_pred_target_random_ft_20260605_175530/ckpt_best.pt
+  [Adam reset] @ step 13558710 (reset_optimizer_on_resume)
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run akzg6g7u
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_030040/wandb/run-20260606_030043-akzg6g7u
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9/runs/akzg6g7u
+  Resumed checkpoint progress: ts=13558710 (new log dir, no CSV to append)
+  [Resume target] descent-ppo: new log dir starts at ts=13558710; treating --timesteps=100000 as additional steps -> target_total_steps=13658710
+  [ObsPredictor] enabled: true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  [ObsPredictor] resumed from saves/descent_ppo_10hz_joint_pred_target_random_ft_20260605_175530/ckpt_best_obs_predictor.pt
+Ep   0 [13558941] ❌ R:-115.49(-115.49) SR:   0% S:231 dist:9.5cm W:0.19m/s [L0/8 ep1 W[0.0,0.5]] | instability:yaw=1.28
+       PPO PL: 0.000 VL: 0.000 E: 0.000 KL:0.0000
+       ObsPred loss:-0.4194 rmse_raw:1.0552 hidden:50%

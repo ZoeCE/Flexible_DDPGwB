@@ -32,6 +32,19 @@ class ObsPredictionStepInfo:
     std_mean: float = 0.0
 
 
+@dataclass
+class CableLatentPredictionStepInfo:
+    enabled: bool = False
+    trained: bool = False
+    loss: float = 0.0
+    huber: float = 0.0
+    mse: float = 0.0
+    rmse: float = 0.0
+    rmse_norm: float = 0.0
+    pred_norm: float = 0.0
+    target_norm: float = 0.0
+
+
 class LSTMObservationPredictorNet(nn.Module):
     """One-step raw-observation predictor with a diagonal Gaussian head."""
 
@@ -66,6 +79,36 @@ class LSTMObservationPredictorNet(nn.Module):
         mean_delta = self.mean_delta(feat)
         log_std = self.log_std(feat).clamp(self.log_std_min, self.log_std_max)
         return mean_delta, log_std, hx_new
+
+
+class CableLatentPredictorNet(nn.Module):
+    """Recurrent estimator for the frozen cable-encoder latent vector."""
+
+    def __init__(self, input_dim, latent_dim, hidden_dim=128, n_layers=1,
+                 dropout=0.0):
+        super().__init__()
+        self.latent_dim = int(latent_dim)
+        self.lstm = nn.LSTM(
+            input_dim,
+            hidden_dim,
+            num_layers=n_layers,
+            batch_first=True,
+            dropout=float(dropout) if n_layers > 1 else 0.0,
+        )
+        self.head = nn.Sequential(
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, latent_dim),
+        )
+        nn.init.zeros_(self.head[-1].weight)
+        nn.init.zeros_(self.head[-1].bias)
+
+    def forward(self, x, hx=None):
+        y, hx_new = self.lstm(x, hx)
+        latent_norm = self.head(y[:, -1, :])
+        return latent_norm, hx_new
 
 
 class OnlineObservationPredictor:
@@ -408,11 +451,228 @@ class OnlineObservationPredictor:
         self.load_state_dict(ck)
 
 
+class OnlineCableLatentPredictor:
+    """
+    Deployable recurrent estimator for hidden cable dynamics.
+
+    This predictor is intentionally separate from OnlineObservationPredictor:
+    ObsPred fills missing low-rate observations, while CableLatPred estimates
+    the 32D frozen CableEncoder latent from visible observations/history. The
+    simulator's cable state is used only as a supervised training target.
+    """
+
+    def __init__(self, config, phase, visible_dim, latent_dim=32,
+                 action_dim=7, device=None):
+        cfg = config.get("cable_latent_predictor", {})
+        self.config = config
+        self.cfg = cfg
+        self.phase = phase
+        self.enabled = bool(cfg.get("enabled", False))
+        self.train_enabled = bool(cfg.get("train_enabled", True))
+        self.visible_dim = int(visible_dim)
+        self.latent_dim = int(latent_dim)
+        self.action_dim = int(action_dim)
+        self.device = device or torch.device(
+            f"cuda:{config.get('train', {}).get('gpu_id', 0)}"
+            if torch.cuda.is_available() and config.get("train", {}).get("gpu_id", 0) >= 0
+            else "cpu")
+
+        self.visible_clip = float(cfg.get("visible_norm_clip", 8.0))
+        self.action_clip = float(cfg.get("action_norm_clip", 2.0))
+        self.latent_clip = float(cfg.get("latent_norm_clip", 8.0))
+        self.huber_coef = float(cfg.get("huber_coef", 1.0))
+        self.mse_coef = float(cfg.get("mse_coef", 0.1))
+        self.grad_clip = float(cfg.get("grad_clip", 1.0))
+
+        self.visible_scale = self._build_visible_scale(self.visible_dim, cfg)
+        self.latent_scale = max(float(cfg.get("latent_scale", 1.0)), 1e-6)
+        dq_max = np.asarray(
+            config.get("space", {}).get("dq_max", [0.12] * self.action_dim),
+            dtype=np.float32)
+        if dq_max.size < self.action_dim:
+            dq_max = np.pad(dq_max, (0, self.action_dim - dq_max.size),
+                            constant_values=float(np.mean(dq_max)) if dq_max.size else 1.0)
+        self.action_scale = np.maximum(dq_max[:self.action_dim], 1e-6)
+
+        input_dim = self.visible_dim + self.action_dim + PHASE_ONE_HOT_DIM
+        self.net = CableLatentPredictorNet(
+            input_dim=input_dim,
+            latent_dim=self.latent_dim,
+            hidden_dim=int(cfg.get("hidden_dim", 128)),
+            n_layers=int(cfg.get("n_layers", 1)),
+            dropout=float(cfg.get("dropout", 0.0)),
+        ).to(self.device)
+        self.optimizer = torch.optim.Adam(
+            self.net.parameters(),
+            lr=float(cfg.get("lr", 3e-4)),
+            eps=1e-5,
+            weight_decay=float(cfg.get("weight_decay", 0.0)),
+        )
+        self.hidden = None
+
+    @staticmethod
+    def _build_visible_scale(visible_dim, cfg):
+        scale = np.ones(int(visible_dim), dtype=np.float32)
+        override = cfg.get("global_visible_scale", None)
+        if override is not None:
+            scale[:] = float(override)
+        return np.maximum(scale, 1e-6)
+
+    def reset(self, initial_visible_obs=None):
+        self.hidden = None
+
+    def _detach_hidden(self):
+        if self.hidden is not None:
+            self.hidden = tuple(h.detach() for h in self.hidden)
+
+    def _phase_one_hot(self, phase):
+        out = np.zeros(PHASE_ONE_HOT_DIM, dtype=np.float32)
+        out[PHASE_TO_ID.get(phase, PHASE_TO_ID.get(self.phase, 1))] = 1.0
+        return out
+
+    def _norm_visible_np(self, visible_obs):
+        arr = np.asarray(visible_obs, dtype=np.float32).reshape(-1)
+        if arr.size != self.visible_dim:
+            raise ValueError(
+                f"visible obs dim mismatch: got {arr.size}, expected {self.visible_dim}")
+        return np.clip(arr / self.visible_scale,
+                       -self.visible_clip, self.visible_clip)
+
+    def _norm_action_np(self, action):
+        act = np.asarray(action if action is not None else [], dtype=np.float32).reshape(-1)
+        if act.size < self.action_dim:
+            act = np.pad(act, (0, self.action_dim - act.size))
+        return np.clip(act[:self.action_dim] / self.action_scale,
+                       -self.action_clip, self.action_clip)
+
+    def _norm_latent_np(self, latent):
+        arr = np.asarray(latent, dtype=np.float32).reshape(-1)
+        if arr.size < self.latent_dim:
+            arr = np.pad(arr, (0, self.latent_dim - arr.size))
+        arr = arr[:self.latent_dim]
+        return np.clip(arr / self.latent_scale,
+                       -self.latent_clip, self.latent_clip)
+
+    def _denorm_latent_np(self, latent_norm):
+        return (np.asarray(latent_norm, dtype=np.float32).reshape(-1) *
+                self.latent_scale).astype(np.float32)
+
+    def _build_input_np(self, visible_obs, action, phase):
+        return np.concatenate([
+            self._norm_visible_np(visible_obs),
+            self._norm_action_np(action),
+            self._phase_one_hot(phase or self.phase),
+        ]).astype(np.float32)
+
+    def predict_and_update(self, visible_obs, action=None, phase=None,
+                           target_latent=None):
+        info = CableLatentPredictionStepInfo(enabled=self.enabled)
+        if not self.enabled:
+            if target_latent is not None:
+                return np.asarray(target_latent, dtype=np.float32).reshape(-1).copy(), info
+            return np.zeros(self.latent_dim, dtype=np.float32), info
+
+        self._detach_hidden()
+        x_np = self._build_input_np(visible_obs, action, phase)
+        x = torch.from_numpy(x_np).to(self.device).view(1, 1, -1)
+
+        if self.train_enabled and target_latent is not None:
+            pred_norm_t, hidden_new = self.net(x, self.hidden)
+            self.hidden = hidden_new
+            target_norm_np = self._norm_latent_np(target_latent)
+            target_norm_t = torch.from_numpy(target_norm_np).to(
+                self.device).view(1, -1)
+            huber = F.smooth_l1_loss(pred_norm_t, target_norm_t)
+            mse = F.mse_loss(pred_norm_t, target_norm_t)
+            loss = self.huber_coef * huber + self.mse_coef * mse
+
+            self.optimizer.zero_grad()
+            loss.backward()
+            if self.grad_clip > 0.0:
+                nn.utils.clip_grad_norm_(self.net.parameters(), self.grad_clip)
+            self.optimizer.step()
+            self._detach_hidden()
+
+            pred_norm_np = pred_norm_t.detach().cpu().numpy().reshape(-1)
+            pred_latent = self._denorm_latent_np(
+                np.clip(pred_norm_np, -self.latent_clip, self.latent_clip))
+            target = (target_norm_np * self.latent_scale).astype(np.float32)
+            err = pred_latent - target
+            err_norm = pred_norm_np - target_norm_np
+            info.trained = True
+            info.loss = float(loss.detach().cpu().item())
+            info.huber = float(huber.detach().cpu().item())
+            info.mse = float(mse.detach().cpu().item())
+            info.rmse = float(np.sqrt(np.mean(np.square(err))))
+            info.rmse_norm = float(np.sqrt(np.mean(np.square(err_norm))))
+            info.pred_norm = float(np.linalg.norm(pred_latent))
+            info.target_norm = float(np.linalg.norm(target))
+            return pred_latent.astype(np.float32), info
+
+        with torch.no_grad():
+            pred_norm_t, hidden_new = self.net(x, self.hidden)
+            self.hidden = tuple(h.detach() for h in hidden_new)
+            pred_norm_np = pred_norm_t.cpu().numpy().reshape(-1)
+            pred_latent = self._denorm_latent_np(
+                np.clip(pred_norm_np, -self.latent_clip, self.latent_clip))
+        info.pred_norm = float(np.linalg.norm(pred_latent))
+        return pred_latent.astype(np.float32), info
+
+    def state_dict(self):
+        return {
+            "net": self.net.state_dict(),
+            "optimizer": self.optimizer.state_dict(),
+            "visible_dim": self.visible_dim,
+            "latent_dim": self.latent_dim,
+            "action_dim": self.action_dim,
+            "phase": self.phase,
+            "cfg": dict(self.cfg),
+        }
+
+    def load_state_dict(self, state):
+        if isinstance(state, dict) and state.get("type") == "ensemble":
+            states = [s for s in state.get("predictors", []) if s is not None]
+            if not states:
+                raise ValueError("empty cable latent predictor ensemble checkpoint")
+            state = states[0]
+        self.net.load_state_dict(state["net"])
+        if "optimizer" in state:
+            try:
+                self.optimizer.load_state_dict(state["optimizer"])
+                lr = float(self.cfg.get("lr", 3e-4))
+                weight_decay = float(self.cfg.get("weight_decay", 0.0))
+                for group in self.optimizer.param_groups:
+                    group["lr"] = lr
+                    group["weight_decay"] = weight_decay
+            except Exception:
+                pass
+
+    def save(self, path):
+        if not self.enabled:
+            return
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        torch.save(self.state_dict(), path)
+
+    def load(self, path, map_location=None):
+        ck = torch.load(path, map_location=map_location or self.device,
+                        weights_only=False)
+        self.load_state_dict(ck)
+
+
 def predictor_ckpt_path(agent_ckpt_path):
     root, ext = os.path.splitext(agent_ckpt_path)
     if not ext:
         ext = ".pt"
     return f"{root}_obs_predictor{ext}"
+
+
+def cable_latent_predictor_ckpt_path(agent_ckpt_path):
+    root, ext = os.path.splitext(agent_ckpt_path)
+    if not ext:
+        ext = ".pt"
+    return f"{root}_cable_latent_predictor{ext}"
 
 
 def build_observation_predictor(config, phase, obs_dim, device=None):
@@ -424,5 +684,20 @@ def build_observation_predictor(config, phase, obs_dim, device=None):
         phase=phase,
         obs_dim=obs_dim,
         action_dim=int(cfg.get("action_dim", 7)),
+        device=device,
+    )
+
+
+def build_cable_latent_predictor(config, phase, visible_dim, latent_dim=32,
+                                 action_dim=7, device=None):
+    cfg = config.get("cable_latent_predictor", {})
+    if not bool(cfg.get("enabled", False)):
+        return None
+    return OnlineCableLatentPredictor(
+        config=config,
+        phase=phase,
+        visible_dim=visible_dim,
+        latent_dim=int(cfg.get("latent_dim", latent_dim)),
+        action_dim=int(cfg.get("action_dim", action_dim)),
         device=device,
     )

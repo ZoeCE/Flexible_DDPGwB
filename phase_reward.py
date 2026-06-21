@@ -400,7 +400,7 @@ def compute_cruise_reward(env, obs, config, rstate, tracker=None,
     # ── 安全检查 (保留, 仅终止信号) ───────────────────────────────────────────
     unstable, reason = _check_instability(env, obs, config, grace_steps=15)
     if unstable:
-        r = float(rcfg["instability_penalty"])
+        r = float(rcfg.get("instability_penalty", -5.0))
         if tracker: tracker.add("instability_penalty", r)
         return r, True, False, {"termination": reason}
 
@@ -1029,7 +1029,7 @@ def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=Non
                 f"bad_rebar_contact_seen=1")
             return reward, done, success, info
 
-        r_bonus = float(rcfg["success_bonus"])
+        r_bonus = float(rcfg.get("success_bonus", 50.0))
         reward += r_bonus
         if tracker:
             tracker.add("success_bonus", r_bonus)

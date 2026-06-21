@@ -9,12 +9,56 @@
     <material name="groundplane" rgba="0.3 0.3 0.3 1"/>
     <material name="concrete" rgba="0.7 0.7 0.7 1.0"/>
     <material name="target_mat" rgba="0.8 0.0 0.0 0.4"/>
+
+    <!-- OpenCV vision marker assets -->
+    <texture name="vision_marker_23_tex" type="2d" file="vision_marker_23.png"/>
+    <material name="vision_marker_23_mat" texture="vision_marker_23_tex" texrepeat="1 1" texuniform="true" rgba="1 1 1 1"/>
+    <material name="vision_marker_23_white_mat" rgba="1 1 1 1"/>
+    <material name="vision_marker_23_black_mat" rgba="0 0 0 1"/>
+    <!-- /OpenCV vision marker assets -->
   </asset>
 
   <worldbody>
     <!-- lighting & ground -->
     <light pos="1.5 0 1.5" dir="1 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
+
+
+    <!-- RGB-D vision cameras -->
+    <camera name="rgbd_front" pos="-0.3 0.82 0.42" quat="-0.000000 0.000000 0.610192 0.792253" fovy="52.000"/>
+    <camera name="rgbd_left" pos="-0.62 0.68 0.46" quat="-0.257780 -0.181937 0.547176 0.775272" fovy="55.000"/>
+    <camera name="rgbd_right" pos="0.02 0.68 0.46" quat="0.257780 0.181937 0.547176 0.775272" fovy="58.000"/>
+    <!-- /RGB-D vision cameras -->
+
+    <!-- RGB-D visible camera bodies -->
+    <body name="rgbd_front_body" pos="-0.300000 0.820000 0.420000" quat="-0.000000 0.000000 0.610192 0.792253">
+      <geom name="rgbd_front_housing" type="box" size="0.070 0.050 0.035" rgba="0.050 0.180 0.800 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_lens" type="cylinder" size="0.024 0.012" pos="0 0 -0.048" rgba="0.010 0.010 0.014 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_axis" type="capsule" fromto="0 0 -0.065 0 0 -0.587473" size="0.006" rgba="1.000 0.950 0.100 0.85" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_ray_tl" type="capsule" fromto="0 0 -0.065 0.180838 0.135629 -0.587473" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_ray_tr" type="capsule" fromto="0 0 -0.065 0.180838 -0.135629 -0.587473" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_ray_bl" type="capsule" fromto="0 0 -0.065 -0.180838 0.135629 -0.587473" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_front_ray_br" type="capsule" fromto="0 0 -0.065 -0.180838 -0.135629 -0.587473" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="rgbd_left_body" pos="-0.620000 0.680000 0.460000" quat="-0.257780 -0.181937 0.547176 0.775272">
+      <geom name="rgbd_left_housing" type="box" size="0.070 0.050 0.035" rgba="0.050 0.180 0.800 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_lens" type="cylinder" size="0.024 0.012" pos="0 0 -0.048" rgba="0.010 0.010 0.014 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_axis" type="capsule" fromto="0 0 -0.065 0 0 -0.567172" size="0.006" rgba="1.000 0.950 0.100 0.85" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_ray_tl" type="capsule" fromto="0 0 -0.065 0.185048 0.138786 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_ray_tr" type="capsule" fromto="0 0 -0.065 0.185048 -0.138786 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_ray_bl" type="capsule" fromto="0 0 -0.065 -0.185048 0.138786 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_left_ray_br" type="capsule" fromto="0 0 -0.065 -0.185048 -0.138786 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+    </body>
+    <body name="rgbd_right_body" pos="0.020000 0.680000 0.460000" quat="0.257780 0.181937 0.547176 0.775272">
+      <geom name="rgbd_right_housing" type="box" size="0.070 0.050 0.035" rgba="0.050 0.180 0.800 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_lens" type="cylinder" size="0.024 0.012" pos="0 0 -0.048" rgba="0.010 0.010 0.014 1" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_axis" type="capsule" fromto="0 0 -0.065 0 0 -0.567172" size="0.006" rgba="1.000 0.950 0.100 0.85" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_ray_tl" type="capsule" fromto="0 0 -0.065 0.195574 0.146681 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_ray_tr" type="capsule" fromto="0 0 -0.065 0.195574 -0.146681 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_ray_bl" type="capsule" fromto="0 0 -0.065 -0.195574 0.146681 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+      <geom name="rgbd_right_ray_br" type="capsule" fromto="0 0 -0.065 -0.195574 -0.146681 -0.567172" size="0.004" rgba="0.000 0.750 1.000 0.45" group="1" contype="0" conaffinity="0"/>
+    </body>
+    <!-- /RGB-D visible camera bodies -->
 
     <!-- target: visual-only goal marker (no collision) -->
     <body name="target" pos="0.3 0.25 0">
@@ -49,6 +93,52 @@
       <geom name="socket_b19" type="box" size="0.004000 0.028000 0.030000" pos="0.046000 0.000000 -0.070000" material="concrete" mass="0.213636"/>
       <geom name="socket_b20" type="box" size="0.004000 0.007000 0.030000" pos="0.046000 0.035000 -0.070000" material="concrete" mass="0.213636"/>
       <geom name="socket_b21" type="box" size="0.004000 0.004000 0.030000" pos="0.046000 0.046000 -0.070000" material="concrete" mass="0.213636"/>
+      <geom name="vision_marker_23_board" type="box" size="0.046000 0.046000 0.000500" pos="0.000000 0.051500 0.020000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_white_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_1" type="box" size="0.005000 0.005000 0.000120" pos="0.025000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_2" type="box" size="0.005000 0.005000 0.000120" pos="0.015000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_3" type="box" size="0.005000 0.005000 0.000120" pos="0.005000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_0_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.055000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_1_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.045000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_1_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 0.045000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_1_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 0.045000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_1_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.045000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_2_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.035000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_2_3" type="box" size="0.005000 0.005000 0.000120" pos="0.005000 0.052120 0.035000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_2_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 0.035000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_2_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 0.035000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_2_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.035000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_1" type="box" size="0.005000 0.005000 0.000120" pos="0.025000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_2" type="box" size="0.005000 0.005000 0.000120" pos="0.015000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_3_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.025000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_4_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_4_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_4_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_4_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_4_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_5_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_5_1" type="box" size="0.005000 0.005000 0.000120" pos="0.025000 0.052120 0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_5_3" type="box" size="0.005000 0.005000 0.000120" pos="0.005000 0.052120 0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_5_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_5_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_6_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 -0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_6_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 -0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_6_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 -0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_6_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 -0.005000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_0" type="box" size="0.005000 0.005000 0.000120" pos="0.035000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_1" type="box" size="0.005000 0.005000 0.000120" pos="0.025000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_2" type="box" size="0.005000 0.005000 0.000120" pos="0.015000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_3" type="box" size="0.005000 0.005000 0.000120" pos="0.005000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_4" type="box" size="0.005000 0.005000 0.000120" pos="-0.005000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_5" type="box" size="0.005000 0.005000 0.000120" pos="-0.015000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_6" type="box" size="0.005000 0.005000 0.000120" pos="-0.025000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
+      <geom name="vision_marker_23_blk_7_7" type="box" size="0.005000 0.005000 0.000120" pos="-0.035000 0.052120 -0.015000" quat="0.000000 0.000000 0.707107 0.707107" material="vision_marker_23_black_mat" contype="0" conaffinity="0" mass="0.00000001"/>
 
       <!-- four lift sites at top corners -->
       <site name="lift_fl" pos=" 0.05  0.05  0.1" size="0.01" rgba="1 0 0 1"/>

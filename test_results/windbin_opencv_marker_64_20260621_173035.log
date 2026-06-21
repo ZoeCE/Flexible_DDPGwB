@@ -1,0 +1,37 @@
+
+[Descent curriculum hardest task]
+  wind_speed_max: 10.00 m/s, sampled uniformly per episode
+  init_xy: +/-20.0 mm
+  init_payload_xy_vel: +/-0.012 m/s
+  init_tilt_noise: +/-0.005 rad
+  success_xy_tol: 5.0 mm
+  target_payload_z: 100 mm
+  z_tol/tilt_tol/yaw_tol: 20 mm / 0.050 rad / 0.080 rad
+
+[Descent train/test control settings]
+  pid_residual_mode: True
+  residual_dq_scale: 0.800
+  residual_acc_max_xy/z: 0.600 / 0.900
+  base vel_max_z_descent: 0.030 m/s
+  max_steps: 300
+  eval init: level=8, xy=+/-20.0mm, vel=+/-0.012m/s, tilt=+/-0.005rad, xy_tol=5.0mm
+
+[Benchmark] wind bins=[(0.0, 1.25), (1.25, 2.5), (2.5, 3.75), (3.75, 5.0), (5.0, 6.25), (6.25, 7.5), (7.5, 8.75), (8.75, 10.0)], episodes_per_bin=64
+[Benchmark] output=test_results/windbin_opencv_marker_64_20260621_173035.csv
+
+[Benchmark] preparing bin 1/8 0.00-1.25m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.4s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 1.6s
+[Benchmark] running bin 1/8 0.00-1.25m/s | residual_rl ...
+  [CableLatPred-EVAL] loaded saves/descent_ppo_10hz_vision_rope_marker_rgbd_cable_latpred_l0_to_l8_20260618_010735/ckpt_latest_cable_latent_predictor.pt; visible_dim=124, latent_dim=32
+  bin 1/8 residual_rl progress 8/64 SR=0.0% avg_steps=113.5
+  bin 1/8 residual_rl progress 16/64 SR=6.2% avg_steps=111.1
+  bin 1/8 residual_rl progress 24/64 SR=8.3% avg_steps=110.4
+  bin 1/8 residual_rl progress 32/64 SR=6.2% avg_steps=114.2
+  bin 1/8 residual_rl progress 40/64 SR=5.0% avg_steps=114.9
+  bin 1/8 residual_rl progress 48/64 SR=4.2% avg_steps=115.2

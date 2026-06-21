@@ -1,0 +1,80 @@
+[profile] descent_10hz_vision_pred_small_endpoint_fast_zgate_ft: Fine-tune the 10Hz RGB-D vision+predictor policy with small endpoint randomization and conservative z descent gates to reduce rebar-top sticking.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_no_cable_44d_asymcritic_l0_20260615_145751
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+  [v11 Path 3] 启用 vectorized PPO with n_envs=8
+
+============================================================
+  PPO [VEC n_envs=8] | DESCENT | 600000 steps | saves/descent_ppo_10hz_vision_no_cable_44d_asymcritic_l0_20260615_145751
+============================================================
+
+  [PPO load] critic: adapted checkpoint tensors for obs_dim=44.
+  [PPO load] optimizer state reset because obs_dim changed.
+  [PPO load] critic_obs_norm adapted from 44 to 76 dims.
+  Resumed: saves/descent_ppo_10hz_vision_no_cable_44d_ppo_contact_clean_20260610_231252/ckpt_best.pt
+  [Adam reset] @ step 791763 (reset_optimizer_on_resume)
+  [AsymCritic] critic cable encoder loaded from saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best.pt
+  [AsymCritic-VEC] actor_obs_dim=44, critic_obs_dim=76, critic_base_obs_dim=76
+[VecEnv] SubprocVecEnv 启动 8 个 worker (method=spawn)
+  [Curriculum-descent] start at L0/8, wind=0.50/10.0m/s
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 86uaaf88
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_no_cable_44d_asymcritic_l0_20260615_145751/wandb/run-20260615_145808-86uaaf88
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo_vec
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/86uaaf88
+  Resumed checkpoint progress: ts=791763 (new log dir, no CSV to append)
+  [Resume target] descent-ppo-vec: new log dir starts at ts=791763; treating --timesteps=600000 as additional steps -> target_total_steps=1391763
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[VecEnv] SubprocVecEnv 关闭 8 个 worker
+wandb: updating run metadata
+wandb: uploading summary, console lines 2-2
+wandb: 🚀 View run descent_ppo_vec at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec/runs/86uaaf88
+wandb: ⭐️ View project at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v11_vec
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: saves/descent_ppo_10hz_vision_no_cable_44d_asymcritic_l0_20260615_145751/wandb/run-20260615_145808-86uaaf88/logs
+Traceback (most recent call last):
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 5009, in <module>
+    train(args.phase, ld, algo=args.algo, custom_config=cc or None,
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 4478, in train
+    return train_ppo_vec(phase, log_dir, config,
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/train_phase.py", line 3055, in train_ppo_vec
+    _ccore_i, _ccable_i, _cwind_i, _, _, _ = critic_phase_obs_cache[i]
+                                             ^^^^^^^^^^^^^^^^^^^^^^
+NameError: name 'critic_phase_obs_cache' is not defined

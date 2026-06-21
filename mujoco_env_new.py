@@ -43,6 +43,7 @@ from scipy.spatial.transform import Rotation as R
 
 from config import DEFAULT_CONFIG
 from controller import NativeIKSolver
+from vision_rgbd import CameraFrame, OpenCVRGBDPoseEstimator, make_camera_matrix
 
 
 class CableRobotEnvWithObstacles:
@@ -91,6 +92,7 @@ class CableRobotEnvWithObstacles:
         self.action_space_low  = -self.dq_max.copy()
 
         self.default_start_xy   = np.array(cfg_task["default_start_xy"])
+        self.episode_start_xy   = self.default_start_xy.copy()
         self.default_target     = np.array(cfg_task["default_target_xy"])
         self.target_pos         = self.default_target.copy()
         self.init_position_range = cfg_task["init_position_range"]
@@ -143,6 +145,7 @@ class CableRobotEnvWithObstacles:
         self._reresolve_ids()
         # [v12.3] 缓存绳索 body id, 用于 cable obs / energy 计算
         self._cache_cable_body_ids()
+        self._cache_rope_marker_site_ids()
 
         self._obstacles        = []
         self._planned_path     = None
@@ -167,6 +170,28 @@ class CableRobotEnvWithObstacles:
         self.wind_speed = 0.0          # user-facing wind speed (m/s)
         self._wind_curriculum_frac = 1.0  # 训练时的风力倍率（0→1）
         self._force_noise_sigma    = 0.0  # [v8] 环境噪声力 σ (N)
+
+        # ── [VISION] 三 RGB-D 相机的轻量测量模型 ─────────────────────────────
+        self.cfg_vision = self.config.get("vision", {})
+        vision_seed = self.cfg_vision.get("seed", None)
+        if vision_seed is None:
+            vision_seed = (wind_seed + 17) if wind_seed is not None else None
+        self.vision_rng = np.random.default_rng(vision_seed)
+        self._vision_queue = deque()
+        self._vision_current = None
+        self._vision_last_generated = None
+        self._vision_last_pos = None
+        self._vision_last_vel = None
+        self._vision_last_update_step = None
+        self._vision_episode_bias = {}
+        self._vision_estimator = None
+        self._vision_renderer = None
+        self._vision_scene_option = None
+        self._vision_camera_ids = {}
+        self._vision_frame_cache = {}
+        self._vision_last_fused_pose = None
+        self._vision_debug_dump_count = 0
+        self._vision_last_camera_statuses = []
 
         self.render_mode = cfg_sim["render"]
         self.viewer      = None
@@ -271,6 +296,542 @@ class CableRobotEnvWithObstacles:
                       f"cable obs 将全 0, 不影响其他训练. 检查 generate_four_cables_with_plate.py 是否一致.")
                 self._cable_warned = True
 
+    def _cache_rope_marker_site_ids(self):
+        cfg = self.config.get("rope_markers", {})
+        self._rope_marker_sites = []
+        self._rope_marker_sites_available = False
+        if not bool(cfg.get("enabled", False)):
+            return
+        n_markers = max(0, int(cfg.get("markers_per_rope", 5)))
+        for cname in self.CABLE_NAMES:
+            for mi in range(n_markers):
+                sname = f"{cname}_marker_{mi}"
+                sid = mujoco.mj_name2id(
+                    self.model, mujoco.mjtObj.mjOBJ_SITE, sname)
+                self._rope_marker_sites.append({
+                    "name": sname,
+                    "rope": cname,
+                    "marker_index": mi,
+                    "site_id": int(sid),
+                })
+        self._rope_marker_sites_available = any(
+            m["site_id"] >= 0 for m in self._rope_marker_sites)
+
+    def get_rope_marker_world_positions(self):
+        """Return visual rope-marker center positions in lab/world frame."""
+        markers = []
+        for meta in getattr(self, "_rope_marker_sites", []):
+            sid = int(meta.get("site_id", -1))
+            if sid < 0:
+                continue
+            markers.append({
+                "name": str(meta["name"]),
+                "rope": str(meta["rope"]),
+                "marker_index": int(meta["marker_index"]),
+                "pos": self.data.site_xpos[sid].copy().astype(np.float64),
+            })
+        return markers
+
+    def _rope_marker_feature_source(self):
+        cfg_pred = self.config.get("cable_latent_predictor", {})
+        cfg_marker = self.config.get("rope_markers", {})
+        source = str(cfg_pred.get(
+            "rope_marker_feature_source",
+            cfg_marker.get("feature_source", "site")) or "").strip().lower()
+        if not source:
+            source = str(cfg_marker.get("feature_source", "site")).lower()
+        return source
+
+    def _rope_marker_feature_reference_position(self, reference=None):
+        cfg = self.config.get("cable_latent_predictor", {})
+        reference = str(reference or cfg.get(
+            "rope_marker_feature_reference", "ee")).lower()
+        if reference == "payload":
+            return self.data.body('prefab').xpos.copy().astype(np.float64)
+        return self._get_ee_pos().astype(np.float64)
+
+    def _rope_marker_noise_vec(self, key, default=0.0):
+        cfg = self.config.get("rope_markers", {})
+        val = cfg.get(key, default)
+        if isinstance(val, (list, tuple, np.ndarray)):
+            arr = np.asarray(val, dtype=np.float64).reshape(-1)
+            if arr.size == 1:
+                return np.full(3, float(arr[0]), dtype=np.float64)
+            if arr.size >= 3:
+                return arr[:3].astype(np.float64)
+        return np.full(3, float(val), dtype=np.float64)
+
+    def _postprocess_rope_marker_position(self, p_lab, valid):
+        """Apply deployable marker measurement noise and dropout."""
+        cfg = self.config.get("rope_markers", {})
+        if not valid:
+            return None, False, "missing"
+        if self.vision_rng.random() < float(cfg.get("feature_dropout_prob", 0.0)):
+            return None, False, "dropout"
+        out = np.asarray(p_lab, dtype=np.float64).reshape(3).copy()
+        sigma = self._rope_marker_noise_vec("feature_pos_noise_std", 0.0)
+        if np.any(sigma > 0.0):
+            out += self.vision_rng.normal(0.0, sigma, size=3)
+        if self.vision_rng.random() < float(cfg.get("feature_outlier_prob", 0.0)):
+            out += self.vision_rng.normal(
+                0.0, float(cfg.get("feature_outlier_std", 0.0)), size=3)
+        return out, True, "ok"
+
+    def _rope_marker_rgbd_world_estimates(self):
+        """Estimate marker centers using RGB-D depth back-projection.
+
+        The current simulator uses an ideal marker-center detector: MuJoCo site
+        positions define the image pixel to sample, while the 3D position fed to
+        the policy is reconstructed from rendered depth and camera calibration.
+        This keeps the training path deployable in geometry/noise/masking terms,
+        while explicit image-level marker detection remains a later hardware
+        integration step.
+        """
+        markers = self.get_rope_marker_world_positions()
+        cfg_marker = self.config.get("rope_markers", {})
+        depth_tol = float(cfg_marker.get(
+            "visibility_depth_tolerance", 0.035))
+        depth_radius = int(cfg_marker.get("visibility_depth_window", 2))
+        quantize_px = bool(cfg_marker.get("feature_quantize_px", False))
+        pixel_noise = float(cfg_marker.get("feature_pixel_noise_std", 0.0))
+        width, height = self._vision_resolution()
+
+        fused = {}
+        in_fov = set()
+        camera_est_count = 0
+        camera_count = 0
+        for cam_cfg in list(self.cfg_vision.get("cameras", [])):
+            cam_name = str(cam_cfg.get("name", "rgbd"))
+            if self._vision_camera_id(cam_name) < 0:
+                continue
+            rendered = self._render_rgbd_camera(cam_cfg)
+            if rendered is None:
+                continue
+            _rgb, depth = rendered
+            if depth is None:
+                continue
+            camera_count += 1
+            K = self._vision_camera_matrix(cam_cfg)
+            T_lab_cam = self._vision_camera_lab_transform(cam_cfg)
+            R_lab_cam = T_lab_cam[:3, :3]
+            t_lab_cam = T_lab_cam[:3, 3]
+            max_range = float(cam_cfg.get("max_range", np.inf))
+
+            for marker in markers:
+                name = str(marker["name"])
+                p_lab = np.asarray(marker["pos"], dtype=np.float64).reshape(3)
+                p_cam = R_lab_cam.T @ (p_lab - t_lab_cam)
+                z_true = float(p_cam[2])
+                if z_true <= 1e-6 or z_true > max_range:
+                    continue
+                u = float(K[0, 0] * p_cam[0] / z_true + K[0, 2])
+                v = float(K[1, 1] * p_cam[1] / z_true + K[1, 2])
+                if not (0.0 <= u < width and 0.0 <= v < height):
+                    continue
+                in_fov.add(name)
+                u_det = round(u) if quantize_px else u
+                v_det = round(v) if quantize_px else v
+                if pixel_noise > 0.0:
+                    u_det += float(self.vision_rng.normal(0.0, pixel_noise))
+                    v_det += float(self.vision_rng.normal(0.0, pixel_noise))
+                z_depth = self._sample_depth_patch(
+                    depth, u_det, v_det, radius=depth_radius)
+                if z_depth is None:
+                    continue
+                z_depth = float(z_depth)
+                if abs(z_depth - z_true) > depth_tol:
+                    continue
+                x = (float(u_det) - K[0, 2]) * z_depth / K[0, 0]
+                y = (float(v_det) - K[1, 2]) * z_depth / K[1, 1]
+                p_est_lab = R_lab_cam @ np.array([x, y, z_depth]) + t_lab_cam
+                fused.setdefault(name, []).append(p_est_lab)
+                camera_est_count += 1
+
+        estimates = {
+            name: np.mean(np.asarray(points, dtype=np.float64), axis=0)
+            for name, points in fused.items()
+            if len(points) > 0
+        }
+        self._rope_marker_feature_last_diag = {
+            "source": "rgbd",
+            "markers_total": len(markers),
+            "in_fov": len(in_fov),
+            "visible": len(estimates),
+            "camera_estimates": int(camera_est_count),
+            "cameras": int(camera_count),
+        }
+        return estimates
+
+    @staticmethod
+    def _rope_marker_hue_mask(hue_img, target_hue, tolerance):
+        hue = np.asarray(hue_img, dtype=np.int16)
+        target = int(target_hue) % 180
+        diff = np.abs(hue - target)
+        diff = np.minimum(diff, 180 - diff)
+        return diff <= int(tolerance)
+
+    def _cluster_rope_marker_image_candidates(self, candidates):
+        cfg = self.config.get("rope_markers", {})
+        radius = max(1.0, float(cfg.get("opencv_cluster_px", 16.0)))
+        out = []
+        by_rope = {}
+        for cand in candidates:
+            by_rope.setdefault(str(cand.get("rope", "")), []).append(cand)
+        for rope, rope_candidates in by_rope.items():
+            clusters = []
+            for cand in sorted(
+                    rope_candidates,
+                    key=lambda c: float(c.get("area", 0.0)),
+                    reverse=True):
+                uv = np.array([float(cand["u"]), float(cand["v"])],
+                              dtype=np.float64)
+                best_i = -1
+                best_d = radius
+                for ci, cluster in enumerate(clusters):
+                    c_uv = np.array([cluster["u"], cluster["v"]],
+                                    dtype=np.float64)
+                    dist = float(np.linalg.norm(uv - c_uv))
+                    if dist <= best_d:
+                        best_d = dist
+                        best_i = ci
+                if best_i < 0:
+                    clusters.append({
+                        "rope": rope,
+                        "u": float(uv[0]),
+                        "v": float(uv[1]),
+                        "area": float(cand.get("area", 1.0)),
+                        "members": [cand],
+                    })
+                else:
+                    cluster = clusters[best_i]
+                    cluster["members"].append(cand)
+                    weights = np.asarray([
+                        max(1e-6, float(m.get("area", 1.0)))
+                        for m in cluster["members"]], dtype=np.float64)
+                    us = np.asarray([float(m["u"]) for m in cluster["members"]],
+                                    dtype=np.float64)
+                    vs = np.asarray([float(m["v"]) for m in cluster["members"]],
+                                    dtype=np.float64)
+                    cluster["area"] = float(np.sum(weights))
+                    cluster["u"] = float(np.average(us, weights=weights))
+                    cluster["v"] = float(np.average(vs, weights=weights))
+            out.extend(clusters)
+        return out
+
+    def _detect_rope_marker_blobs_opencv(self, rgb):
+        """Detect colored rope marker blobs from an RGB image with OpenCV."""
+        try:
+            import cv2
+        except Exception as exc:
+            self._rope_marker_opencv_last_error = f"opencv_import_failed:{exc}"
+            return []
+
+        img = np.asarray(rgb)
+        if img.ndim != 3 or img.shape[2] < 3:
+            return []
+        if img.dtype != np.uint8:
+            if np.nanmax(img) <= 1.5:
+                img = np.clip(img * 255.0, 0, 255).astype(np.uint8)
+            else:
+                img = np.clip(img, 0, 255).astype(np.uint8)
+        img = img[:, :, :3]
+        hsv = cv2.cvtColor(img, cv2.COLOR_RGB2HSV)
+        hue = hsv[:, :, 0]
+        sat = hsv[:, :, 1]
+        val = hsv[:, :, 2]
+
+        cfg = self.config.get("rope_markers", {})
+        hue_tol = int(cfg.get("opencv_hue_tolerance", 12))
+        sat_min = int(cfg.get("opencv_min_saturation", 70))
+        val_min = int(cfg.get("opencv_min_value", 70))
+        min_area = float(cfg.get("opencv_min_area_px", 4.0))
+        max_area = float(cfg.get("opencv_max_area_px", 2000.0))
+        kernel_size = int(cfg.get("opencv_morph_kernel", 3))
+        kernel = None
+        if kernel_size > 1:
+            kernel = np.ones((kernel_size, kernel_size), dtype=np.uint8)
+
+        candidates = []
+        colors = cfg.get("colors", {}) or {}
+        for rope in self.CABLE_NAMES:
+            rgba = np.asarray(
+                colors.get(rope, [1.0, 0.85, 0.05, 1.0]),
+                dtype=np.float64).reshape(-1)
+            rgb_u8 = np.clip(rgba[:3] * 255.0, 0, 255).astype(np.uint8)
+            target_hsv = cv2.cvtColor(
+                rgb_u8.reshape(1, 1, 3), cv2.COLOR_RGB2HSV)[0, 0]
+            mask = self._rope_marker_hue_mask(
+                hue, int(target_hsv[0]), hue_tol)
+            mask = mask & (sat >= sat_min) & (val >= val_min)
+            mask_u8 = (mask.astype(np.uint8) * 255)
+            if kernel is not None:
+                mask_u8 = cv2.morphologyEx(
+                    mask_u8, cv2.MORPH_OPEN, kernel)
+                mask_u8 = cv2.morphologyEx(
+                    mask_u8, cv2.MORPH_CLOSE, kernel)
+            contours, _hier = cv2.findContours(
+                mask_u8, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            for contour in contours:
+                area = float(cv2.contourArea(contour))
+                if area < min_area or area > max_area:
+                    continue
+                moment = cv2.moments(contour)
+                if abs(float(moment.get("m00", 0.0))) < 1e-9:
+                    continue
+                u = float(moment["m10"] / moment["m00"])
+                v = float(moment["m01"] / moment["m00"])
+                x, y, w, h = cv2.boundingRect(contour)
+                local = np.zeros((h, w), dtype=np.uint8)
+                shifted = contour - np.array([[[x, y]]], dtype=contour.dtype)
+                cv2.drawContours(local, [shifted], -1, 255, thickness=-1)
+                yy, xx = np.nonzero(local)
+                pixels = np.column_stack((xx + x, yy + y)).astype(np.float64)
+                candidates.append({
+                    "rope": rope,
+                    "u": u,
+                    "v": v,
+                    "area": area,
+                    "pixels": pixels,
+                })
+        return self._cluster_rope_marker_image_candidates(candidates)
+
+    def _backproject_rope_marker_cluster(self, cluster, depth, K,
+                                         R_lab_cam, t_lab_cam):
+        if depth is None:
+            return None
+        arr = np.asarray(depth, dtype=np.float64)
+        h, w = arr.shape[:2]
+        cfg = self.config.get("rope_markers", {})
+        quantize_px = bool(cfg.get("feature_quantize_px", False))
+        pixel_noise = float(cfg.get("feature_pixel_noise_std", 0.0))
+        depth_radius = int(cfg.get(
+            "opencv_depth_window",
+            cfg.get("visibility_depth_window", 2)))
+        points = []
+        for member in list(cluster.get("members", [])):
+            pixels = np.asarray(member.get("pixels", []),
+                                dtype=np.float64).reshape(-1, 2)
+            if pixels.size > 0:
+                if pixels.shape[0] > 80:
+                    step = max(1, int(np.ceil(pixels.shape[0] / 80.0)))
+                    pixels = pixels[::step]
+                uu = pixels[:, 0].copy()
+                vv = pixels[:, 1].copy()
+                if pixel_noise > 0.0:
+                    uu += self.vision_rng.normal(0.0, pixel_noise,
+                                                 size=uu.shape)
+                    vv += self.vision_rng.normal(0.0, pixel_noise,
+                                                 size=vv.shape)
+                if quantize_px:
+                    uu = np.round(uu)
+                    vv = np.round(vv)
+                ui = np.rint(uu).astype(np.int64)
+                vi = np.rint(vv).astype(np.int64)
+                ok = (ui >= 0) & (ui < w) & (vi >= 0) & (vi < h)
+                if np.any(ok):
+                    z = arr[vi[ok], ui[ok]]
+                    good = np.isfinite(z) & (z > 1e-6)
+                    if np.any(good):
+                        uu_g = uu[ok][good]
+                        vv_g = vv[ok][good]
+                        z_g = z[good]
+                        x = (uu_g - K[0, 2]) * z_g / K[0, 0]
+                        y = (vv_g - K[1, 2]) * z_g / K[1, 1]
+                        cam_pts = np.column_stack((x, y, z_g))
+                        lab_pts = (R_lab_cam @ cam_pts.T).T + t_lab_cam
+                        points.append(np.mean(lab_pts, axis=0))
+                        continue
+
+            u_det = float(member.get("u", cluster.get("u", 0.0)))
+            v_det = float(member.get("v", cluster.get("v", 0.0)))
+            if pixel_noise > 0.0:
+                u_det += float(self.vision_rng.normal(0.0, pixel_noise))
+                v_det += float(self.vision_rng.normal(0.0, pixel_noise))
+            if quantize_px:
+                u_det = round(u_det)
+                v_det = round(v_det)
+            z_depth = self._sample_depth_patch(
+                depth, u_det, v_det, radius=depth_radius)
+            if z_depth is None:
+                continue
+            x = (u_det - K[0, 2]) * float(z_depth) / K[0, 0]
+            y = (v_det - K[1, 2]) * float(z_depth) / K[1, 1]
+            points.append(
+                R_lab_cam @ np.array([x, y, float(z_depth)]) + t_lab_cam)
+
+        if not points:
+            return None
+        return np.mean(np.asarray(points, dtype=np.float64), axis=0)
+
+    def _cluster_rope_marker_world_points(self, world_points, n_markers):
+        cfg = self.config.get("rope_markers", {})
+        cluster_dist = max(1e-4, float(cfg.get("opencv_world_cluster_m", 0.025)))
+        estimates = {}
+        world_cluster_count = 0
+        support_count = 0
+        for rope in self.CABLE_NAMES:
+            entries = list(world_points.get(rope, []))
+            clusters = []
+            for entry in entries:
+                p = np.asarray(entry["pos"], dtype=np.float64).reshape(3)
+                best_i = -1
+                best_d = cluster_dist
+                for ci, cluster in enumerate(clusters):
+                    center = np.asarray(cluster["center"], dtype=np.float64)
+                    dist = float(np.linalg.norm(p - center))
+                    if dist <= best_d:
+                        best_d = dist
+                        best_i = ci
+                if best_i < 0:
+                    clusters.append({
+                        "points": [p],
+                        "weights": [max(1e-6, float(entry.get("area", 1.0)))],
+                        "cameras": {str(entry.get("camera", ""))},
+                        "center": p.copy(),
+                    })
+                else:
+                    cluster = clusters[best_i]
+                    cluster["points"].append(p)
+                    cluster["weights"].append(
+                        max(1e-6, float(entry.get("area", 1.0))))
+                    cluster["cameras"].add(str(entry.get("camera", "")))
+                    cluster["center"] = np.average(
+                        np.asarray(cluster["points"], dtype=np.float64),
+                        axis=0,
+                        weights=np.asarray(cluster["weights"],
+                                           dtype=np.float64))
+
+            clusters.sort(key=lambda c: float(c["center"][2]), reverse=True)
+            world_cluster_count += len(clusters)
+            for mi, cluster in enumerate(clusters[:n_markers]):
+                estimates[f"{rope}_marker_{mi}"] = np.asarray(
+                    cluster["center"], dtype=np.float64).copy()
+                support_count += len(cluster["points"])
+        return estimates, world_cluster_count, support_count
+
+    def _rope_marker_opencv_rgbd_world_estimates(self):
+        """Estimate rope markers from RGB color blobs and RGB-D back-projection."""
+        cfg_marker = self.config.get("rope_markers", {})
+        n_markers = max(0, int(cfg_marker.get("markers_per_rope", 5)))
+        markers_total = len(getattr(self, "_rope_marker_sites", []))
+        world_points = {rope: [] for rope in self.CABLE_NAMES}
+        detected_blobs = 0
+        image_clusters = 0
+        camera_est_count = 0
+        camera_count = 0
+        camera_names = []
+        error = ""
+
+        for cam_cfg in list(self.cfg_vision.get("cameras", [])):
+            cam_name = str(cam_cfg.get("name", "rgbd"))
+            if self._vision_camera_id(cam_name) < 0:
+                continue
+            rendered = self._render_rgbd_camera(cam_cfg)
+            if rendered is None:
+                continue
+            rgb, depth = rendered
+            if depth is None:
+                continue
+            camera_count += 1
+            camera_names.append(cam_name)
+            clusters = self._detect_rope_marker_blobs_opencv(rgb)
+            image_clusters += len(clusters)
+            detected_blobs += sum(len(c.get("members", [])) for c in clusters)
+            if not clusters and getattr(
+                    self, "_rope_marker_opencv_last_error", ""):
+                error = str(self._rope_marker_opencv_last_error)
+            K = self._vision_camera_matrix(cam_cfg)
+            T_lab_cam = self._vision_camera_lab_transform(cam_cfg)
+            R_lab_cam = T_lab_cam[:3, :3]
+            t_lab_cam = T_lab_cam[:3, 3]
+            for cluster in clusters:
+                p_lab = self._backproject_rope_marker_cluster(
+                    cluster, depth, K, R_lab_cam, t_lab_cam)
+                if p_lab is None:
+                    continue
+                rope = str(cluster.get("rope", ""))
+                if rope not in world_points:
+                    continue
+                world_points[rope].append({
+                    "pos": p_lab,
+                    "area": float(cluster.get("area", 1.0)),
+                    "camera": cam_name,
+                })
+                camera_est_count += 1
+
+        estimates, world_clusters, support_count = (
+            self._cluster_rope_marker_world_points(world_points, n_markers))
+        self._rope_marker_feature_last_diag = {
+            "source": "opencv_rgbd",
+            "markers_total": markers_total,
+            "in_fov": int(image_clusters),
+            "visible": len(estimates),
+            "camera_estimates": int(camera_est_count),
+            "cameras": int(camera_count),
+            "detected_blobs": int(detected_blobs),
+            "image_clusters": int(image_clusters),
+            "world_clusters": int(world_clusters),
+            "world_cluster_support": int(support_count),
+            "camera_names": camera_names,
+        }
+        if error:
+            self._rope_marker_feature_last_diag["error"] = error
+        return estimates
+
+    def get_rope_marker_feature_vector(self, reference=None):
+        """Return deployable rope-marker features for CableLatPred.
+
+        The feature order is fixed by CABLE_NAMES and marker index:
+        [rel_x, rel_y, rel_z, valid_mask] for each marker. In real tests the
+        same vector should be filled by multi-camera marker triangulation.
+        """
+        source = self._rope_marker_feature_source()
+        ref = self._rope_marker_feature_reference_position(reference)
+        rgbd_estimates = None
+        if source in ("rgbd", "vision", "backproject", "backprojection"):
+            rgbd_estimates = self._rope_marker_rgbd_world_estimates()
+        elif source in ("opencv_rgbd", "opencv", "color_rgbd", "color"):
+            rgbd_estimates = self._rope_marker_opencv_rgbd_world_estimates()
+        else:
+            self._rope_marker_feature_last_diag = {
+                "source": "site",
+                "markers_total": len(getattr(self, "_rope_marker_sites", [])),
+                "in_fov": 0,
+                "visible": len(getattr(self, "_rope_marker_sites", [])),
+                "camera_estimates": 0,
+                "cameras": 0,
+            }
+        out = []
+        n_valid = 0
+        n_dropout = 0
+        for meta in getattr(self, "_rope_marker_sites", []):
+            sid = int(meta.get("site_id", -1))
+            name = str(meta.get("name", ""))
+            if sid < 0:
+                p_raw = None
+            elif rgbd_estimates is not None:
+                p_raw = rgbd_estimates.get(name, None)
+            else:
+                p_raw = self.data.site_xpos[sid].copy().astype(np.float64)
+            p_est, valid, reason = self._postprocess_rope_marker_position(
+                p_raw, p_raw is not None)
+            if not valid:
+                if reason == "dropout":
+                    n_dropout += 1
+                out.extend([0.0, 0.0, 0.0, 0.0])
+            else:
+                rel = p_est - ref
+                out.extend([float(rel[0]), float(rel[1]), float(rel[2]), 1.0])
+                n_valid += 1
+        diag = getattr(self, "_rope_marker_feature_last_diag", {}) or {}
+        diag["valid_after_noise"] = int(n_valid)
+        diag["dropout"] = int(n_dropout)
+        self._rope_marker_feature_last_diag = diag
+        return np.asarray(out, dtype=np.float32)
+
+    def get_rope_marker_feature_debug(self):
+        return dict(getattr(self, "_rope_marker_feature_last_diag", {}) or {})
+
     def get_cable_segment_states(self):
         """
         返回每根绳每段的 (相对位置, 线速度).
@@ -336,6 +897,19 @@ class CableRobotEnvWithObstacles:
         if hasattr(self, '_key_callback') and self._key_callback is not None:
             kw['key_callback'] = self._key_callback
         self.viewer = mujoco.viewer.launch_passive(self.model, self.data, **kw)
+        self._configure_viewer_visuals()
+
+    def _configure_viewer_visuals(self):
+        if self.viewer is None or not bool(self.cfg_vision.get(
+                "show_camera_models", True)):
+            return
+        group = int(self.cfg_vision.get("camera_model_geom_group", 5))
+        try:
+            opt = getattr(self.viewer, "opt", None)
+            if opt is not None and 0 <= group < len(opt.geomgroup):
+                opt.geomgroup[group] = 1
+        except Exception:
+            pass
 
     def get_planned_path(self):
         return self._planned_path
@@ -468,6 +1042,751 @@ class CableRobotEnvWithObstacles:
         effective_speed = self.wind_speed * self._wind_curriculum_frac
         return float(effective_speed), float(self.wind_theta)
 
+    # ── [VISION] RGB-D 多相机测量模型 ───────────────────────────────────────
+    def _vision_enabled(self):
+        cfg = getattr(self, "cfg_vision", self.config.get("vision", {}))
+        return bool(cfg.get("enabled", False))
+
+    def _vision_total_delay_steps(self):
+        cfg = getattr(self, "cfg_vision", self.config.get("vision", {}))
+        return max(0, int(cfg.get("latency_steps", 0))) + \
+            max(0, int(cfg.get("processing_delay_steps", 0)))
+
+    @staticmethod
+    def _as_vec3(value, default):
+        arr = np.asarray(value if value is not None else default,
+                         dtype=np.float64).reshape(-1)
+        if arr.size < 3:
+            arr = np.pad(arr, (0, 3 - arr.size))
+        return arr[:3]
+
+    def _vision_source(self):
+        cfg = getattr(self, "cfg_vision", self.config.get("vision", {}))
+        return str(cfg.get("source", "opencv_rgbd")).lower()
+
+    def _reset_vision_runtime_after_model_change(self):
+        if getattr(self, "_vision_renderer", None) is not None:
+            try: self._vision_renderer.close()
+            except Exception: pass
+        self._vision_renderer = None
+        self._vision_scene_option = None
+        self._vision_camera_ids = {}
+        self._vision_frame_cache = {}
+
+    def _ensure_vision_estimator(self):
+        if self._vision_estimator is None:
+            opencv_cfg = copy.deepcopy(self.cfg_vision.get("opencv", {}))
+            self._vision_estimator = OpenCVRGBDPoseEstimator(opencv_cfg)
+        return self._vision_estimator
+
+    def _vision_resolution(self):
+        return (
+            int(self.cfg_vision.get("render_width", 640)),
+            int(self.cfg_vision.get("render_height", 480)),
+        )
+
+    def _vision_camera_id(self, name):
+        if name not in self._vision_camera_ids:
+            self._vision_camera_ids[name] = mujoco.mj_name2id(
+                self.model, mujoco.mjtObj.mjOBJ_CAMERA, name)
+        return int(self._vision_camera_ids[name])
+
+    def _vision_camera_matrix(self, cam_cfg):
+        width, height = self._vision_resolution()
+        K_cfg = cam_cfg.get("K", None)
+        if K_cfg is not None:
+            return np.asarray(K_cfg, dtype=np.float64).reshape(3, 3)
+        return make_camera_matrix(width, height, float(cam_cfg.get("fovy", 70.0)))
+
+    def _vision_camera_distortion(self, cam_cfg):
+        return np.asarray(cam_cfg.get("dist", [0, 0, 0, 0, 0]),
+                          dtype=np.float64).reshape(-1)
+
+    def _vision_camera_lab_transform(self, cam_cfg):
+        name = str(cam_cfg.get("name", ""))
+        cam_id = self._vision_camera_id(name)
+        T = np.eye(4, dtype=np.float64)
+        # MuJoCo/OpenGL camera frame: x right, y up, forward -z.
+        # OpenCV camera frame: x right, y down, forward +z.
+        R_mj_from_cv = np.diag([1.0, -1.0, -1.0])
+        if cam_id >= 0:
+            T[:3, 3] = self.data.cam_xpos[cam_id].copy()
+            R_lab_mj = self.data.cam_xmat[cam_id].reshape(3, 3).copy()
+            T[:3, :3] = R_lab_mj @ R_mj_from_cv
+            return T
+        T[:3, 3] = self._as_vec3(cam_cfg.get("pos"), [0, 0, 1])
+        R_lab_mj = R.from_euler(
+            "xyz", self._as_vec3(cam_cfg.get("euler"), [0, 0, 0])).as_matrix()
+        T[:3, :3] = R_lab_mj @ R_mj_from_cv
+        return T
+
+    def _ensure_vision_renderer(self):
+        width, height = self._vision_resolution()
+        if self._vision_renderer is None:
+            self._vision_renderer = mujoco.Renderer(
+                self.model, height=height, width=width)
+        return self._vision_renderer
+
+    def _vision_render_scene_option(self):
+        if self._vision_scene_option is None:
+            opt = mujoco.MjvOption()
+            group = int(self.cfg_vision.get("camera_model_geom_group", 5))
+            if 0 <= group < len(opt.geomgroup):
+                opt.geomgroup[group] = 0
+            if bool(self.cfg_vision.get("hide_sites_in_vision", True)):
+                for i in range(len(opt.sitegroup)):
+                    opt.sitegroup[i] = 0
+            if bool(self.cfg_vision.get("hide_tendons_in_vision", True)):
+                for attr in ("tendongroup", "jointgroup", "actuatorgroup"):
+                    groups = getattr(opt, attr, None)
+                    if groups is not None:
+                        for i in range(len(groups)):
+                            groups[i] = 0
+            self._vision_scene_option = opt
+        return self._vision_scene_option
+
+    def _update_vision_renderer_scene(self, renderer, camera_name):
+        scene_option = self._vision_render_scene_option()
+        camera_refs = [camera_name]
+        camera_id = self._vision_camera_id(camera_name)
+        if camera_id >= 0:
+            camera_refs.append(camera_id)
+
+        last_exc = None
+        for camera_ref in camera_refs:
+            try:
+                renderer.update_scene(
+                    self.data, camera=camera_ref, scene_option=scene_option)
+                return
+            except TypeError:
+                try:
+                    renderer.update_scene(self.data, camera=camera_ref)
+                    return
+                except Exception as exc:
+                    last_exc = exc
+            except Exception as exc:
+                last_exc = exc
+        if last_exc is not None:
+            raise last_exc
+
+    def _render_rgbd_camera(self, cam_cfg):
+        name = str(cam_cfg.get("name", ""))
+        if self._vision_camera_id(name) < 0:
+            return None
+        cache_enabled = bool(self.cfg_vision.get(
+            "reuse_rendered_rgbd_frames", True))
+        cache_key = None
+        if cache_enabled:
+            cache_key = (name, round(float(getattr(self.data, "time", 0.0)), 9))
+            cached = getattr(self, "_vision_frame_cache", {}).get(cache_key)
+            if cached is not None:
+                return cached
+        renderer = self._ensure_vision_renderer()
+        try:
+            if hasattr(renderer, "disable_depth_rendering"):
+                renderer.disable_depth_rendering()
+            self._update_vision_renderer_scene(renderer, name)
+            rgb = renderer.render().copy()
+            depth = None
+            if hasattr(renderer, "enable_depth_rendering"):
+                renderer.enable_depth_rendering()
+                self._update_vision_renderer_scene(renderer, name)
+                depth = renderer.render().copy()
+                renderer.disable_depth_rendering()
+            rendered = (rgb, depth)
+            if cache_enabled and cache_key is not None:
+                cache = getattr(self, "_vision_frame_cache", {})
+                if len(cache) > 16:
+                    cache.clear()
+                cache[cache_key] = rendered
+                self._vision_frame_cache = cache
+            return rendered
+        except Exception as exc:
+            print(f"[vision] RGB-D render failed for camera {name}: {exc}")
+            return None
+
+    def _dump_vision_debug_frame(self, frame, estimate):
+        dump_dir = str(self.cfg_vision.get("debug_dump_dir", "") or "").strip()
+        limit = int(self.cfg_vision.get("debug_dump_frames", 0))
+        if not dump_dir or limit <= 0:
+            return
+        if int(getattr(self, "_vision_debug_dump_count", 0)) >= limit:
+            return
+        try:
+            import cv2
+            os.makedirs(dump_dir, exist_ok=True)
+            step = int(getattr(self, "current_step", 0))
+            start_step = int(self.cfg_vision.get("debug_dump_start_step", 0))
+            end_step = int(self.cfg_vision.get("debug_dump_end_step", -1))
+            if step < start_step or (end_step >= 0 and step > end_step):
+                return
+            idx = int(getattr(self, "_vision_debug_dump_count", 0))
+            stem = f"{idx:04d}_step{step:04d}_{frame.name}_{'ok' if estimate is not None else 'fail'}"
+            rgb = np.asarray(frame.rgb)
+            bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR) if rgb.ndim == 3 else rgb
+            cv2.imwrite(os.path.join(dump_dir, stem + "_rgb.png"), bgr)
+
+            overlay = bgr.copy()
+            try:
+                estimator = self._ensure_vision_estimator()
+                corners, ids = estimator._detect_markers(rgb)
+                if len(corners) > 0:
+                    cv2.aruco.drawDetectedMarkers(overlay, corners, ids.reshape(-1, 1))
+            except Exception:
+                pass
+            status = "ok" if estimate is not None else "fail"
+            cv2.putText(
+                overlay,
+                f"step={step} cam={frame.name} status={status}",
+                (10, 24),
+                cv2.FONT_HERSHEY_SIMPLEX,
+                0.6,
+                (0, 255, 255),
+                2,
+                cv2.LINE_AA,
+            )
+            cv2.imwrite(os.path.join(dump_dir, stem + "_detect.png"), overlay)
+
+            if frame.depth is not None:
+                depth = np.asarray(frame.depth, dtype=np.float32)
+                finite = depth[np.isfinite(depth) & (depth > 0)]
+                if finite.size > 0:
+                    lo, hi = np.percentile(finite, [1, 99])
+                    denom = max(float(hi - lo), 1e-6)
+                    depth_u8 = np.clip((depth - lo) / denom * 255.0, 0, 255).astype(np.uint8)
+                    cv2.imwrite(os.path.join(dump_dir, stem + "_depth.png"), depth_u8)
+            self._vision_debug_dump_count = idx + 1
+        except Exception as exc:
+            if int(getattr(self, "_vision_debug_dump_count", 0)) == 0:
+                print(f"[vision] debug frame dump failed: {exc}")
+
+    def _estimate_payload_pose_from_rgbd(self):
+        estimator = self._ensure_vision_estimator()
+        estimates = []
+        statuses = []
+        for cam_cfg in list(self.cfg_vision.get("cameras", [])):
+            cam_name = str(cam_cfg.get("name", "rgbd"))
+            rendered = self._render_rgbd_camera(cam_cfg)
+            if rendered is None:
+                statuses.append({
+                    "name": cam_name,
+                    "valid": False,
+                    "reason": "render_failed",
+                    "marker_ids": [],
+                })
+                continue
+            rgb, depth = rendered
+            frame = CameraFrame(
+                name=cam_name,
+                rgb=rgb,
+                depth=depth,
+                K=self._vision_camera_matrix(cam_cfg),
+                dist=self._vision_camera_distortion(cam_cfg),
+                T_lab_cam=self._vision_camera_lab_transform(cam_cfg),
+            )
+            est = estimator.estimate_frame(frame)
+            self._dump_vision_debug_frame(frame, est)
+            if est is not None:
+                statuses.append({
+                    "name": cam_name,
+                    "valid": True,
+                    "reason": "",
+                    "marker_ids": list(est.marker_ids),
+                    "reprojection_error": float(est.reprojection_error),
+                    "depth_rmse": float(est.depth_rmse),
+                    "depth_support": int(est.depth_support),
+                })
+                estimates.append(est)
+            else:
+                marker_ids = []
+                reason = "opencv_no_marker_pose"
+                try:
+                    _corners, ids = estimator._detect_markers(rgb)
+                    marker_ids = [int(v) for v in np.asarray(ids).reshape(-1)]
+                    if marker_ids:
+                        reason = "pose_rejected"
+                except Exception as exc:
+                    reason = f"detect_error:{exc}"
+                statuses.append({
+                    "name": cam_name,
+                    "valid": False,
+                    "reason": reason,
+                    "marker_ids": marker_ids,
+                })
+        self._vision_last_camera_statuses = copy.deepcopy(statuses)
+        fused = estimator.fuse(estimates)
+        if fused is None:
+            return None
+        fused["camera_statuses"] = copy.deepcopy(statuses)
+        return fused
+
+    def _nominal_vision_measurement(self, reason="no_detection"):
+        if self._vision_last_generated is not None:
+            held = copy.deepcopy(self._vision_last_generated)
+            held["valid"] = False
+            held["age_steps"] = int(held.get("age_steps", 0)) + 1
+            held["failure_reason"] = reason
+            held["camera_statuses"] = copy.deepcopy(getattr(
+                self, "_vision_last_camera_statuses", []))
+            return held
+        start_xy = np.asarray(getattr(self, "episode_start_xy",
+                                      self.default_start_xy), dtype=np.float64)
+        z0 = float(self.cfg_vision.get(
+            "initial_payload_z",
+            self.config.get("planning", {}).get("payload_z_cruise", 0.25)))
+        return {
+            "pos": np.array([start_xy[0], start_xy[1], z0], dtype=np.float64),
+            "vel": np.zeros(3, dtype=np.float64),
+            "tilt": 0.0,
+            "yaw": 0.0,
+            "valid": False,
+            "active_cameras": 0,
+            "active_camera_names": [],
+            "marker_ids": [],
+            "age_steps": 0,
+            "source_step": int(getattr(self, "current_step", 0)),
+            "source": self._vision_source(),
+            "failure_reason": reason,
+            "camera_statuses": copy.deepcopy(getattr(
+                self, "_vision_last_camera_statuses", [])),
+        }
+
+    def _opencv_pose_to_measurement(self, fused, period):
+        pos = np.asarray(fused["pos"], dtype=np.float64).reshape(3)
+        R_lab_payload = np.asarray(fused["R"], dtype=np.float64).reshape(3, 3)
+        euler = R.from_matrix(R_lab_payload).as_euler("xyz")
+        tilt = float(np.sqrt(euler[0] ** 2 + euler[1] ** 2))
+        yaw = float(euler[2])
+        if self._vision_last_pos is not None:
+            raw_vel = (pos - self._vision_last_pos) / max(self.dt * period, 1e-6)
+        else:
+            raw_vel = np.zeros(3, dtype=np.float64)
+        alpha = float(np.clip(self.cfg_vision.get(
+            "velocity_lowpass_alpha", 0.55), 0.0, 1.0))
+        if self._vision_last_vel is None:
+            vel = raw_vel
+        else:
+            vel = alpha * raw_vel + (1.0 - alpha) * self._vision_last_vel
+        self._vision_last_pos = pos.copy()
+        self._vision_last_vel = vel.copy()
+        meas = {
+            "pos": pos,
+            "vel": vel,
+            "tilt": tilt,
+            "yaw": yaw,
+            "valid": True,
+            "active_cameras": int(fused.get("active_cameras", 0)),
+            "active_camera_names": list(fused.get("active_camera_names", [])),
+            "marker_ids": list(fused.get("marker_ids", [])),
+            "reprojection_error": float(fused.get("reprojection_error", 0.0)),
+            "depth_rmse": float(fused.get("depth_rmse", 0.0)),
+            "depth_support": int(fused.get("depth_support", 0)),
+            "age_steps": 0,
+            "source_step": int(getattr(self, "current_step", 0)),
+            "source": self._vision_source(),
+            "failure_reason": "",
+            "camera_statuses": copy.deepcopy(fused.get(
+                "camera_statuses",
+                getattr(self, "_vision_last_camera_statuses", []))),
+        }
+        self._vision_last_fused_pose = fused
+        return meas
+
+    def reset_vision_state(self):
+        """Reset per-episode RGB-D biases and fill the latency queue."""
+        if not self._vision_enabled():
+            self._vision_queue.clear()
+            self._vision_current = None
+            self._vision_last_generated = None
+            self._vision_last_pos = None
+            self._vision_last_vel = None
+            self._vision_last_update_step = None
+            self._vision_last_fused_pose = None
+            self._vision_last_camera_statuses = []
+            self._vision_debug_dump_count = 0
+            return
+
+        cfg = self.cfg_vision
+        self._vision_episode_bias = {
+            "pos": self.vision_rng.normal(
+                0.0, self._as_vec3(cfg.get("position_bias_std"), [0, 0, 0])),
+            "vel": self.vision_rng.normal(
+                0.0, self._as_vec3(cfg.get("velocity_bias_std"), [0, 0, 0])),
+            "tilt": float(self.vision_rng.normal(
+                0.0, float(cfg.get("tilt_bias_std", 0.0)))),
+            "yaw": float(self.vision_rng.normal(
+                0.0, float(cfg.get("yaw_bias_std", 0.0)))),
+        }
+        delay = self._vision_total_delay_steps()
+        self._vision_queue = deque(maxlen=delay + 1)
+        self._vision_current = None
+        self._vision_last_generated = None
+        self._vision_last_pos = None
+        self._vision_last_vel = None
+        self._vision_last_update_step = None
+        self._vision_last_fused_pose = None
+        self._vision_last_camera_statuses = []
+        self._vision_debug_dump_count = 0
+
+        first = self._generate_vision_measurement(force=True)
+        for _ in range(delay):
+            self._vision_queue.append(copy.deepcopy(first))
+        self._vision_current = copy.deepcopy(first)
+
+    def _payload_state_for_vision(self):
+        pl_pos = self.data.body('prefab').xpos.copy().astype(np.float64)
+        dof_idx = self.model.jnt_dofadr[self.prefab_jnt_id]
+        pl_vel = self.data.qvel[dof_idx:dof_idx + 3].copy().astype(np.float64)
+        pl_mat = self.data.body('prefab').xmat.reshape(3, 3)
+        pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+        tilt = float(np.sqrt(pl_euler[0] ** 2 + pl_euler[1] ** 2))
+        yaw = float(pl_euler[2])
+        return {"pos": pl_pos, "vel": pl_vel, "tilt": tilt, "yaw": yaw}
+
+    def _camera_occlusion_scale(self, cam_pos, payload_pos):
+        cfg = self.cfg_vision
+        penalty = float(cfg.get("occlusion_penalty", 1.0))
+        if penalty >= 0.999 or not getattr(self, "_obstacles", None):
+            return 1.0
+        a = np.asarray(cam_pos[:2], dtype=np.float64)
+        b = np.asarray(payload_pos[:2], dtype=np.float64)
+        ab = b - a
+        denom = float(np.dot(ab, ab))
+        if denom < 1e-9:
+            return 1.0
+        obs_z = float(self.config.get("scene", {}).get("obstacle_z_center", 0.15))
+        obs_hh = float(self.config.get("scene", {}).get("obstacle_halfheight", 0.15))
+        if float(payload_pos[2]) > obs_z + obs_hh + 0.05:
+            return 1.0
+        for ox, oy, radius in self._obstacles:
+            c = np.array([ox, oy], dtype=np.float64)
+            t = float(np.clip(np.dot(c - a, ab) / denom, 0.0, 1.0))
+            closest = a + t * ab
+            if float(np.linalg.norm(c - closest)) < float(radius) + 0.02:
+                return max(0.05, penalty)
+        return 1.0
+
+    def _generate_vision_measurement(self, force=False):
+        cfg = self.cfg_vision
+        period = max(1, int(cfg.get("measurement_period_steps", 1)))
+        step = int(getattr(self, "current_step", 0))
+        if (not force and self._vision_last_generated is not None and
+                step % period != 0):
+            held = copy.deepcopy(self._vision_last_generated)
+            held["age_steps"] = int(held.get("age_steps", 0)) + 1
+            return held
+
+        source = self._vision_source()
+        if source == "truth_noise":
+            if not bool(cfg.get("allow_truth_fallback", False)):
+                raise RuntimeError(
+                    "vision.source='truth_noise' requires "
+                    "vision.allow_truth_fallback=True because it uses MuJoCo "
+                    "payload ground truth.")
+            return self._generate_truth_noise_vision_measurement(force=force)
+        if source != "opencv_rgbd":
+            raise ValueError(f"Unknown vision.source: {source}")
+
+        fused = self._estimate_payload_pose_from_rgbd()
+        if fused is None:
+            meas = self._nominal_vision_measurement("opencv_no_marker_pose")
+        else:
+            meas = self._opencv_pose_to_measurement(fused, period)
+        self._vision_last_generated = copy.deepcopy(meas)
+        return meas
+
+    def _generate_truth_noise_vision_measurement(self, force=False):
+        cfg = self.cfg_vision
+        true = self._payload_state_for_vision()
+        period = max(1, int(cfg.get("measurement_period_steps", 1)))
+        step = int(getattr(self, "current_step", 0))
+        if (not force and self._vision_last_generated is not None and
+                step % period != 0):
+            held = copy.deepcopy(self._vision_last_generated)
+            held["age_steps"] = int(held.get("age_steps", 0)) + 1
+            return held
+
+        pos_sigma = self._as_vec3(cfg.get("position_noise_std"),
+                                  [0.003, 0.003, 0.0045])
+        vel_sigma = self._as_vec3(cfg.get("velocity_noise_std"),
+                                  [0.010, 0.010, 0.014])
+        depth_per_m = float(cfg.get("depth_noise_per_m", 0.0))
+        dropout_prob = float(cfg.get("dropout_prob", 0.0))
+        min_active = max(1, int(cfg.get("min_active_cameras", 1)))
+        fused = []
+        weights = []
+        active_names = []
+
+        for cam in list(cfg.get("cameras", [])):
+            if self.vision_rng.random() < dropout_prob:
+                continue
+            cam_pos = self._as_vec3(cam.get("pos"), [0, 0, 1])
+            rel = true["pos"] - cam_pos
+            dist = max(float(np.linalg.norm(rel)), 1e-6)
+            if dist > float(cam.get("max_range", 10.0)):
+                continue
+            quality = 1.0 / (1.0 + dist * dist)
+            quality *= self._camera_occlusion_scale(cam_pos, true["pos"])
+            if quality <= 0.0:
+                continue
+            sigma = pos_sigma.copy()
+            sigma[2] += depth_per_m * dist
+            sigma = sigma / max(np.sqrt(quality), 1e-3)
+            cam_bias = self._as_vec3(cam.get("bias"), [0, 0, 0])
+            meas = (true["pos"] + self._vision_episode_bias.get("pos", 0.0) +
+                    cam_bias + self.vision_rng.normal(0.0, sigma))
+            fused.append(meas)
+            weights.append(max(quality, 1e-3))
+            active_names.append(str(cam.get("name", "rgbd")))
+
+        valid = len(fused) >= min_active
+        if fused:
+            pos_meas = np.average(
+                np.asarray(fused), axis=0,
+                weights=np.asarray(weights, dtype=np.float64))
+        elif self._vision_last_generated is not None:
+            pos_meas = self._vision_last_generated["pos"].copy()
+        else:
+            pos_meas = true["pos"].copy()
+
+        if self.vision_rng.random() < float(cfg.get("outlier_prob", 0.0)):
+            pos_meas = pos_meas + self.vision_rng.normal(
+                0.0, float(cfg.get("outlier_pos_std", 0.03)), size=3)
+            valid = False
+
+        if self._vision_last_pos is not None:
+            raw_vel = (pos_meas - self._vision_last_pos) / max(self.dt * period, 1e-6)
+        else:
+            raw_vel = true["vel"].copy()
+        raw_vel = raw_vel + self._vision_episode_bias.get("vel", 0.0) + \
+            self.vision_rng.normal(0.0, vel_sigma)
+        alpha = float(np.clip(cfg.get("velocity_lowpass_alpha", 0.55), 0.0, 1.0))
+        if self._vision_last_vel is None:
+            vel_meas = raw_vel
+        else:
+            vel_meas = alpha * raw_vel + (1.0 - alpha) * self._vision_last_vel
+
+        tilt_meas = true["tilt"] + self._vision_episode_bias.get("tilt", 0.0) + \
+            float(self.vision_rng.normal(0.0, float(cfg.get("tilt_noise_std", 0.01))))
+        yaw_meas = true["yaw"] + self._vision_episode_bias.get("yaw", 0.0) + \
+            float(self.vision_rng.normal(0.0, float(cfg.get("yaw_noise_std", 0.012))))
+
+        self._vision_last_pos = pos_meas.copy()
+        self._vision_last_vel = vel_meas.copy()
+        meas = {
+            "pos": pos_meas.astype(np.float64),
+            "vel": vel_meas.astype(np.float64),
+            "tilt": float(tilt_meas),
+            "yaw": float(yaw_meas),
+            "valid": bool(valid),
+            "active_cameras": int(len(fused)),
+            "active_camera_names": active_names,
+            "age_steps": 0,
+            "source_step": step,
+        }
+        self._vision_last_generated = copy.deepcopy(meas)
+        return meas
+
+    def _current_vision_measurement(self):
+        if not self._vision_enabled():
+            return None
+        step = int(getattr(self, "current_step", 0))
+        if self._vision_last_update_step == step and self._vision_current is not None:
+            return self._vision_current
+        if self._vision_last_generated is None and not self._vision_queue:
+            self.reset_vision_state()
+        generated = self._generate_vision_measurement()
+        self._vision_queue.append(copy.deepcopy(generated))
+        delay = self._vision_total_delay_steps()
+        if delay <= 0:
+            self._vision_current = copy.deepcopy(generated)
+        elif len(self._vision_queue) > delay:
+            self._vision_current = copy.deepcopy(self._vision_queue.popleft())
+        elif self._vision_queue:
+            self._vision_current = copy.deepcopy(self._vision_queue[0])
+        else:
+            self._vision_current = copy.deepcopy(generated)
+        self._vision_last_update_step = step
+        return self._vision_current
+
+    def _apply_vision_to_obs(self, obs):
+        meas = self._current_vision_measurement()
+        if meas is None:
+            return obs
+        out = np.asarray(obs, dtype=np.float32).copy()
+        pos = np.asarray(meas["pos"], dtype=np.float32)
+        vel = np.asarray(meas["vel"], dtype=np.float32)
+        out[4], out[5] = pos[0], pos[1]
+        out[6], out[7] = vel[0], vel[1]
+        out[8] = float(self.target_pos[0] - pos[0])
+        out[9] = float(self.target_pos[1] - pos[1])
+        out[21], out[22] = pos[2], vel[2]
+        out[29] = float(meas["tilt"])
+        out[30] = float(meas["yaw"])
+        if out.size > 49:
+            target_pz = float(self.cfg_insertion.get("target_payload_z", 0.10))
+            out[49] = float(pos[2] - target_pz)
+        if out.size >= 54:
+            entry_z = float(self.cfg_insertion.get("entry_z", 0.16))
+            out[45:48] = 0.0
+            if pos[2] <= entry_z or getattr(self, '_in_insertion_phase', False):
+                out[47] = 1.0
+            elif self.reached_final:
+                out[46] = 1.0
+            else:
+                out[45] = 1.0
+            rebar_errors = np.zeros(4, dtype=np.float32)
+            if float(np.linalg.norm(pos[:2] - self.target_pos)) < 0.05:
+                local = np.array([
+                    [0.035, 0.035], [0.035, -0.035],
+                    [-0.035, 0.035], [-0.035, -0.035]], dtype=np.float32)
+                cy = float(np.cos(meas["yaw"]))
+                sy = float(np.sin(meas["yaw"]))
+                R2 = np.array([[cy, -sy], [sy, cy]], dtype=np.float32)
+                for i in range(4):
+                    hole_w = pos[:2] + R2 @ local[i]
+                    rebar_w = self.target_pos.astype(np.float32) + local[i]
+                    rebar_errors[i] = float(np.linalg.norm(hole_w - rebar_w))
+            out[50:54] = rebar_errors
+        return out
+
+    def get_vision_debug(self):
+        meas = getattr(self, "_vision_current", None)
+        if not meas:
+            return {}
+        return {
+            "valid": bool(meas.get("valid", False)),
+            "active_cameras": int(meas.get("active_cameras", 0)),
+            "active_camera_names": list(meas.get("active_camera_names", [])),
+            "marker_ids": list(meas.get("marker_ids", [])),
+            "age_steps": int(meas.get("age_steps", 0)) +
+                         self._vision_total_delay_steps(),
+            "source_step": int(meas.get("source_step", -1)),
+            "source": str(meas.get("source", self._vision_source())),
+            "reprojection_error": float(meas.get("reprojection_error", 0.0)),
+            "depth_rmse": float(meas.get("depth_rmse", 0.0)),
+            "depth_support": int(meas.get("depth_support", 0)),
+            "failure_reason": str(meas.get("failure_reason", "")),
+            "camera_statuses": copy.deepcopy(meas.get("camera_statuses", [])),
+        }
+
+    def get_vision_measurement(self):
+        meas = self._current_vision_measurement()
+        return copy.deepcopy(meas) if meas is not None else None
+
+    @staticmethod
+    def _sample_depth_patch(depth, u, v, radius=2):
+        if depth is None:
+            return None
+        arr = np.asarray(depth, dtype=np.float64)
+        h, w = arr.shape[:2]
+        ui = int(round(float(u)))
+        vi = int(round(float(v)))
+        if ui < 0 or ui >= w or vi < 0 or vi >= h:
+            return None
+        x0 = max(0, ui - int(radius))
+        x1 = min(w, ui + int(radius) + 1)
+        y0 = max(0, vi - int(radius))
+        y1 = min(h, vi + int(radius) + 1)
+        patch = arr[y0:y1, x0:x1].reshape(-1)
+        patch = patch[np.isfinite(patch) & (patch > 1e-6)]
+        if patch.size == 0:
+            return None
+        return float(np.median(patch))
+
+    def get_rope_marker_camera_diagnostics(self, use_depth=True):
+        """Project rope markers into each RGB-D camera and summarize coverage."""
+        markers = self.get_rope_marker_world_positions()
+        width, height = self._vision_resolution()
+        cfg_marker = self.config.get("rope_markers", {})
+        depth_tol = float(cfg_marker.get(
+            "visibility_depth_tolerance", 0.035))
+        depth_radius = int(cfg_marker.get("visibility_depth_window", 2))
+        total = len(markers)
+        union_fov = set()
+        union_depth = set()
+        cameras = []
+        for cam_cfg in list(self.cfg_vision.get("cameras", [])):
+            cam_name = str(cam_cfg.get("name", "rgbd"))
+            K = self._vision_camera_matrix(cam_cfg)
+            T_lab_cam = self._vision_camera_lab_transform(cam_cfg)
+            R_lab_cam = T_lab_cam[:3, :3]
+            t_lab_cam = T_lab_cam[:3, 3]
+            max_range = float(cam_cfg.get("max_range", np.inf))
+            depth = None
+            if use_depth and self._vision_camera_id(cam_name) >= 0:
+                rendered = self._render_rgbd_camera(cam_cfg)
+                if rendered is not None:
+                    _rgb, depth = rendered
+            cam_rows = []
+            in_fov_count = 0
+            depth_visible_count = 0
+            distances = []
+            for marker in markers:
+                p_lab = np.asarray(marker["pos"], dtype=np.float64).reshape(3)
+                p_cam = R_lab_cam.T @ (p_lab - t_lab_cam)
+                z = float(p_cam[2])
+                dist = float(np.linalg.norm(p_lab - t_lab_cam))
+                distances.append(dist)
+                in_front = z > 1e-6
+                u = np.nan
+                v = np.nan
+                if in_front:
+                    u = float(K[0, 0] * p_cam[0] / z + K[0, 2])
+                    v = float(K[1, 1] * p_cam[1] / z + K[1, 2])
+                in_range = bool(in_front and z <= max_range)
+                in_fov = bool(
+                    in_range and 0.0 <= u < width and 0.0 <= v < height)
+                depth_value = None
+                depth_visible = None
+                if in_fov:
+                    in_fov_count += 1
+                    union_fov.add(marker["name"])
+                    if depth is not None:
+                        depth_value = self._sample_depth_patch(
+                            depth, u, v, radius=depth_radius)
+                        if depth_value is not None:
+                            depth_visible = bool(abs(depth_value - z) <= depth_tol)
+                            if depth_visible:
+                                depth_visible_count += 1
+                                union_depth.add(marker["name"])
+                    elif not use_depth:
+                        depth_visible = True
+                        depth_visible_count += 1
+                        union_depth.add(marker["name"])
+                cam_rows.append({
+                    "name": marker["name"],
+                    "rope": marker["rope"],
+                    "marker_index": int(marker["marker_index"]),
+                    "pixel": [u, v],
+                    "camera_z": z,
+                    "distance": dist,
+                    "in_fov": in_fov,
+                    "depth": depth_value,
+                    "depth_visible": depth_visible,
+                })
+            cameras.append({
+                "name": cam_name,
+                "markers_total": total,
+                "in_fov": in_fov_count,
+                "depth_visible": depth_visible_count,
+                "distance_min": float(min(distances)) if distances else 0.0,
+                "distance_max": float(max(distances)) if distances else 0.0,
+                "markers": cam_rows,
+            })
+        visible_union = union_depth if (use_depth and cameras) else union_fov
+        return {
+            "markers_total": total,
+            "cameras_total": len(cameras),
+            "union_in_fov": len(union_fov),
+            "union_depth_visible": len(union_depth),
+            "union_visible": len(visible_union),
+            "coverage_fov": (len(union_fov) / max(total, 1)),
+            "coverage_visible": (len(visible_union) / max(total, 1)),
+            "use_depth": bool(use_depth),
+            "cameras": cameras,
+        }
+
     # ── [v8] 环境噪声力 (force_noise) ────────────────────────────────────────
     def set_force_noise(self, sigma_n: float):
         """
@@ -520,6 +1839,72 @@ class CableRobotEnvWithObstacles:
         if self.viewer is not None:
             try: self.viewer.close()
             except Exception: pass
+        if getattr(self, "_vision_renderer", None) is not None:
+            try: self._vision_renderer.close()
+            except Exception: pass
+            self._vision_renderer = None
+
+    def _target_xy_candidate_valid(self, target_xy, start_xy, cfg_task):
+        target_xy = np.asarray(target_xy, dtype=np.float64).reshape(2)
+        start_xy = np.asarray(start_xy, dtype=np.float64).reshape(2)
+
+        min_start_dist = float(cfg_task.get("target_xy_min_start_dist", 0.0))
+        if min_start_dist > 0.0:
+            if np.linalg.norm(target_xy - start_xy) < min_start_dist:
+                return False
+
+        min_norm = float(cfg_task.get("target_xy_min_norm", 0.0))
+        if min_norm > 0.0 and np.linalg.norm(target_xy) < min_norm:
+            return False
+
+        margin = float(cfg_task.get("target_xy_workspace_margin", 0.0))
+        max_norm = float(cfg_task.get(
+            "target_xy_max_norm",
+            max(0.0, self.workspace_radius - margin)))
+        if max_norm > 0.0 and np.linalg.norm(target_xy) > max_norm:
+            return False
+
+        for zone in cfg_task.get("target_xy_dead_zones", []) or []:
+            if isinstance(zone, dict):
+                center = zone.get("center", [0.0, 0.0])
+                radius = zone.get("radius", 0.0)
+            else:
+                if len(zone) < 3:
+                    continue
+                center = zone[:2]
+                radius = zone[2]
+            center = np.asarray(center, dtype=np.float64).reshape(2)
+            if np.linalg.norm(target_xy - center) < float(radius):
+                return False
+        return True
+
+    def _sample_episode_target_xy(self, start_xy, cfg_task):
+        default_target = np.asarray(
+            cfg_task.get("default_target_xy", self.default_target),
+            dtype=np.float64).reshape(2)
+        if not bool(cfg_task.get("target_xy_randomize", False)):
+            return default_target.copy()
+
+        span = np.asarray(
+            cfg_task.get("target_xy_range", [0.0, 0.0]),
+            dtype=np.float64).reshape(-1)
+        if span.size == 1:
+            span = np.repeat(span[0], 2)
+        else:
+            span = span[:2]
+        span = np.maximum(span, 0.0)
+        max_tries = max(1, int(cfg_task.get("target_xy_max_tries", 64)))
+
+        last_candidate = default_target.copy()
+        for _ in range(max_tries):
+            candidate = default_target + self._obstacle_rng.uniform(-span, span)
+            last_candidate = candidate
+            if self._target_xy_candidate_valid(candidate, start_xy, cfg_task):
+                return candidate.astype(np.float64)
+
+        if self._target_xy_candidate_valid(default_target, start_xy, cfg_task):
+            return default_target.copy()
+        return last_candidate.astype(np.float64)
 
     # ── 场景生成 ────────────────────────────────────────────────────────────
 
@@ -757,7 +2142,9 @@ class CableRobotEnvWithObstacles:
         for retry in range(max_retries + 1):
             noise    = self._obstacle_rng.uniform(-self.init_position_range, self.init_position_range, 2)
             start_xy = self.default_start_xy + noise
-            target_xy= np.array(cfg_task["default_target_xy"]); self.target_pos=target_xy.copy()
+            self.episode_start_xy = start_xy.copy()
+            target_xy = self._sample_episode_target_xy(start_xy, cfg_task)
+            self.target_pos = target_xy.copy()
 
             spCfg={**cfg_scene,**cfg_plan}
             obstacles,path_3d,new_xml=self.generate_scene_and_trajectory(
@@ -784,6 +2171,8 @@ class CableRobotEnvWithObstacles:
         self._reresolve_ids()
         # [v12.3] scene 切换后重新缓存绳索 body id
         self._cache_cable_body_ids()
+        self._cache_rope_marker_site_ids()
+        self._reset_vision_runtime_after_model_change()
 
         mujoco.mj_resetData(self.model,self.data)
         self.data.qpos[:]=0.; self.data.qvel[:]=0.
@@ -878,6 +2267,7 @@ class CableRobotEnvWithObstacles:
             print("▶️  开始执行！")
             # =========================================================='''
 
+        self.reset_vision_state()
         return self._get_obs()
 
     # ── step ──────────────────────────────────────────────────────────────────
@@ -965,10 +2355,16 @@ class CableRobotEnvWithObstacles:
                     self._termination_reason = "timeout"
             done = True
 
+        rope_marker_features = None
+        if bool(self.config.get("rope_markers", {}).get("enabled", False)):
+            rope_marker_features = self.get_rope_marker_feature_vector()
         return obs, reward, done, False, {
             "is_success": success, "current_wp_idx": self.current_wp_idx,
             "reached_final": self.reached_final, "is_collision": is_collision,
             "termination_reason": getattr(self, '_termination_reason', None),
+            "vision": self.get_vision_debug(),
+            "rope_marker_features": rope_marker_features,
+            "rope_marker_feature_debug": self.get_rope_marker_feature_debug(),
         }
 
     # ── [INS-3] MuJoCo 真实接触检测辅助 ───────────────────────────────────────
@@ -1301,7 +2697,7 @@ class CableRobotEnvWithObstacles:
 
     # ── _get_obs ───────────────────────────────────────────────────────────────
 
-    def _get_obs(self):
+    def _get_obs_raw(self):
         ee_pos=self._get_ee_pos(); ee_x,ee_y,ee_z=ee_pos
         ee_vx,ee_vy,ee_vz=self._ee_vel_cache
         mat=self._get_ee_mat(); ee_euler=R.from_matrix(mat).as_euler('xyz')
@@ -1385,6 +2781,13 @@ class CableRobotEnvWithObstacles:
             +rebar_errors
             +cable_obs,    # [v12.3] 240 维: 4 根绳 × 10 段 × (rel_pos+lin_vel)
             dtype=np.float32)
+
+    def _get_obs(self):
+        obs = self._get_obs_raw()
+        if (self._vision_enabled() and
+                bool(self.cfg_vision.get("apply_to_env_obs", True))):
+            return self._apply_vision_to_obs(obs)
+        return obs
 
 
 def make_env(config=None):

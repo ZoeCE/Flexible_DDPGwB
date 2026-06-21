@@ -48,7 +48,7 @@ from phase_reward import (
     CruiseRewardState, DescentRewardState,
 )
 from ee_acc_controller import EEAccController, CruiseZYawPID, SwingDampingController
-from obs_predictor import build_observation_predictor
+from obs_predictor import build_observation_predictor, build_cable_latent_predictor
 from scipy.spatial.transform import Rotation as R
 
 
@@ -70,6 +70,270 @@ def wind_obs_scale(config):
     wobs = config.get("wind_obs", {})
     return float(wobs.get("wind_speed_max",
                           config.get("wind", {}).get("speed_max", 16.5)))
+
+
+def angle_diff_rad(a, b):
+    d = float(a) - float(b)
+    return float(np.arctan2(np.sin(d), np.cos(d)))
+
+
+def _finite_values(rows, key):
+    vals = []
+    for row in rows:
+        if key not in row:
+            continue
+        try:
+            val = float(row[key])
+        except Exception:
+            continue
+        if np.isfinite(val):
+            vals.append(val)
+    return np.asarray(vals, dtype=np.float64)
+
+
+def _stat_pack(rows, key, scale=1.0):
+    vals = _finite_values(rows, key)
+    if vals.size == 0:
+        return {}
+    vals = vals * float(scale)
+    return {
+        f"{key}_mean": float(np.mean(vals)),
+        f"{key}_p50": float(np.percentile(vals, 50)),
+        f"{key}_p95": float(np.percentile(vals, 95)),
+        f"{key}_max": float(np.max(vals)),
+    }
+
+
+def _copy_payload_truth(env):
+    true = env._payload_state_for_vision()
+    return {
+        "pos": np.asarray(true["pos"], dtype=np.float64).copy(),
+        "vel": np.asarray(true["vel"], dtype=np.float64).copy(),
+        "tilt": float(true["tilt"]),
+        "yaw": float(true["yaw"]),
+    }
+
+
+def _fill_vision_error(row, meas, truth, suffix):
+    if truth is None:
+        return
+    pos = np.asarray(meas.get("pos", [np.nan, np.nan, np.nan]),
+                     dtype=np.float64).reshape(3)
+    vel = np.asarray(meas.get("vel", [np.nan, np.nan, np.nan]),
+                     dtype=np.float64).reshape(3)
+    tpos = np.asarray(truth["pos"], dtype=np.float64).reshape(3)
+    tvel = np.asarray(truth["vel"], dtype=np.float64).reshape(3)
+    pos_err = pos - tpos
+    vel_err = vel - tvel
+    row[f"pos_err_{suffix}_m"] = float(np.linalg.norm(pos_err))
+    row[f"pos_xy_err_{suffix}_m"] = float(np.linalg.norm(pos_err[:2]))
+    row[f"pos_z_err_{suffix}_m"] = float(abs(pos_err[2]))
+    row[f"vel_err_{suffix}_mps"] = float(np.linalg.norm(vel_err))
+    row[f"tilt_err_{suffix}_rad"] = float(abs(
+        float(meas.get("tilt", np.nan)) - float(truth["tilt"])))
+    row[f"yaw_err_{suffix}_rad"] = float(abs(angle_diff_rad(
+        float(meas.get("yaw", np.nan)), float(truth["yaw"]))))
+
+
+def record_vision_shadow_sample(env, episode_idx, step_idx, true_history):
+    t0 = time.perf_counter()
+    try:
+        if hasattr(env, "get_vision_measurement"):
+            meas = env.get_vision_measurement()
+        else:
+            meas = env._current_vision_measurement()
+        failure = ""
+    except Exception as exc:
+        meas = None
+        failure = f"vision_call_error:{exc}"
+    call_ms = 1000.0 * (time.perf_counter() - t0)
+
+    row = {
+        "episode": int(episode_idx),
+        "step": int(step_idx),
+        "env_step": int(getattr(env, "current_step", step_idx)),
+        "vision_call_ms": float(call_ms),
+        "valid": False,
+        "source_step": -1,
+        "age_steps": -1,
+        "active_cameras": 0,
+        "active_camera_names": "",
+        "marker_ids": "",
+        "reprojection_error_px": np.nan,
+        "depth_rmse_m": np.nan,
+        "depth_support": 0,
+        "failure_reason": failure or "no_measurement",
+        "camera_statuses": "",
+    }
+    if meas is None:
+        return row
+
+    valid = bool(meas.get("valid", False))
+    source_step = int(meas.get("source_step", -1))
+    active_names = list(meas.get("active_camera_names", []))
+    marker_ids = list(meas.get("marker_ids", []))
+    camera_statuses = []
+    for status in list(meas.get("camera_statuses", []) or []):
+        name = str(status.get("name", "camera"))
+        if bool(status.get("valid", False)):
+            ids = ",".join(str(v) for v in status.get("marker_ids", []))
+            camera_statuses.append(f"{name}:ok:{ids or '-'}")
+        else:
+            camera_statuses.append(
+                f"{name}:fail:{str(status.get('reason', 'unknown'))}")
+    row.update({
+        "valid": valid,
+        "source_step": source_step,
+        "age_steps": int(meas.get("age_steps", 0)),
+        "active_cameras": int(meas.get("active_cameras", 0)),
+        "active_camera_names": ",".join(str(n) for n in active_names),
+        "marker_ids": ",".join(str(i) for i in marker_ids),
+        "reprojection_error_px": float(meas.get("reprojection_error", np.nan)),
+        "depth_rmse_m": float(meas.get("depth_rmse", np.nan)),
+        "depth_support": int(meas.get("depth_support", 0)),
+        "failure_reason": str(meas.get("failure_reason", "")) or "",
+        "camera_statuses": ";".join(camera_statuses),
+    })
+    if valid:
+        current_step = int(getattr(env, "current_step", step_idx))
+        _fill_vision_error(row, meas, true_history.get(current_step), "current")
+        _fill_vision_error(row, meas, true_history.get(source_step), "source")
+        pos = np.asarray(meas.get("pos", [np.nan, np.nan, np.nan]),
+                         dtype=np.float64).reshape(3)
+        vel = np.asarray(meas.get("vel", [np.nan, np.nan, np.nan]),
+                         dtype=np.float64).reshape(3)
+        row.update({
+            "vision_x": float(pos[0]), "vision_y": float(pos[1]),
+            "vision_z": float(pos[2]), "vision_vx": float(vel[0]),
+            "vision_vy": float(vel[1]), "vision_vz": float(vel[2]),
+            "vision_tilt": float(meas.get("tilt", np.nan)),
+            "vision_yaw": float(meas.get("yaw", np.nan)),
+        })
+    return row
+
+
+def summarize_vision_shadow_rows(rows, control_hz=10.0):
+    if not rows:
+        return {}
+    valid_rows = [r for r in rows if bool(r.get("valid", False))]
+    dt = 1.0 / max(float(control_hz), 1e-9)
+    sim_time_s = max(dt * len(rows), dt)
+    reasons = Counter(str(r.get("failure_reason", "") or "valid")
+                      for r in rows if not bool(r.get("valid", False)))
+    camera_status_counts = Counter()
+    for r in rows:
+        for item in str(r.get("camera_statuses", "") or "").split(";"):
+            parts = item.split(":", 2)
+            if len(parts) >= 2 and parts[0]:
+                camera_status_counts[f"{parts[0]}:{parts[1]}"] += 1
+    unique_sources = sorted({
+        int(r.get("source_step", -1)) for r in valid_rows
+        if int(r.get("source_step", -1)) >= 0
+    })
+    out = {
+        "samples": int(len(rows)),
+        "valid_samples": int(len(valid_rows)),
+        "valid_rate": float(len(valid_rows) / max(1, len(rows))),
+        "valid_hz_sim": float(len(valid_rows) / sim_time_s),
+        "unique_source_hz_sim": float(len(unique_sources) / sim_time_s),
+        "failure_counts": dict(reasons),
+        "camera_status_counts": dict(camera_status_counts),
+    }
+    for key, scale in [
+        ("vision_call_ms", 1.0),
+        ("pos_err_current_m", 1000.0),
+        ("pos_xy_err_current_m", 1000.0),
+        ("pos_z_err_current_m", 1000.0),
+        ("pos_err_source_m", 1000.0),
+        ("pos_xy_err_source_m", 1000.0),
+        ("pos_z_err_source_m", 1000.0),
+        ("vel_err_current_mps", 1000.0),
+        ("vel_err_source_mps", 1000.0),
+        ("tilt_err_current_rad", 180.0 / np.pi),
+        ("yaw_err_current_rad", 180.0 / np.pi),
+        ("tilt_err_source_rad", 180.0 / np.pi),
+        ("yaw_err_source_rad", 180.0 / np.pi),
+        ("reprojection_error_px", 1.0),
+        ("depth_rmse_m", 1000.0),
+        ("age_steps", 1.0),
+        ("active_cameras", 1.0),
+    ]:
+        stat_rows = rows if key == "vision_call_ms" else valid_rows
+        out.update(_stat_pack(stat_rows, key, scale=scale))
+    mean_call = out.get("vision_call_ms_mean", 0.0)
+    out["vision_compute_hz_wall"] = float(
+        1000.0 / max(float(mean_call), 1e-9)) if mean_call else 0.0
+    return out
+
+
+def collect_vision_shadow_rows(results):
+    rows = []
+    for result in results or []:
+        rows.extend(result.get("vision_shadow_rows", []) or [])
+    return rows
+
+
+def print_vision_shadow_summary(results, config):
+    rows = collect_vision_shadow_rows(results)
+    if not rows:
+        return
+    control_hz = float(config.get("sim", {}).get("control_freq_hz", 10.0))
+    summary = summarize_vision_shadow_rows(rows, control_hz=control_hz)
+    print("\n  -- Vision shadow diagnostics --")
+    print(f"  samples/valid: {summary.get('samples', 0)} / "
+          f"{summary.get('valid_samples', 0)} "
+          f"({summary.get('valid_rate', 0.0)*100:.1f}%)")
+    print(f"  active cameras avg: "
+          f"{summary.get('active_cameras_mean', 0.0):.2f} | "
+          f"reproj avg/p95: {summary.get('reprojection_error_px_mean', 0.0):.2f} / "
+          f"{summary.get('reprojection_error_px_p95', 0.0):.2f} px | "
+          f"depth RMSE avg/p95: {summary.get('depth_rmse_m_mean', 0.0):.1f} / "
+          f"{summary.get('depth_rmse_m_p95', 0.0):.1f} mm")
+    print(f"  source-aligned pos avg/p95/max: "
+          f"{summary.get('pos_err_source_m_mean', 0.0):.1f} / "
+          f"{summary.get('pos_err_source_m_p95', 0.0):.1f} / "
+          f"{summary.get('pos_err_source_m_max', 0.0):.1f} mm")
+    print(f"  current pos avg/p95/max: "
+          f"{summary.get('pos_err_current_m_mean', 0.0):.1f} / "
+          f"{summary.get('pos_err_current_m_p95', 0.0):.1f} / "
+          f"{summary.get('pos_err_current_m_max', 0.0):.1f} mm")
+    print(f"  source tilt/yaw avg: "
+          f"{summary.get('tilt_err_source_rad_mean', 0.0):.3f} / "
+          f"{summary.get('yaw_err_source_rad_mean', 0.0):.3f} deg")
+    print(f"  vision call avg/p95/max: "
+          f"{summary.get('vision_call_ms_mean', 0.0):.2f} / "
+          f"{summary.get('vision_call_ms_p95', 0.0):.2f} / "
+          f"{summary.get('vision_call_ms_max', 0.0):.2f} ms "
+          f"(wall ~= {summary.get('vision_compute_hz_wall', 0.0):.1f} Hz)")
+    print(f"  valid/update rate in sim time: "
+          f"{summary.get('valid_hz_sim', 0.0):.1f} / "
+          f"{summary.get('unique_source_hz_sim', 0.0):.1f} Hz | "
+          f"age avg: {summary.get('age_steps_mean', 0.0):.2f} steps")
+    if summary.get("failure_counts"):
+        print(f"  failures: {summary['failure_counts']}")
+    if summary.get("camera_status_counts"):
+        print(f"  camera statuses: {summary['camera_status_counts']}")
+
+
+def write_vision_shadow_csv(results, out_path):
+    rows = collect_vision_shadow_rows(results)
+    if not rows:
+        return None
+    if not out_path:
+        out_path = os.path.join(
+            "test_results",
+            f"vision_shadow_eval_{time.strftime('%Y%m%d_%H%M%S')}.csv")
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    fieldnames = []
+    for row in rows:
+        for key in row.keys():
+            if key not in fieldnames:
+                fieldnames.append(key)
+    with open(out_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    return out_path
 
 
 def apply_control_frequency_override(config, control_freq_hz,
@@ -120,6 +384,24 @@ def apply_control_frequency_override(config, control_freq_hz,
     print(f"  per-step dq/rate limits scaled with dt: {bool(scale_limits_with_dt)}")
 
 
+def parse_xy_range_arg(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        v = max(0.0, float(value))
+        return [v, v]
+    text = str(value).strip()
+    if not text:
+        return None
+    parts = [p.strip() for p in text.replace(";", ",").split(",") if p.strip()]
+    vals = [max(0.0, float(p)) for p in parts]
+    if len(vals) == 1:
+        return [vals[0], vals[0]]
+    if len(vals) >= 2:
+        return vals[:2]
+    return None
+
+
 from stability_metrics import StabilityMetrics  # [v12.6] 共享模块, 同时供 train 用
 
 
@@ -155,6 +437,20 @@ def build_config(args):
         config["insertion"]["target_payload_z"] = insert_target_z
         config["planning"]["target_z_descent"] = insert_target_z
         config["insertion"]["physical_insert_depth_min"] = insert_depth_min
+
+    task_cfg = config.setdefault("task", {})
+    if bool(getattr(args, "disable_target_xy_randomize", False)):
+        task_cfg["target_xy_randomize"] = False
+        task_cfg["target_xy_range"] = [0.0, 0.0]
+    elif bool(getattr(args, "target_xy_randomize", False)):
+        task_cfg["target_xy_randomize"] = True
+    target_xy_range = parse_xy_range_arg(getattr(args, "target_xy_range", None))
+    if target_xy_range is not None:
+        task_cfg["target_xy_range"] = target_xy_range
+        if (max(target_xy_range) > 0.0 and
+                not bool(getattr(args, "disable_target_xy_randomize", False))):
+            task_cfg["target_xy_randomize"] = True
+
     if getattr(args, "phase", None) == "pipeline":
         # Pipeline test policy: lift + translation are pure NMPC. Descent uses
         # the same PID+residual-RL control and reward success gates as training.
@@ -229,6 +525,101 @@ def build_config(args):
         obs_pred_cfg["target_mode"] = str(args.obs_predictor_target_mode)
     if getattr(args, "obs_predictor_ckpt", None):
         obs_pred_cfg["checkpoint"] = str(args.obs_predictor_ckpt)
+    if bool(getattr(args, "disable_obs_predictor", False)):
+        obs_pred_cfg["enabled"] = False
+        obs_pred_cfg["train_enabled"] = False
+        obs_pred_cfg["checkpoint"] = ""
+    cable_lat_cfg = config.setdefault("cable_latent_predictor", {})
+    if bool(getattr(args, "cable_latent_predictor", False)):
+        cable_lat_cfg["enabled"] = True
+        cable_lat_cfg["train_enabled"] = False
+        ce_cfg = config.setdefault("cable_encoder", {})
+        ce_cfg["enabled"] = True
+        ce_cfg["zero_obs"] = False
+        ce_cfg["output_dim"] = int(DEFAULT_CONFIG.get(
+            "cable_encoder", {}).get("output_dim", 32))
+        phase = getattr(args, "phase", None)
+        if phase in ("cruise", "descent"):
+            config.setdefault(f"{phase}_rl", {})["obs_dim"] = int(
+                DEFAULT_CONFIG.get(f"{phase}_rl", {}).get(
+                    "obs_dim", config.get(f"{phase}_rl", {}).get("obs_dim", 0)))
+    if getattr(args, "cable_latent_predictor_ckpt", None):
+        cable_lat_cfg["checkpoint"] = str(args.cable_latent_predictor_ckpt)
+    if bool(getattr(args, "disable_cable_latent_predictor", False)):
+        cable_lat_cfg["enabled"] = False
+        cable_lat_cfg["checkpoint"] = ""
+    if bool(getattr(args, "cable_latent_use_rope_markers", False)):
+        cable_lat_cfg["use_rope_marker_features"] = True
+        config.setdefault("rope_markers", {})["enabled"] = True
+    if getattr(args, "rope_marker_feature_source", None):
+        _src = str(args.rope_marker_feature_source).strip().lower()
+        config.setdefault("rope_markers", {})["feature_source"] = _src
+        cable_lat_cfg["rope_marker_feature_source"] = _src
+    if getattr(args, "rope_marker_pos_noise", None) is not None:
+        _rn = max(0.0, float(args.rope_marker_pos_noise))
+        config.setdefault("rope_markers", {})[
+            "feature_pos_noise_std"] = [_rn, _rn, _rn]
+    if getattr(args, "rope_marker_pixel_noise", None) is not None:
+        config.setdefault("rope_markers", {})["feature_pixel_noise_std"] = max(
+            0.0, float(args.rope_marker_pixel_noise))
+    if getattr(args, "rope_marker_dropout", None) is not None:
+        config.setdefault("rope_markers", {})["feature_dropout_prob"] = min(
+            1.0, max(0.0, float(args.rope_marker_dropout)))
+    if getattr(args, "rope_marker_outlier_prob", None) is not None:
+        config.setdefault("rope_markers", {})["feature_outlier_prob"] = min(
+            1.0, max(0.0, float(args.rope_marker_outlier_prob)))
+    if getattr(args, "rope_marker_outlier_std", None) is not None:
+        config.setdefault("rope_markers", {})["feature_outlier_std"] = max(
+            0.0, float(args.rope_marker_outlier_std))
+    if bool(getattr(args, "rope_marker_quantize_px", False)):
+        config.setdefault("rope_markers", {})["feature_quantize_px"] = True
+    vision_cfg = config.setdefault("vision", {})
+    if bool(getattr(args, "vision", False)):
+        vision_cfg["enabled"] = True
+    if bool(getattr(args, "vision_shadow_eval", False)):
+        vision_cfg["enabled"] = True
+        vision_cfg["apply_to_env_obs"] = False
+        vision_cfg["shadow_eval"] = True
+    if bool(getattr(args, "disable_vision", False)):
+        vision_cfg["enabled"] = False
+        vision_cfg["shadow_eval"] = False
+    if getattr(args, "vision_latency_steps", None) is not None:
+        vision_cfg["latency_steps"] = int(args.vision_latency_steps)
+    if getattr(args, "vision_processing_delay_steps", None) is not None:
+        vision_cfg["processing_delay_steps"] = int(
+            args.vision_processing_delay_steps)
+    if getattr(args, "vision_period", None) is not None:
+        vision_cfg["measurement_period_steps"] = int(args.vision_period)
+    if getattr(args, "vision_pos_noise", None) is not None:
+        _vn = max(0.0, float(args.vision_pos_noise))
+        vision_cfg["position_noise_std"] = [_vn, _vn, _vn * 1.5]
+    if getattr(args, "vision_dropout", None) is not None:
+        vision_cfg["dropout_prob"] = float(args.vision_dropout)
+    if getattr(args, "vision_debug_dump_dir", None):
+        vision_cfg["debug_dump_dir"] = str(args.vision_debug_dump_dir)
+    if getattr(args, "vision_debug_dump_frames", None) is not None:
+        vision_cfg["debug_dump_frames"] = int(args.vision_debug_dump_frames)
+    if getattr(args, "vision_debug_dump_start_step", None) is not None:
+        vision_cfg["debug_dump_start_step"] = int(
+            args.vision_debug_dump_start_step)
+    if getattr(args, "vision_debug_dump_end_step", None) is not None:
+        vision_cfg["debug_dump_end_step"] = int(
+            args.vision_debug_dump_end_step)
+    if bool(getattr(args, "zero_cable_obs", False)):
+        ce_cfg = config.setdefault("cable_encoder", {})
+        ce_cfg["enabled"] = True
+        ce_cfg["zero_obs"] = True
+        ce_cfg.setdefault("output_dim", 32)
+    if bool(getattr(args, "disable_cable_obs", False)):
+        ce_cfg = config.setdefault("cable_encoder", {})
+        ce_cfg["enabled"] = False
+        ce_cfg["zero_obs"] = True
+        ce_cfg["output_dim"] = 0
+        phase = getattr(args, "phase", None)
+        if phase in (None, "cruise", "pipeline"):
+            config.setdefault("cruise_rl", {})["obs_dim"] = 45
+        if phase in (None, "descent", "pipeline"):
+            config.setdefault("descent_rl", {})["obs_dim"] = 44
     wind_cfg = config.setdefault("wind", {})
     if bool(getattr(args, "variable_wind", False)):
         wind_cfg["test_wind_variable"] = True
@@ -345,6 +736,72 @@ def build_eval_obs_predictor(config, phase, initial_obs, agent=None,
           f"true obs every {pred.measurement_period} control steps, "
           f"obs_dim={obs_dim}, target_mode={_obs_pred_target_mode(config)}")
     return pred
+
+
+def _phase_visible_no_cable_vector(phase_obs, rope_marker_features=None):
+    if phase_obs is None:
+        return np.zeros(0, dtype=np.float32)
+    core = np.asarray(phase_obs[0], dtype=np.float32).reshape(-1)
+    wind = np.asarray(phase_obs[2], dtype=np.float32).reshape(-1)
+    parts = [core, wind]
+    if rope_marker_features is not None:
+        parts.append(np.asarray(
+            rope_marker_features, dtype=np.float32).reshape(-1))
+    return np.concatenate(parts).astype(np.float32)
+
+
+def build_eval_cable_latent_predictor(config, phase, visible_dim, agent=None,
+                                      ckpt_path=None):
+    cfg = config.setdefault("cable_latent_predictor", {})
+    if not bool(cfg.get("enabled", False)):
+        return None
+    cfg["train_enabled"] = False
+    pred = build_cable_latent_predictor(
+        config, phase, visible_dim=visible_dim,
+        latent_dim=int(cfg.get("latent_dim", 32)),
+        action_dim=int(cfg.get("action_dim", 7)),
+        device=getattr(agent, "device", None))
+    if pred is None:
+        return None
+    pred.train_enabled = False
+    load_path = str(ckpt_path or cfg.get("checkpoint", "") or "").strip()
+    if not load_path:
+        raise ValueError(
+            "cable latent predictor is enabled but no checkpoint was provided")
+    if not os.path.exists(load_path):
+        raise FileNotFoundError(
+            f"cable latent predictor checkpoint not found: {load_path}")
+    pred.load(load_path, map_location=getattr(pred, "device", None))
+    if hasattr(pred, "net"):
+        pred.net.eval()
+    print(f"  [CableLatPred-EVAL] loaded {load_path}; "
+          f"visible_dim={visible_dim}, latent_dim={pred.latent_dim}")
+    return pred
+
+
+def _update_rope_marker_eval_acc(acc, debug):
+    if not debug:
+        return
+    acc["samples"] += 1
+    for key in ("markers_total", "visible", "valid_after_noise",
+                "camera_estimates", "cameras", "dropout"):
+        acc.setdefault(key, []).append(float(debug.get(key, 0.0) or 0.0))
+    acc["source"] = str(debug.get("source", acc.get("source", "")) or "")
+
+
+def _summarize_rope_marker_eval_acc(acc):
+    samples = int(acc.get("samples", 0))
+    if samples <= 0:
+        return {}
+    out = {"samples": samples, "source": str(acc.get("source", ""))}
+    for key in ("markers_total", "visible", "valid_after_noise",
+                "camera_estimates", "cameras", "dropout"):
+        vals = np.asarray(acc.get(key, []), dtype=np.float64)
+        out[f"{key}_mean"] = float(np.mean(vals)) if vals.size else 0.0
+    total = max(out.get("markers_total_mean", 0.0), 1e-9)
+    out["visible_rate"] = out.get("visible_mean", 0.0) / total
+    out["valid_rate"] = out.get("valid_after_noise_mean", 0.0) / total
+    return out
 
 
 # ==============================================================================
@@ -488,7 +945,9 @@ def get_phase_state(env, obs, start_xy=None, config=None):
         dtf_start = float(np.linalg.norm(pl_xy - np.asarray(start_xy[:2])))
     else:
         try:
-            dtf_start = float(np.linalg.norm(pl_xy - env.default_start_xy[:2]))
+            start_xy = np.asarray(getattr(
+                env, "episode_start_xy", env.default_start_xy), dtype=np.float32)
+            dtf_start = float(np.linalg.norm(pl_xy - start_xy[:2]))
         except Exception:
             dtf_start = 0.0
 
@@ -925,7 +1384,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                       eval_cur_init=None, wind_speed_sampler=None,
                       wind_dir_sampler=None, reset_seed_sampler=None,
                       verbose=True, progress_every=0, progress_prefix="",
-                      obs_predictor_ckpt=None):
+                      obs_predictor_ckpt=None,
+                      cable_latent_predictor_ckpt=None):
     """测试单个阶段, 支持噪声/风力扰动。"""
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
@@ -943,6 +1403,17 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         bool(config.get("cruise_rl", {}).get(
             "nmpc_residual_mode", _cruise_nmpc_base)))
     obs_predictor = None
+    cable_latent_predictor = None
+    cable_latent_enabled = bool(config.get(
+        "cable_latent_predictor", {}).get("enabled", False))
+    cable_latent_use_rope_markers = (
+        cable_latent_enabled and bool(config.get(
+            "cable_latent_predictor", {}).get(
+                "use_rope_marker_features", False)))
+    cable_latent_action_dim = int(config.get(
+        "cable_latent_predictor", {}).get("action_dim", 7))
+    vision_shadow_enabled = bool(config.get("vision", {}).get(
+        "shadow_eval", False))
 
     results = []
     ep_count = 0; attempt = 0
@@ -991,9 +1462,12 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     ckpt_path=obs_predictor_ckpt)
             if obs_predictor is not None:
                 obs_predictor.reset(obs)
+        if cable_latent_predictor is not None:
+            cable_latent_predictor.reset()
         wait_for_space_start(env, config, label=f"{phase} Ep {ep_count + 1}")
 
-        start_xy = env.default_start_xy.copy()
+        start_xy = np.asarray(getattr(
+            env, "episode_start_xy", env.default_start_xy), dtype=np.float32).copy()
         target_xy = env.target_pos.copy()
         prev_tilt, prev_yaw = 0.0, 0.0
         rstate = REWARD_STATES[phase]()
@@ -1024,6 +1498,25 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         rl_action_calls = 0
         obs_pred_time_s = 0.0
         obs_pred_calls = 0
+        cable_latent_time_s = 0.0
+        cable_latent_calls = 0
+        cable_latent_last_action = np.zeros(
+            cable_latent_action_dim, dtype=np.float32)
+        rope_marker_feature_cache = None
+        rope_marker_acc = {"samples": 0, "source": ""}
+        if cable_latent_use_rope_markers and hasattr(
+                env, "get_rope_marker_feature_vector"):
+            try:
+                rope_marker_feature_cache = env.get_rope_marker_feature_vector()
+                _update_rope_marker_eval_acc(
+                    rope_marker_acc, env.get_rope_marker_feature_debug())
+            except Exception:
+                rope_marker_feature_cache = None
+        vision_shadow_rows = []
+        vision_truth_history = {}
+        if vision_shadow_enabled:
+            vision_truth_history[int(getattr(env, "current_step", 0))] = (
+                _copy_payload_truth(env))
 
         max_steps = int(config[f"{phase}_rl"]["max_steps"])
 
@@ -1052,9 +1545,41 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
                     phase, obs, env, start_xy, target_xy, prev_tilt, prev_yaw,
                     wind_obs=_wobs, base_action=base_dq_for_obs)
-                cable_for_policy = (obs_pred_cable_latent
-                                    if obs_pred_cable_latent is not None
-                                    else cable_raw)
+                phase_obs_current = (
+                    core, cable_raw, _wobs, prev_tilt, prev_yaw,
+                    base_dq_for_obs)
+                cable_for_policy = cable_raw
+                if cable_latent_enabled:
+                    if (cable_latent_use_rope_markers and
+                            rope_marker_feature_cache is None and
+                            hasattr(env, "get_rope_marker_feature_vector")):
+                        try:
+                            rope_marker_feature_cache = (
+                                env.get_rope_marker_feature_vector())
+                            _update_rope_marker_eval_acc(
+                                rope_marker_acc,
+                                env.get_rope_marker_feature_debug())
+                        except Exception:
+                            rope_marker_feature_cache = None
+                    visible = _phase_visible_no_cable_vector(
+                        phase_obs_current,
+                        rope_marker_features=(
+                            rope_marker_feature_cache
+                            if cable_latent_use_rope_markers else None))
+                    if cable_latent_predictor is None:
+                        cable_latent_predictor = build_eval_cable_latent_predictor(
+                            config, phase, visible_dim=visible.size,
+                            agent=agent, ckpt_path=cable_latent_predictor_ckpt)
+                    if cable_latent_predictor is not None:
+                        _clp_t0 = time.perf_counter()
+                        cable_for_policy, _clp_info = (
+                            cable_latent_predictor.predict_and_update(
+                                visible, action=cable_latent_last_action,
+                                phase=phase, target_latent=None))
+                        cable_latent_time_s += time.perf_counter() - _clp_t0
+                        cable_latent_calls += 1
+                elif obs_pred_cable_latent is not None:
+                    cable_for_policy = obs_pred_cable_latent
                 obs_pred_phase_obs = (
                     core, cable_for_policy, _wobs, prev_tilt, prev_yaw,
                     base_dq_for_obs)
@@ -1139,6 +1664,26 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 obs_predictor.predict_next(current_target, delta_q, phase)
                 obs_pred_time_s += time.perf_counter() - _pred_t0
             true_next_obs, _, env_term, env_trunc, env_info = env.step(delta_q)
+            if cable_latent_use_rope_markers:
+                _rmf = env_info.get("rope_marker_features", None)
+                if _rmf is not None:
+                    rope_marker_feature_cache = np.asarray(
+                        _rmf, dtype=np.float32).copy()
+                _update_rope_marker_eval_acc(
+                    rope_marker_acc,
+                    env_info.get("rope_marker_feature_debug", {}))
+            if cable_latent_enabled:
+                _last_dq = np.asarray(delta_q, dtype=np.float32).reshape(-1)
+                if _last_dq.size < cable_latent_action_dim:
+                    _last_dq = np.pad(
+                        _last_dq, (0, cable_latent_action_dim - _last_dq.size))
+                cable_latent_last_action = (
+                    _last_dq[:cable_latent_action_dim].astype(np.float32))
+            if vision_shadow_enabled:
+                cur_step = int(getattr(env, "current_step", ep_steps + 1))
+                vision_truth_history[cur_step] = _copy_payload_truth(env)
+                vision_shadow_rows.append(record_vision_shadow_sample(
+                    env, ep_count + 1, ep_steps + 1, vision_truth_history))
             next_obs = true_next_obs
             if obs_predictor is not None:
                 _pred_t0 = time.perf_counter()
@@ -1204,6 +1749,19 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                 break
 
         ep_count += 1
+        vision_debug = {}
+        if bool(config.get("vision", {}).get("enabled", False)) and \
+                hasattr(env, "get_vision_debug"):
+            try:
+                vision_debug = env.get_vision_debug()
+            except Exception as exc:
+                vision_debug = {
+                    "valid": False,
+                    "failure_reason": f"debug_error:{exc}",
+                }
+        vision_shadow_summary = summarize_vision_shadow_rows(
+            vision_shadow_rows,
+            control_hz=float(config.get("sim", {}).get("control_freq_hz", 10.0)))
         results.append({
             "reward":      ep_reward,
             "steps":       ep_steps,
@@ -1212,6 +1770,10 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             "stability":   stab_metrics.summary(),
             "wind_speed":  ep_wind_speed,
             "wind_dir":    ep_wind_dir,
+            "vision":      vision_debug,
+            "vision_shadow": vision_shadow_summary,
+            "vision_shadow_rows": vision_shadow_rows,
+            "rope_marker": _summarize_rope_marker_eval_acc(rope_marker_acc),
             "obs_pred_hidden_frac": (
                 float(obs_pred_hidden) / max(1, int(obs_pred_steps))
                 if obs_pred_steps > 0 else 0.0),
@@ -1220,11 +1782,14 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     max(1, int(rl_action_calls)),
                 "obs_pred_ms": 1000.0 * obs_pred_time_s /
                     max(1, int(obs_pred_calls)),
+                "cable_latent_pred_ms": 1000.0 * cable_latent_time_s /
+                    max(1, int(cable_latent_calls)),
                 "compute_hz_est": (
                     1000.0 / max(
                         1e-9,
                         1000.0 * rl_action_time_s / max(1, int(rl_action_calls)) +
-                        1000.0 * obs_pred_time_s / max(1, int(obs_pred_calls)))
+                        1000.0 * obs_pred_time_s / max(1, int(obs_pred_calls)) +
+                        1000.0 * cable_latent_time_s / max(1, int(cable_latent_calls)))
                     if rl_action_calls > 0 else 0.0),
             },
         })
@@ -1234,6 +1799,30 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
                   f"Steps:{ep_steps:3d} | W:{ep_wind_speed:.2f}m/s | "
                   f"{term_short} | {stab_metrics.print_line()}")
+            if bool(config.get("vision", {}).get("enabled", False)):
+                vdbg = vision_debug or {}
+                names = ",".join(str(n) for n in vdbg.get(
+                    "active_camera_names", [])) or "-"
+                marker_ids = ",".join(str(i) for i in vdbg.get(
+                    "marker_ids", [])) or "-"
+                reproj = float(vdbg.get("reprojection_error", 0.0))
+                depth_rmse = float(vdbg.get("depth_rmse", 0.0))
+                depth_support = int(vdbg.get("depth_support", 0))
+                reason = str(vdbg.get("failure_reason", "")) or "-"
+                print(f"       Vision valid={bool(vdbg.get('valid', False))} "
+                      f"cams={int(vdbg.get('active_cameras', 0))} "
+                      f"names={names} ids={marker_ids} "
+                      f"reproj={reproj:.2f}px "
+                      f"depth_rmse={depth_rmse:.3f}m "
+                      f"depth_px={depth_support} reason={reason}")
+            if vision_shadow_enabled:
+                vs = vision_shadow_summary or {}
+                print(f"       Vision shadow valid={vs.get('valid_rate', 0.0)*100:.1f}% "
+                      f"pos(src) avg/p95={vs.get('pos_err_source_m_mean', 0.0):.1f}/"
+                      f"{vs.get('pos_err_source_m_p95', 0.0):.1f}mm "
+                      f"pos(cur) avg/p95={vs.get('pos_err_current_m_mean', 0.0):.1f}/"
+                      f"{vs.get('pos_err_current_m_p95', 0.0):.1f}mm "
+                      f"call={vs.get('vision_call_ms_mean', 0.0):.2f}ms")
         elif progress_every and (ep_count % progress_every == 0 or
                                  ep_count == n_episodes):
             sr_now = float(np.mean([r["success"] for r in results])) if results else 0.0
@@ -1302,7 +1891,8 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                 _agent.reset_history()
         wait_for_space_start(env, config, label=f"pipeline Ep {ep_count + 1}")
 
-        start_xy  = env.default_start_xy.copy()
+        start_xy = np.asarray(getattr(
+            env, "episode_start_xy", env.default_start_xy), dtype=np.float32).copy()
         target_xy = env.target_pos.copy()
         prev_tilt, prev_yaw = 0.0, 0.0
 
@@ -1700,10 +2290,22 @@ def summarize_results(results):
     if pred_fracs:
         summary["obs_pred_hidden_frac"] = float(np.mean(pred_fracs))
     timings = [r.get("timing") or {} for r in results]
-    for key in ["rl_action_ms", "obs_pred_ms", "compute_hz_est"]:
+    for key in ["rl_action_ms", "obs_pred_ms", "cable_latent_pred_ms",
+                "compute_hz_est"]:
         vals = [float(t[key]) for t in timings if key in t]
         if vals:
             summary[key] = float(np.mean(vals))
+    rope_summaries = [r.get("rope_marker") or {} for r in results]
+    for key in ("visible_rate", "valid_rate", "visible_mean",
+                "valid_after_noise_mean", "camera_estimates_mean",
+                "cameras_mean", "dropout_mean"):
+        vals = [float(s[key]) for s in rope_summaries if key in s]
+        if vals:
+            summary[f"rope_marker_{key}"] = float(np.mean(vals))
+    sources = [str(s.get("source", "")) for s in rope_summaries
+               if s.get("source", "")]
+    if sources:
+        summary["rope_marker_source"] = Counter(sources).most_common(1)[0][0]
     return summary
 
 
@@ -1938,6 +2540,8 @@ def run_wind_benchmark(args, config):
     print(f"[Benchmark] output={out_path}\n", flush=True)
 
     rows = []
+    bench_n_obs = (int(args.obstacles) if getattr(args, "obstacles", None) is not None
+                   else int(config["scene"]["n_obstacles"]))
     for bin_id, (lo, hi) in enumerate(bins):
         case_seed = int(args.seed) + 1009 * bin_id
         rng = np.random.default_rng(case_seed)
@@ -1949,7 +2553,9 @@ def run_wind_benchmark(args, config):
         reset_seeds = rng.integers(0, np.iinfo(np.int32).max,
                                    episodes_per_bin, dtype=np.int64)
 
-        for mode in ("expert", "residual_rl"):
+        modes = ("residual_rl",) if bool(getattr(
+            args, "benchmark_rl_only", False)) else ("expert", "residual_rl")
+        for mode in modes:
             np.random.seed(case_seed)
             try:
                 torch.manual_seed(case_seed)
@@ -1964,7 +2570,7 @@ def run_wind_benchmark(args, config):
                 print(f"[Benchmark] env ready in {time.perf_counter()-t0:.1f}s",
                       flush=True)
                 if hasattr(env, 'set_curriculum_n_obstacles'):
-                    env.set_curriculum_n_obstacles(config["scene"]["n_obstacles"])
+                    env.set_curriculum_n_obstacles(bench_n_obs)
                 expert = JointSpaceExpert(config, env.ik_solver)
                 ee_ctrl = EEAccController(config, env.ik_solver)
                 print("[Benchmark] controllers ready", flush=True)
@@ -1991,7 +2597,10 @@ def run_wind_benchmark(args, config):
                     eval_cur_init=eval_init,
                     verbose=False,
                     progress_every=prog_every,
-                    progress_prefix=(f"  bin {bin_id+1}/{len(bins)} {mode}"))
+                    progress_prefix=(f"  bin {bin_id+1}/{len(bins)} {mode}"),
+                    obs_predictor_ckpt=getattr(args, "obs_predictor_ckpt", None),
+                    cable_latent_predictor_ckpt=getattr(
+                        args, "cable_latent_predictor_ckpt", None))
             finally:
                 env.close()
 
@@ -2017,6 +2626,8 @@ def run_wind_benchmark(args, config):
                   f"p95KE={summary.get('p95_ke_mJ', 0):.1f}mJ "
                   f"rl={summary.get('rl_action_ms', 0):.2f}ms "
                   f"pred={summary.get('obs_pred_ms', 0):.2f}ms "
+                  f"clp={summary.get('cable_latent_pred_ms', 0):.2f}ms "
+                  f"rope={summary.get('rope_marker_valid_rate', 0)*100:.0f}% "
                   f"hz={summary.get('compute_hz_est', 0):.0f} "
                   f"elapsed={time.perf_counter()-t_mode:.1f}s",
                   flush=True)
@@ -2443,6 +3054,12 @@ def main():
                         help="环境噪声力标准差 (N, 加在 payload 上)")
     parser.add_argument("--eval-curriculum-level", type=str, default="max",
                         help="descent eval init level: 'max' or a numeric curriculum level")
+    parser.add_argument("--target-xy-randomize", action="store_true",
+                        help="enable endpoint target XY randomization for eval")
+    parser.add_argument("--disable-target-xy-randomize", action="store_true",
+                        help="force fixed endpoint target XY for eval")
+    parser.add_argument("--target-xy-range", type=str, default=None,
+                        help="endpoint target XY randomization half-range; scalar or x,y in meters")
     parser.add_argument("--compare-wind-bins", action="store_true",
                         help="run expert vs Residual RL descent benchmark over wind bins")
     parser.add_argument("--compare-multi-rl-wind-bins", action="store_true",
@@ -2461,6 +3078,8 @@ def main():
                         help="comma separated label=checkpoint specs for --compare-multi-rl-wind-bins")
     parser.add_argument("--obs-predictor", action="store_true",
                         help="single-run mode: evaluate with a frozen observation predictor")
+    parser.add_argument("--disable-obs-predictor", action="store_true",
+                        help="force-disable observation predictor in eval")
     parser.add_argument("--obs-predictor-ckpt", type=str, default=None,
                         help="single-run mode: observation predictor checkpoint")
     parser.add_argument("--obs-predictor-target-mode", type=str, default=None,
@@ -2468,8 +3087,66 @@ def main():
                         help="predictor target mode for eval and pred-vs-true benchmark")
     parser.add_argument("--obs-period", type=int, default=None,
                         help="single-run mode: true observation period for predictor evaluation")
+    parser.add_argument("--cable-latent-predictor", action="store_true",
+                        help="evaluate with a frozen visible-history cable latent predictor")
+    parser.add_argument("--disable-cable-latent-predictor", action="store_true",
+                        help="force-disable CableLatPred in eval")
+    parser.add_argument("--cable-latent-predictor-ckpt", type=str, default=None,
+                        help="CableLatPred checkpoint used by eval")
+    parser.add_argument("--cable-latent-use-rope-markers", action="store_true",
+                        help="append rope marker features to CableLatPred input")
+    parser.add_argument("--rope-marker-feature-source", type=str, default=None,
+                        choices=[
+                            "site", "rgbd", "vision", "backproject",
+                            "backprojection", "opencv_rgbd", "opencv",
+                            "color_rgbd", "color"],
+                        help="rope marker feature source for CableLatPred eval")
+    parser.add_argument("--rope-marker-pos-noise", type=float, default=None,
+                        help="isotropic marker position noise std in meters")
+    parser.add_argument("--rope-marker-pixel-noise", type=float, default=None,
+                        help="marker center pixel noise std before depth back-projection")
+    parser.add_argument("--rope-marker-dropout", type=float, default=None,
+                        help="per-marker dropout probability")
+    parser.add_argument("--rope-marker-outlier-prob", type=float, default=None,
+                        help="per-marker outlier probability")
+    parser.add_argument("--rope-marker-outlier-std", type=float, default=None,
+                        help="isotropic marker outlier std in meters")
+    parser.add_argument("--rope-marker-quantize-px", action="store_true",
+                        help="round marker detections to integer pixels")
+    parser.add_argument("--vision", action="store_true",
+                        help="enable RGB-D vision payload-state observations")
+    parser.add_argument("--vision-shadow-eval", action="store_true",
+                        help="run RGB-D vision in parallel for diagnostics while policy uses true obs")
+    parser.add_argument("--vision-shadow-csv", type=str, default=None,
+                        help="CSV path for per-step --vision-shadow-eval diagnostics")
+    parser.add_argument("--disable-vision", action="store_true",
+                        help="force-disable RGB-D vision observations")
+    parser.add_argument("--vision-latency-steps", type=int, default=None,
+                        help="sensor latency in control steps for RGB-D vision")
+    parser.add_argument("--vision-processing-delay-steps", type=int, default=None,
+                        help="compute delay in control steps for RGB-D fusion")
+    parser.add_argument("--vision-period", type=int, default=None,
+                        help="RGB-D measurement period in control steps")
+    parser.add_argument("--vision-pos-noise", type=float, default=None,
+                        help="isotropic XY position noise std for RGB-D vision (m)")
+    parser.add_argument("--vision-dropout", type=float, default=None,
+                        help="per-camera RGB-D dropout probability")
+    parser.add_argument("--vision-debug-dump-dir", type=str, default=None,
+                        help="directory for dumping RGB-D vision debug frames")
+    parser.add_argument("--vision-debug-dump-frames", type=int, default=None,
+                        help="max RGB-D camera frames to dump for vision debugging")
+    parser.add_argument("--vision-debug-dump-start-step", type=int, default=None,
+                        help="first env step included in RGB-D debug dumps")
+    parser.add_argument("--vision-debug-dump-end-step", type=int, default=None,
+                        help="last env step included in RGB-D debug dumps")
+    parser.add_argument("--zero-cable-obs", action="store_true",
+                        help="keep cable latent dims but feed zeros for ablation")
+    parser.add_argument("--disable-cable-obs", action="store_true",
+                        help="remove cable latent dims; use only with matching policies")
     parser.add_argument("--episodes-per-bin", type=int, default=512,
                         help="episodes per wind bin for --compare-wind-bins")
+    parser.add_argument("--benchmark-rl-only", action="store_true",
+                        help="for --compare-wind-bins, run only the selected RL policy")
     parser.add_argument("--wind-bins", type=str,
                         default=("0-1.25,1.25-2.5,2.5-3.75,3.75-5,"
                                  "5-6.25,6.25-7.5,7.5-8.75,8.75-10"),
@@ -2543,6 +3220,24 @@ def main():
         _wind_label = "0"
     print(f"  扰动: wind={_wind_label}, force_noise={args.force_noise:.2f}, "
           f"obs_noise={args.obs_noise:.3f}, act_noise={args.act_noise:.3f}")
+    _task_cfg = config.get("task", {})
+    if bool(_task_cfg.get("target_xy_randomize", False)):
+        _target_span = np.asarray(
+            _task_cfg.get("target_xy_range", [0.0, 0.0]), dtype=np.float64
+        ).reshape(-1)
+        if _target_span.size == 1:
+            _target_span = np.repeat(_target_span[0], 2)
+        else:
+            _target_span = _target_span[:2]
+        print("  endpoint: target_xy randomized "
+              f"+/-[{_target_span[0]*1000.0:.1f}, "
+              f"{_target_span[1]*1000.0:.1f}] mm")
+    else:
+        _target_xy = np.asarray(
+            _task_cfg.get("default_target_xy", [-0.3, 0.2]), dtype=np.float64
+        ).reshape(-1)[:2]
+        print("  endpoint: fixed target_xy="
+              f"[{_target_xy[0]:.3f}, {_target_xy[1]:.3f}] m")
     print(f"{'='*60}\n")
 
     if args.phase == "pipeline":
@@ -2601,8 +3296,15 @@ def main():
             force_noise=args.force_noise,
             eval_cur_init=eval_cur_init,
             verbose=not args.quiet,
-            obs_predictor_ckpt=args.obs_predictor_ckpt)
+            obs_predictor_ckpt=args.obs_predictor_ckpt,
+            cable_latent_predictor_ckpt=args.cable_latent_predictor_ckpt)
         print_summary(results, f"{args.phase}-{args.algo}")
+        if bool(getattr(args, "vision_shadow_eval", False)):
+            print_vision_shadow_summary(results, config)
+            csv_path = write_vision_shadow_csv(
+                results, getattr(args, "vision_shadow_csv", None))
+            if csv_path:
+                print(f"Saved vision shadow CSV: {csv_path}")
 
     env.close()
 

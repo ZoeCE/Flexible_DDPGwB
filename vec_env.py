@@ -402,6 +402,11 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 remote.send(env.data.qpos[:7].copy().astype(np.float32))
             elif cmd == 'get_ee_pos':
                 remote.send(env._get_ee_pos())
+            elif cmd == 'get_rope_marker_features':
+                if hasattr(env, "get_rope_marker_feature_vector"):
+                    remote.send(env.get_rope_marker_feature_vector())
+                else:
+                    remote.send(None)
             elif cmd == 'set_force_noise':
                 env.set_force_noise(data)
                 remote.send('ok')
@@ -527,6 +532,12 @@ class DummyVecEnv:
 
     def get_ee_pos(self, idx):
         return self.envs[idx]._get_ee_pos()
+
+    def get_rope_marker_features(self, idx):
+        env = self.envs[idx]
+        if hasattr(env, "get_rope_marker_feature_vector"):
+            return env.get_rope_marker_feature_vector()
+        return None
 
     def set_force_noise(self, idx, val):
         self.envs[idx].set_force_noise(val)
@@ -839,6 +850,10 @@ class SubprocVecEnv:
 
     def get_ee_pos(self, idx):
         self.remotes[idx].send(('get_ee_pos', None))
+        return self._check_recv(self.remotes[idx].recv(), idx)
+
+    def get_rope_marker_features(self, idx):
+        self.remotes[idx].send(('get_rope_marker_features', None))
         return self._check_recv(self.remotes[idx].recv(), idx)
 
     def set_force_noise(self, idx, val):

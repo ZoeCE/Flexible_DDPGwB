@@ -1,0 +1,31 @@
+[profile] descent_10hz_vision_pred_small_endpoint_fast_zgate_ft: Fine-tune the 10Hz RGB-D vision+predictor policy with small endpoint randomization and conservative z descent gates to reduce rebar-top sticking.
+[log-dir] dated output: saves/descent_distill_10hz_vision_rope_marker_cable_latpred_l0_visual_check_20260617_091637
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+============================================================
+  Policy DISTILL [VEC n_envs=1] | DESCENT | 3000 samples | saves/descent_distill_10hz_vision_rope_marker_cable_latpred_l0_visual_check_20260617_091637
+============================================================
+
+  Teacher: saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best.pt
+  Student obs_dim=76 cable_enabled=True
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+  [Curriculum-descent] start at L0/8, wind=0.00/10.0m/s
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run 6irs51ek
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_distill_10hz_vision_rope_marker_cable_latpred_l0_visual_check_20260617_091637/wandb/run-20260617_091645-6irs51ek
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_no_cable_distill
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_policy_distill
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_policy_distill/runs/6irs51ek
+  [CableLatPred-DISTILL] visible_dim=124, latent_dim=32, predictors=1
+  [CableLatPred-DISTILL] rope marker features enabled
+[distill w0] Ep   1 [    106] ✅ R: 44.75 L:0.00000/0.00000 S:106 W:0.00 L0/8 | insertion_success:z=102mm,dtf=3.6mm,tilt=0.025,yaw=0.016,insert=17.9/25mm,rebar=4.3/4.5mm,floor=1,xy_tol=5.0mm
+       CableLatPred w0 rmse:0.4466 updates:106
+[distill w0] Ep   2 [    200] ✅ R: 45.71 L:0.00000/0.00000 S: 94 W:0.00 L0/8 | insertion_success:z=104mm,dtf=3.7mm,tilt=0.023,yaw=0.017,insert=16.4/25mm,rebar=4.4/4.5mm,floor=1,xy_tol=5.0mm
+       CableLatPred w0 rmse:0.1737 updates:94

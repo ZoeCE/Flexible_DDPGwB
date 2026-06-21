@@ -1,0 +1,1820 @@
+nohup: ignoring input
+[profile] descent_10hz_joint_pred_target_random_ft: Continue the best 10Hz predictor+residual PPO with randomized start/target XY for arm dead-zone robustness.
+[log-dir] dated output: saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_025811
+  [control] descent: 10.0Hz, action_dt=0.100s, controller.dt=0.100s, ee_dt=0.100s, max_steps=300
+  [LuckyReject] strict always: lucky insert is never counted as success
+
+============================================================
+  PPO | DESCENT | 100000 steps | saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_025811
+============================================================
+
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+  [Curriculum-descent] start at L0/8, wind=0.50/10.0m/s
+  Resumed from ckpt: saves/descent_ppo_10hz_joint_pred_target_random_ft_20260605_175530/ckpt_best.pt
+  [Adam reset] @ step 13558710 (reset_optimizer_on_resume)
+wandb: [wandb.login()] Loaded credentials for https://api.wandb.ai from /home/xyzha/.netrc.
+wandb: Currently logged in as: xz573 (xz573-university-of-cambridge) to https://api.wandb.ai. Use `wandb login --relogin` to force relogin
+wandb: setting up run u5d5xb41
+wandb: Tracking run with wandb version 0.25.1
+wandb: Run data is saved locally in saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_025811/wandb/run-20260606_025813-u5d5xb41
+wandb: Run `wandb offline` to turn off syncing.
+wandb: Syncing run descent_ppo
+wandb: ⭐️ View project at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9
+wandb: 🚀 View run at https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9/runs/u5d5xb41
+  Resumed checkpoint progress: ts=13558710 (new log dir, no CSV to append)
+  [Resume target] descent-ppo: new log dir starts at ts=13558710; treating --timesteps=100000 as additional steps -> target_total_steps=13658710
+  [ObsPredictor] enabled: true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  [ObsPredictor] resumed from saves/descent_ppo_10hz_joint_pred_target_random_ft_20260605_175530/ckpt_best_obs_predictor.pt
+Ep   0 [13558931] ❌ R:-108.00(-108.00) SR:   0% S:221 dist:12.6cm W:0.19m/s [L0/8 ep1 W[0.0,0.5]] | instability:yaw=1.43
+       PPO PL: 0.000 VL: 0.000 E: 0.000 KL:0.0000
+       ObsPred loss:-0.3952 rmse_raw:1.1738 hidden:50%
+Ep   1 [13559119] ❌ R:-95.12(-101.56) SR:   0% S:188 dist:11.5cm W:0.30m/s [L0/8 ep2 W[0.0,0.5]] | instability:yaw=1.25
+       PPO PL: 0.000 VL: 0.000 E: 0.000 KL:0.0000
+       ObsPred loss:-0.4508 rmse_raw:0.6684 hidden:50%
+Ep   2 [13559418] ❌ R:-185.64(-129.59) SR:   0% S:299 dist:9.9cm W:0.03m/s [L0/8 ep3 W[0.0,0.5]] | timeout:dtf=98.8mm,z=152mm,tilt=0.066,yaw=0.281
+       PPO PL: 0.000 VL: 0.000 E: 0.000 KL:0.0000
+       ObsPred loss:-0.4339 rmse_raw:0.6365 hidden:50%
+Ep   3 [13559717] ❌ R:-181.89(-142.66) SR:   0% S:299 dist:27.4cm W:0.35m/s [L0/8 ep4 W[0.0,0.5]] | timeout:dtf=274.5mm,z=257mm,tilt=0.376,yaw=0.491
+       PPO PL: 0.000 VL: 0.000 E: 0.000 KL:0.0000
+       ObsPred loss:-0.4614 rmse_raw:0.7310 hidden:50%
+Ep   4 [13559734] ❌ R: -6.55(-115.44) SR:   0% S: 17 dist:9.9cm W:0.42m/s [L0/8 ep5 W[0.0,0.5]] | running
+       PPO PL:-0.019 VL: 8.902 E: 0.780 KL:0.0062
+       ObsPred loss:-0.6111 rmse_raw:0.1957 hidden:53%
+Ep   5 [13559939] ❌ R:-104.95(-113.69) SR:   0% S:205 dist:15.9cm W:0.34m/s [L0/8 ep6 W[0.0,0.5]] | instability:yaw=1.53
+       PPO PL:-0.019 VL: 8.902 E: 0.780 KL:0.0062
+       ObsPred loss:-0.4205 rmse_raw:1.0677 hidden:50%
+Ep   6 [13560165] ❌ R:-115.26(-113.91) SR:   0% S:226 dist:8.6cm W:0.36m/s [L0/8 ep7 W[0.0,0.5]] | instability:yaw=1.37
+       PPO PL:-0.019 VL: 8.902 E: 0.780 KL:0.0062
+       ObsPred loss:-0.3937 rmse_raw:1.6427 hidden:50%
+Ep   7 [13560430] ❌ R:-134.61(-116.50) SR:   0% S:265 dist:12.1cm W:0.16m/s [L0/8 ep8 W[0.0,0.5]] | instability:yaw=1.22
+       PPO PL:-0.019 VL: 8.902 E: 0.780 KL:0.0062
+       ObsPred loss:-0.4038 rmse_raw:1.4954 hidden:50%
+Ep   8 [13560619] ❌ R:-95.61(-114.18) SR:   0% S:189 dist:15.5cm W:0.22m/s [L0/8 ep9 W[0.0,0.5]] | instability:yaw=1.24
+       PPO PL:-0.019 VL: 8.902 E: 0.780 KL:0.0062
+       ObsPred loss:-0.4415 rmse_raw:0.8412 hidden:50%
+Ep   9 [13560758] ❌ R:-63.66(-109.13) SR:   0% S:139 dist:1.9cm W:0.20m/s [L0/8 ep10 W[0.0,0.5]] | running
+       PPO PL:-0.018 VL: 9.733 E: 0.780 KL:0.0035
+       ObsPred loss:-0.5627 rmse_raw:0.2853 hidden:50%
+Ep  10 [13561021] ❌ R:-161.33(-113.87) SR:   0% S:263 dist:10.8cm W:0.31m/s [L0/8 ep11 W[0.0,0.5]] | early_stop:dtf=107.5mm>xy_fail=25mm,z=185mm,patience=20
+       PPO PL:-0.018 VL: 9.733 E: 0.780 KL:0.0035
+       ObsPred loss:-0.5095 rmse_raw:0.3048 hidden:50%
+Ep  11 [13561231] ❌ R:-103.21(-112.99) SR:   0% S:210 dist:5.8cm W:0.47m/s [L0/8 ep12 W[0.0,0.5]] | instability:yaw=1.22
+       PPO PL:-0.018 VL: 9.733 E: 0.780 KL:0.0035
+       ObsPred loss:-0.4684 rmse_raw:1.1041 hidden:50%
+Ep  12 [13561380] ❌ R:-83.48(-110.72) SR:   0% S:149 dist:2.5cm W:0.13m/s [L0/8 ep13 W[0.0,0.5]] | early_stop:dtf=25.4mm>xy_fail=25mm,z=124mm,patience=24
+       PPO PL:-0.018 VL: 9.733 E: 0.780 KL:0.0035
+       ObsPred loss:-0.5878 rmse_raw:0.1905 hidden:50%
+Ep  13 [13561597] ❌ R:-109.91(-110.66) SR:   0% S:217 dist:13.8cm W:0.38m/s [L0/8 ep14 W[0.0,0.5]] | instability:yaw=1.22
+       PPO PL:-0.018 VL: 9.733 E: 0.780 KL:0.0035
+       ObsPred loss:-0.4720 rmse_raw:0.9030 hidden:50%
+Ep  14 [13561782] ❌ R:-91.88(-109.41) SR:   0% S:185 dist:17.6cm W:0.31m/s [L0/8 ep15 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 9.729 E: 0.780 KL:0.0049
+       ObsPred loss:-0.4813 rmse_raw:0.5907 hidden:50%
+Ep  15 [13562007] ❌ R:-114.07(-109.70) SR:   0% S:225 dist:14.8cm W:0.34m/s [L0/8 ep16 W[0.0,0.5]] | instability:yaw=1.97
+       PPO PL:-0.011 VL: 9.729 E: 0.780 KL:0.0049
+       ObsPred loss:-0.4570 rmse_raw:0.9906 hidden:50%
+Ep  16 [13562178] ❌ R:-109.47(-109.69) SR:   0% S:171 dist:5.2cm W:0.46m/s [L0/8 ep17 W[0.0,0.5]] | early_stop:dtf=51.8mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.011 VL: 9.729 E: 0.780 KL:0.0049
+       ObsPred loss:-0.5843 rmse_raw:0.2456 hidden:50%
+Ep  17 [13562410] ❌ R:-114.43(-109.95) SR:   0% S:232 dist:13.7cm W:0.16m/s [L0/8 ep18 W[0.0,0.5]] | instability:yaw=1.21
+       PPO PL:-0.011 VL: 9.729 E: 0.780 KL:0.0049
+       ObsPred loss:-0.4657 rmse_raw:1.3511 hidden:50%
+Ep  18 [13562610] ❌ R:-103.36(-109.60) SR:   0% S:200 dist:16.1cm W:0.03m/s [L0/8 ep19 W[0.0,0.5]] | instability:yaw=1.43
+       PPO PL:-0.011 VL: 9.729 E: 0.780 KL:0.0049
+       ObsPred loss:-0.4802 rmse_raw:1.0043 hidden:50%
+Ep  19 [13562806] ❌ R:-94.33(-108.84) SR:   0% S:196 dist:12.6cm W:0.30m/s [L0/8 ep20 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 9.175 E: 0.780 KL:0.0046
+       ObsPred loss:-0.5278 rmse_raw:0.6421 hidden:50%
+Ep  20 [13563043] ❌ R:-119.71(-109.36) SR:   0% S:237 dist:13.2cm W:0.09m/s [L0/8 ep21 W[0.0,0.5]] | instability:yaw=1.38
+       PPO PL:-0.015 VL: 9.175 E: 0.780 KL:0.0046
+       ObsPred loss:-0.4572 rmse_raw:1.0743 hidden:50%
+Ep  21 [13563342] ❌ R:-181.22(-112.62) SR:   0% S:299 dist:15.0cm W:0.45m/s [L0/8 ep22 W[0.0,0.5]] | timeout:dtf=149.8mm,z=196mm,tilt=0.272,yaw=0.302
+       PPO PL:-0.015 VL: 9.175 E: 0.780 KL:0.0046
+       ObsPred loss:-0.4834 rmse_raw:0.5487 hidden:50%
+Ep  22 [13563641] ❌ R:-185.47(-115.79) SR:   0% S:299 dist:4.7cm W:0.48m/s [L0/8 ep23 W[0.0,0.5]] | timeout:dtf=46.5mm,z=160mm,tilt=0.033,yaw=0.274
+       PPO PL:-0.015 VL: 9.175 E: 0.780 KL:0.0046
+       ObsPred loss:-0.4800 rmse_raw:0.8809 hidden:50%
+Ep  23 [13563830] ❌ R:-93.30(-114.85) SR:   0% S:189 dist:10.9cm W:0.40m/s [L0/8 ep24 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 7.087 E: 0.780 KL:0.0029
+       ObsPred loss:-0.5169 rmse_raw:0.8327 hidden:50%
+Ep  24 [13564018] ❌ R:-125.96(-115.30) SR:   0% S:188 dist:7.5cm W:0.10m/s [L0/8 ep25 W[0.0,0.5]] | early_stop:dtf=75.4mm>xy_fail=25mm,z=131mm,patience=20
+       PPO PL:-0.008 VL: 7.087 E: 0.780 KL:0.0029
+       ObsPred loss:-0.5533 rmse_raw:0.2562 hidden:50%
+Ep  25 [13564226] ❌ R:-99.98(-114.71) SR:   0% S:208 dist:14.6cm W:0.38m/s [L0/8 ep26 W[0.0,0.5]] | instability:yaw=1.26
+       PPO PL:-0.008 VL: 7.087 E: 0.780 KL:0.0029
+       ObsPred loss:-0.5010 rmse_raw:1.0420 hidden:50%
+Ep  26 [13564425] ❌ R:-97.31(-114.06) SR:   0% S:199 dist:9.7cm W:0.21m/s [L0/8 ep27 W[0.0,0.5]] | instability:yaw=1.77
+       PPO PL:-0.008 VL: 7.087 E: 0.780 KL:0.0029
+       ObsPred loss:-0.5218 rmse_raw:0.7040 hidden:50%
+Ep  27 [13564675] ❌ R:-126.67(-114.51) SR:   0% S:250 dist:13.5cm W:0.07m/s [L0/8 ep28 W[0.0,0.5]] | instability:yaw=1.28
+       PPO PL:-0.008 VL: 7.087 E: 0.780 KL:0.0029
+       ObsPred loss:-0.4705 rmse_raw:1.0020 hidden:50%
+Ep  28 [13564854] ❌ R:-86.96(-113.56) SR:   0% S:179 dist:5.9cm W:0.28m/s [L0/8 ep29 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 8.216 E: 0.780 KL:0.0041
+       ObsPred loss:-0.5460 rmse_raw:0.3007 hidden:50%
+Ep  29 [13565056] ❌ R:-133.65(-114.23) SR:   0% S:202 dist:31.6cm W:0.43m/s [L0/8 ep30 W[0.0,0.5]] | early_stop:dtf=315.7mm>xy_fail=25mm,z=205mm,patience=20
+       PPO PL:-0.015 VL: 8.216 E: 0.780 KL:0.0041
+       ObsPred loss:-0.4975 rmse_raw:0.5365 hidden:50%
+Ep  30 [13565300] ❌ R:-121.49(-114.47) SR:   0% S:244 dist:9.2cm W:0.04m/s [L0/8 ep31 W[0.0,0.5]] | instability:yaw=1.51
+       PPO PL:-0.015 VL: 8.216 E: 0.780 KL:0.0041
+       ObsPred loss:-0.4937 rmse_raw:1.0684 hidden:50%
+Ep  31 [13565599] ❌ R:-179.34(-116.49) SR:   0% S:299 dist:19.6cm W:0.25m/s [L0/8 ep32 W[0.0,0.5]] | timeout:dtf=196.5mm,z=194mm,tilt=0.205,yaw=0.209
+       PPO PL:-0.015 VL: 8.216 E: 0.780 KL:0.0041
+       ObsPred loss:-0.5181 rmse_raw:0.7837 hidden:50%
+Ep  32 [13565878] ❌ R:-139.57(-117.19) SR:   0% S:279 dist:7.4cm W:0.43m/s [L0/8 ep33 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 5.934 E: 0.780 KL:0.0039
+       ObsPred loss:-0.5138 rmse_raw:0.4069 hidden:50%
+Ep  33 [13566111] ❌ R:-115.79(-117.15) SR:   0% S:233 dist:10.9cm W:0.32m/s [L0/8 ep34 W[0.0,0.5]] | instability:yaw=1.33
+       PPO PL:-0.013 VL: 5.934 E: 0.780 KL:0.0039
+       ObsPred loss:-0.4968 rmse_raw:0.8191 hidden:50%
+Ep  34 [13566337] ❌ R:-113.00(-117.03) SR:   0% S:226 dist:17.0cm W:0.29m/s [L0/8 ep35 W[0.0,0.5]] | instability:yaw=1.20
+       PPO PL:-0.013 VL: 5.934 E: 0.780 KL:0.0039
+       ObsPred loss:-0.5002 rmse_raw:0.9095 hidden:50%
+Ep  35 [13566636] ❌ R:-186.21(-118.96) SR:   0% S:299 dist:11.1cm W:0.15m/s [L0/8 ep36 W[0.0,0.5]] | timeout:dtf=110.5mm,z=176mm,tilt=0.207,yaw=0.449
+       PPO PL:-0.013 VL: 5.934 E: 0.780 KL:0.0039
+       ObsPred loss:-0.4528 rmse_raw:1.4683 hidden:50%
+Ep  36 [13566902] ❌ R:-135.97(-119.42) SR:   0% S:266 dist:12.8cm W:0.11m/s [L0/8 ep37 W[0.0,0.5]] | running
+       PPO PL:-0.017 VL: 4.919 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5044 rmse_raw:0.4310 hidden:50%
+Ep  37 [13567201] ❌ R:-180.29(-121.02) SR:   0% S:299 dist:9.5cm W:0.12m/s [L0/8 ep38 W[0.0,0.5]] | timeout:dtf=95.4mm,z=149mm,tilt=0.096,yaw=0.362
+       PPO PL:-0.017 VL: 4.919 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5229 rmse_raw:0.4852 hidden:50%
+Ep  38 [13567466] ❌ R:-126.65(-121.16) SR:   0% S:265 dist:9.4cm W:0.47m/s [L0/8 ep39 W[0.0,0.5]] | instability:yaw=1.54
+       PPO PL:-0.017 VL: 4.919 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4966 rmse_raw:1.2854 hidden:50%
+Ep  39 [13567765] ❌ R:-183.91(-122.73) SR:   0% S:299 dist:5.8cm W:0.11m/s [L0/8 ep40 W[0.0,0.5]] | timeout:dtf=58.1mm,z=164mm,tilt=0.211,yaw=0.112
+       PPO PL:-0.017 VL: 4.919 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4971 rmse_raw:0.8098 hidden:50%
+Ep  40 [13567926] ❌ R:-80.23(-121.69) SR:   0% S:161 dist:9.4cm W:0.49m/s [L0/8 ep41 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 4.459 E: 0.781 KL:0.0034
+       ObsPred loss:-0.5561 rmse_raw:0.4164 hidden:50%
+Ep  41 [13568213] ❌ R:-146.61(-122.29) SR:   0% S:287 dist:13.8cm W:0.13m/s [L0/8 ep42 W[0.0,0.5]] | instability:yaw=1.28
+       PPO PL:-0.013 VL: 4.459 E: 0.781 KL:0.0034
+       ObsPred loss:-0.4568 rmse_raw:1.2848 hidden:50%
+Ep  42 [13568383] ❌ R:-97.43(-121.71) SR:   0% S:170 dist:2.5cm W:0.05m/s [L0/8 ep43 W[0.0,0.5]] | early_stop:dtf=25.5mm>xy_fail=25mm,z=121mm,patience=23
+       PPO PL:-0.013 VL: 4.459 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6142 rmse_raw:0.1994 hidden:50%
+Ep  43 [13568536] ❌ R:-63.51(-120.39) SR:   0% S:153 dist:0.9cm W:0.36m/s [L0/8 ep44 W[0.0,0.5]] | stuck_on_rebar:dtf=9.0mm,rebar=9.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 4.459 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6511 rmse_raw:0.1921 hidden:50%
+Ep  44 [13568835] ❌ R:-186.67(-121.86) SR:   0% S:299 dist:24.0cm W:0.16m/s [L0/8 ep45 W[0.0,0.5]] | timeout:dtf=239.8mm,z=250mm,tilt=0.344,yaw=0.213
+       PPO PL:-0.013 VL: 4.459 E: 0.781 KL:0.0034
+       ObsPred loss:-0.5087 rmse_raw:0.4570 hidden:50%
+Ep  45 [13568950] ❌ R:-56.61(-120.44) SR:   0% S:115 dist:3.8cm W:0.14m/s [L0/8 ep46 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 5.550 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5809 rmse_raw:0.3272 hidden:50%
+Ep  46 [13569140] ❌ R:-129.94(-120.64) SR:   0% S:190 dist:20.8cm W:0.09m/s [L0/8 ep47 W[0.0,0.5]] | early_stop:dtf=207.6mm>xy_fail=25mm,z=137mm,patience=20
+       PPO PL:-0.016 VL: 5.550 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5510 rmse_raw:0.2903 hidden:50%
+Ep  47 [13569380] ❌ R:-121.22(-120.65) SR:   0% S:240 dist:10.9cm W:0.37m/s [L0/8 ep48 W[0.0,0.5]] | instability:yaw=1.30
+       PPO PL:-0.016 VL: 5.550 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4915 rmse_raw:0.8302 hidden:50%
+Ep  48 [13569679] ❌ R:-172.96(-121.72) SR:   0% S:299 dist:11.2cm W:0.08m/s [L0/8 ep49 W[0.0,0.5]] | timeout:dtf=111.6mm,z=182mm,tilt=0.239,yaw=0.372
+       PPO PL:-0.016 VL: 5.550 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5525 rmse_raw:0.4766 hidden:50%
+Ep  49 [13569902] ❌ R:-113.53(-121.56) SR:   0% S:223 dist:13.7cm W:0.22m/s [L0/8 ep50 W[0.0,0.5]] | instability:yaw=1.41
+       PPO PL:-0.016 VL: 5.550 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4875 rmse_raw:0.7627 hidden:50%
+Ep  50 [13569974] ❌ R:-37.16(-119.90) SR:   0% S: 72 dist:4.7cm W:0.12m/s [L0/8 ep51 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 4.178 E: 0.781 KL:0.0032
+       ObsPred loss:-0.5623 rmse_raw:0.4111 hidden:50%
+Ep  51 [13570226] ❌ R:-119.30(-119.89) SR:   0% S:252 dist:11.4cm W:0.05m/s [L0/8 ep52 W[0.0,0.5]] | instability:yaw=1.42
+       PPO PL:-0.014 VL: 4.178 E: 0.781 KL:0.0032
+       ObsPred loss:-0.5124 rmse_raw:0.9784 hidden:50%
+Ep  52 [13570525] ❌ R:-181.07(-121.05) SR:   0% S:299 dist:16.0cm W:0.04m/s [L0/8 ep53 W[0.0,0.5]] | timeout:dtf=159.9mm,z=148mm,tilt=0.106,yaw=0.169
+       PPO PL:-0.014 VL: 4.178 E: 0.781 KL:0.0032
+       ObsPred loss:-0.5390 rmse_raw:0.5480 hidden:50%
+Ep  53 [13570788] ❌ R:-158.36(-121.74) SR:   0% S:263 dist:15.2cm W:0.40m/s [L0/8 ep54 W[0.0,0.5]] | early_stop:dtf=152.4mm>xy_fail=25mm,z=140mm,patience=20
+       PPO PL:-0.014 VL: 4.178 E: 0.781 KL:0.0032
+       ObsPred loss:-0.5886 rmse_raw:0.2116 hidden:50%
+Ep  54 [13570998] ❌ R:-106.97(-121.47) SR:   0% S:210 dist:9.3cm W:0.41m/s [L0/8 ep55 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 3.463 E: 0.781 KL:0.0041
+       ObsPred loss:-0.4794 rmse_raw:0.8588 hidden:50%
+Ep  55 [13571297] ❌ R:-183.52(-122.58) SR:   0% S:299 dist:24.1cm W:0.04m/s [L0/8 ep56 W[0.0,0.5]] | timeout:dtf=240.6mm,z=223mm,tilt=0.379,yaw=0.272
+       PPO PL:-0.011 VL: 3.463 E: 0.781 KL:0.0041
+       ObsPred loss:-0.4758 rmse_raw:0.8142 hidden:50%
+Ep  56 [13571596] ❌ R:-185.89(-123.69) SR:   0% S:299 dist:18.4cm W:0.23m/s [L0/8 ep57 W[0.0,0.5]] | timeout:dtf=184.0mm,z=201mm,tilt=0.311,yaw=0.372
+       PPO PL:-0.011 VL: 3.463 E: 0.781 KL:0.0041
+       ObsPred loss:-0.4912 rmse_raw:0.6078 hidden:50%
+Ep  57 [13571726] ❌ R:-81.43(-122.96) SR:   0% S:130 dist:4.4cm W:0.23m/s [L0/8 ep58 W[0.0,0.5]] | early_stop:dtf=44.2mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.011 VL: 3.463 E: 0.781 KL:0.0041
+       ObsPred loss:-0.6151 rmse_raw:0.2188 hidden:50%
+Ep  58 [13571987] ❌ R:-129.97(-123.08) SR:   0% S:261 dist:13.0cm W:0.03m/s [L0/8 ep59 W[0.0,0.5]] | instability:yaw=1.26
+       PPO PL:-0.011 VL: 3.463 E: 0.781 KL:0.0041
+       ObsPred loss:-0.5195 rmse_raw:0.7883 hidden:50%
+Ep  59 [13572022] ❌ R:-12.15(-121.23) SR:   0% S: 35 dist:5.4cm W:0.32m/s [L0/8 ep60 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 3.282 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6423 rmse_raw:0.3632 hidden:51%
+Ep  60 [13572253] ❌ R:-118.51(-121.18) SR:   0% S:231 dist:13.6cm W:0.33m/s [L0/8 ep61 W[0.0,0.5]] | instability:yaw=1.20
+       PPO PL:-0.012 VL: 3.282 E: 0.781 KL:0.0034
+       ObsPred loss:-0.4756 rmse_raw:1.1070 hidden:50%
+Ep  61 [13572552] ❌ R:-187.64(-122.26) SR:   0% S:299 dist:6.3cm W:0.19m/s [L0/8 ep62 W[0.0,0.5]] | timeout:dtf=63.0mm,z=142mm,tilt=0.044,yaw=0.370
+       PPO PL:-0.012 VL: 3.282 E: 0.781 KL:0.0034
+       ObsPred loss:-0.5274 rmse_raw:0.4523 hidden:50%
+Ep  62 [13572815] ❌ R:-133.66(-122.44) SR:   0% S:263 dist:15.4cm W:0.21m/s [L0/8 ep63 W[0.0,0.5]] | instability:yaw=1.25
+       PPO PL:-0.012 VL: 3.282 E: 0.781 KL:0.0034
+       ObsPred loss:-0.4620 rmse_raw:1.5042 hidden:50%
+Ep  63 [13573046] ❌ R:-113.27(-122.29) SR:   0% S:231 dist:24.2cm W:0.21m/s [L0/8 ep64 W[0.0,0.5]] | running
+       PPO PL:-0.017 VL: 2.982 E: 0.781 KL:0.0046
+       ObsPred loss:-0.5390 rmse_raw:0.4032 hidden:50%
+Ep  64 [13573339] ❌ R:-149.55(-122.71) SR:   0% S:293 dist:10.7cm W:0.18m/s [L0/8 ep65 W[0.0,0.5]] | instability:yaw=1.44
+       PPO PL:-0.017 VL: 2.982 E: 0.781 KL:0.0046
+       ObsPred loss:-0.4796 rmse_raw:1.0497 hidden:50%
+Ep  65 [13573533] ❌ R:-98.77(-122.35) SR:   0% S:194 dist:12.5cm W:0.20m/s [L0/8 ep66 W[0.0,0.5]] | instability:yaw=1.24
+       PPO PL:-0.017 VL: 2.982 E: 0.781 KL:0.0046
+       ObsPred loss:-0.4963 rmse_raw:1.0287 hidden:50%
+Ep  66 [13573822] ❌ R:-172.49(-123.10) SR:   0% S:289 dist:13.2cm W:0.30m/s [L0/8 ep67 W[0.0,0.5]] | early_stop:dtf=132.4mm>xy_fail=25mm,z=184mm,patience=20
+       PPO PL:-0.017 VL: 2.982 E: 0.781 KL:0.0046
+       ObsPred loss:-0.5542 rmse_raw:0.6214 hidden:50%
+Ep  67 [13574070] ❌ R:-121.42(-123.07) SR:   0% S:248 dist:12.9cm W:0.05m/s [L0/8 ep68 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 2.616 E: 0.781 KL:0.0041
+       ObsPred loss:-0.5210 rmse_raw:0.3430 hidden:50%
+Ep  68 [13574258] ❌ R:-129.45(-123.17) SR:   0% S:188 dist:3.1cm W:0.17m/s [L0/8 ep69 W[0.0,0.5]] | early_stop:dtf=31.2mm>xy_fail=25mm,z=126mm,patience=20
+       PPO PL:-0.016 VL: 2.616 E: 0.781 KL:0.0041
+       ObsPred loss:-0.5647 rmse_raw:0.2544 hidden:50%
+Ep  69 [13574557] ❌ R:-182.97(-124.02) SR:   0% S:299 dist:12.6cm W:0.09m/s [L0/8 ep70 W[0.0,0.5]] | timeout:dtf=125.8mm,z=158mm,tilt=0.187,yaw=0.494
+       PPO PL:-0.016 VL: 2.616 E: 0.781 KL:0.0041
+       ObsPred loss:-0.5401 rmse_raw:0.8449 hidden:50%
+Ep  70 [13574856] ❌ R:-187.00(-124.91) SR:   0% S:299 dist:22.4cm W:0.49m/s [L0/8 ep71 W[0.0,0.5]] | timeout:dtf=224.2mm,z=276mm,tilt=0.374,yaw=0.053
+       PPO PL:-0.016 VL: 2.616 E: 0.781 KL:0.0041
+       ObsPred loss:-0.5081 rmse_raw:0.3927 hidden:50%
+Ep  71 [13575094] ❌ R:-118.34(-124.82) SR:   0% S:238 dist:7.6cm W:0.18m/s [L0/8 ep72 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.472 E: 0.780 KL:0.0028
+       ObsPred loss:-0.5601 rmse_raw:0.3456 hidden:50%
+Ep  72 [13575298] ❌ R:-126.95(-124.85) SR:   0% S:204 dist:10.7cm W:0.50m/s [L0/8 ep73 W[0.0,0.5]] | early_stop:dtf=107.4mm>xy_fail=25mm,z=128mm,patience=20
+       PPO PL:-0.012 VL: 1.472 E: 0.780 KL:0.0028
+       ObsPred loss:-0.6048 rmse_raw:0.3002 hidden:50%
+Ep  73 [13575597] ❌ R:-182.38(-125.62) SR:   0% S:299 dist:9.6cm W:0.32m/s [L0/8 ep74 W[0.0,0.5]] | timeout:dtf=96.5mm,z=146mm,tilt=0.064,yaw=0.002
+       PPO PL:-0.012 VL: 1.472 E: 0.780 KL:0.0028
+       ObsPred loss:-0.5256 rmse_raw:1.1281 hidden:50%
+Ep  74 [13575896] ❌ R:-187.66(-126.45) SR:   0% S:299 dist:3.8cm W:0.01m/s [L0/8 ep75 W[0.0,0.5]] | timeout:dtf=38.3mm,z=147mm,tilt=0.044,yaw=0.127
+       PPO PL:-0.012 VL: 1.472 E: 0.780 KL:0.0028
+       ObsPred loss:-0.5038 rmse_raw:0.6287 hidden:50%
+Ep  75 [13576118] ❌ R:-108.45(-126.21) SR:   0% S:222 dist:21.8cm W:0.38m/s [L0/8 ep76 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 1.329 E: 0.780 KL:0.0041
+       ObsPred loss:-0.4986 rmse_raw:0.7887 hidden:50%
+Ep  76 [13576417] ❌ R:-184.74(-126.97) SR:   0% S:299 dist:9.0cm W:0.48m/s [L0/8 ep77 W[0.0,0.5]] | timeout:dtf=90.2mm,z=154mm,tilt=0.051,yaw=0.308
+       PPO PL:-0.015 VL: 1.329 E: 0.780 KL:0.0041
+       ObsPred loss:-0.5300 rmse_raw:0.5006 hidden:50%
+Ep  77 [13576716] ❌ R:-186.08(-127.73) SR:   0% S:299 dist:31.5cm W:0.27m/s [L0/8 ep78 W[0.0,0.5]] | timeout:dtf=315.0mm,z=226mm,tilt=0.309,yaw=0.362
+       PPO PL:-0.015 VL: 1.329 E: 0.780 KL:0.0041
+       ObsPred loss:-0.5092 rmse_raw:0.5119 hidden:50%
+Ep  78 [13577015] ❌ R:-188.29(-128.50) SR:   0% S:299 dist:9.6cm W:0.09m/s [L0/8 ep79 W[0.0,0.5]] | timeout:dtf=95.9mm,z=155mm,tilt=0.150,yaw=0.166
+       PPO PL:-0.015 VL: 1.329 E: 0.780 KL:0.0041
+       ObsPred loss:-0.5227 rmse_raw:0.6759 hidden:50%
+Ep  79 [13577142] ❌ R:-60.51(-127.65) SR:   0% S:127 dist:1.8cm W:0.41m/s [L0/8 ep80 W[0.0,0.5]] | running
+       PPO PL:-0.017 VL: 1.058 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5721 rmse_raw:0.2822 hidden:50%
+Ep  80 [13577365] ❌ R:-114.51(-127.49) SR:   0% S:223 dist:14.1cm W:0.46m/s [L0/8 ep81 W[0.0,0.5]] | instability:yaw=1.24
+       PPO PL:-0.017 VL: 1.058 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5107 rmse_raw:1.1548 hidden:50%
+Ep  81 [13577628] ❌ R:-170.65(-128.01) SR:   0% S:263 dist:22.3cm W:0.22m/s [L0/8 ep82 W[0.0,0.5]] | early_stop:dtf=223.4mm>xy_fail=25mm,z=247mm,patience=20
+       PPO PL:-0.017 VL: 1.058 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4808 rmse_raw:0.6680 hidden:50%
+Ep  82 [13577927] ❌ R:-187.22(-128.73) SR:   0% S:299 dist:19.8cm W:0.02m/s [L0/8 ep83 W[0.0,0.5]] | timeout:dtf=197.8mm,z=155mm,tilt=0.212,yaw=0.144
+       PPO PL:-0.017 VL: 1.058 E: 0.781 KL:0.0045
+       ObsPred loss:-0.4810 rmse_raw:0.7785 hidden:50%
+Ep  83 [13578106] ❌ R:-115.11(-128.56) SR:   0% S:179 dist:2.9cm W:0.11m/s [L0/8 ep84 W[0.0,0.5]] | early_stop:dtf=28.7mm>xy_fail=25mm,z=123mm,patience=20
+       PPO PL:-0.017 VL: 1.058 E: 0.781 KL:0.0045
+       ObsPred loss:-0.5961 rmse_raw:0.2158 hidden:50%
+Ep  84 [13578166] ❌ R:-30.79(-127.41) SR:   0% S: 60 dist:3.4cm W:0.47m/s [L0/8 ep85 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.495 E: 0.781 KL:0.0027
+       ObsPred loss:-0.5786 rmse_raw:0.4050 hidden:50%
+Ep  85 [13578373] ❌ R:-136.64(-127.52) SR:   0% S:207 dist:3.0cm W:0.03m/s [L0/8 ep86 W[0.0,0.5]] | early_stop:dtf=30.4mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.013 VL: 1.495 E: 0.781 KL:0.0027
+       ObsPred loss:-0.5774 rmse_raw:0.1999 hidden:50%
+Ep  86 [13578672] ❌ R:-186.68(-128.20) SR:   0% S:299 dist:23.2cm W:0.20m/s [L0/8 ep87 W[0.0,0.5]] | early_stop:dtf=232.4mm>xy_fail=25mm,z=211mm,patience=20
+       PPO PL:-0.013 VL: 1.495 E: 0.781 KL:0.0027
+       ObsPred loss:-0.5030 rmse_raw:0.4304 hidden:50%
+Ep  87 [13578885] ❌ R:-135.39(-128.28) SR:   0% S:213 dist:18.7cm W:0.46m/s [L0/8 ep88 W[0.0,0.5]] | early_stop:dtf=186.5mm>xy_fail=25mm,z=131mm,patience=20
+       PPO PL:-0.013 VL: 1.495 E: 0.781 KL:0.0027
+       ObsPred loss:-0.5982 rmse_raw:0.2150 hidden:50%
+Ep  88 [13579184] ❌ R:-187.04(-128.94) SR:   0% S:299 dist:15.6cm W:0.28m/s [L0/8 ep89 W[0.0,0.5]] | timeout:dtf=155.8mm,z=177mm,tilt=0.183,yaw=0.004
+       PPO PL:-0.013 VL: 1.495 E: 0.781 KL:0.0027
+       ObsPred loss:-0.5181 rmse_raw:1.0110 hidden:50%
+Ep  89 [13579190] ❌ R: -3.11(-127.54) SR:   0% S:  6 dist:5.0cm W:0.15m/s [L0/8 ep90 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 0.863 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5500 rmse_raw:0.2511 hidden:50%
+Ep  90 [13579489] ❌ R:-186.44(-128.19) SR:   0% S:299 dist:22.2cm W:0.22m/s [L0/8 ep91 W[0.0,0.5]] | timeout:dtf=222.2mm,z=211mm,tilt=0.406,yaw=0.526
+       PPO PL:-0.016 VL: 0.863 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5057 rmse_raw:0.3996 hidden:50%
+Ep  91 [13579788] ❌ R:-183.19(-128.79) SR:   0% S:299 dist:26.1cm W:0.05m/s [L0/8 ep92 W[0.0,0.5]] | timeout:dtf=260.7mm,z=203mm,tilt=0.348,yaw=0.138
+       PPO PL:-0.016 VL: 0.863 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5367 rmse_raw:0.3449 hidden:50%
+Ep  92 [13580027] ❌ R:-121.34(-128.71) SR:   0% S:239 dist:14.4cm W:0.48m/s [L0/8 ep93 W[0.0,0.5]] | instability:yaw=1.31
+       PPO PL:-0.016 VL: 0.863 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5016 rmse_raw:0.9234 hidden:50%
+Ep  93 [13580214] ❌ R:-95.13(-128.35) SR:   0% S:187 dist:8.0cm W:0.35m/s [L0/8 ep94 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.368 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5190 rmse_raw:0.5987 hidden:50%
+Ep  94 [13580451] ❌ R:-154.56(-128.63) SR:   0% S:237 dist:21.5cm W:0.22m/s [L0/8 ep95 W[0.0,0.5]] | early_stop:dtf=215.2mm>xy_fail=25mm,z=136mm,patience=20
+       PPO PL:-0.014 VL: 1.368 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5591 rmse_raw:0.2940 hidden:50%
+Ep  95 [13580750] ❌ R:-185.70(-129.22) SR:   0% S:299 dist:16.9cm W:0.21m/s [L0/8 ep96 W[0.0,0.5]] | timeout:dtf=169.5mm,z=190mm,tilt=0.253,yaw=0.333
+       PPO PL:-0.014 VL: 1.368 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5067 rmse_raw:0.3581 hidden:50%
+Ep  96 [13580909] ❌ R:-91.61(-128.83) SR:   0% S:159 dist:5.6cm W:0.45m/s [L0/8 ep97 W[0.0,0.5]] | early_stop:dtf=55.8mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.368 E: 0.781 KL:0.0047
+       ObsPred loss:-0.6244 rmse_raw:0.1707 hidden:50%
+Ep  97 [13581208] ❌ R:-186.65(-129.42) SR:   0% S:299 dist:27.2cm W:0.13m/s [L0/8 ep98 W[0.0,0.5]] | timeout:dtf=271.6mm,z=201mm,tilt=0.248,yaw=0.444
+       PPO PL:-0.014 VL: 1.368 E: 0.781 KL:0.0047
+       ObsPred loss:-0.5286 rmse_raw:0.4767 hidden:50%
+Ep  98 [13581238] ❌ R:-11.30(-128.23) SR:   0% S: 30 dist:5.9cm W:0.22m/s [L0/8 ep99 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6216 rmse_raw:0.5725 hidden:50%
+  [Curriculum-descent] ep=100 wind=[0.00,0.50]/10.0m/s SR=0% n=100/100 pause=100
+Ep  99 [13581433] ❌ R:-127.75(-128.23) SR:   0% S:195 dist:4.7cm W:0.28m/s [L0/8 ep100 W[0.0,0.5]] | early_stop:dtf=47.0mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6074 rmse_raw:0.1796 hidden:50%
+Ep 100 [13581628] ❌ R:-130.99(-128.25) SR:   0% S:195 dist:4.8cm W:0.46m/s [L0/8 ep101 W[0.0,0.5]] | early_stop:dtf=48.5mm>xy_fail=25mm,z=122mm,patience=20
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6067 rmse_raw:0.1970 hidden:50%
+Ep 101 [13581795] ❌ R:-110.06(-128.08) SR:   0% S:167 dist:2.7cm W:0.25m/s [L0/8 ep102 W[0.0,0.5]] | early_stop:dtf=26.8mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6189 rmse_raw:0.2076 hidden:50%
+Ep 102 [13581955] ❌ R:-80.26(-127.61) SR:   0% S:160 dist:1.8cm W:0.25m/s [L0/8 ep103 W[0.0,0.5]] | stuck_on_rebar:dtf=18.2mm,rebar=20.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6466 rmse_raw:0.1725 hidden:50%
+Ep 103 [13582254] ❌ R:-122.10(-127.56) SR:   0% S:299 dist:1.0cm W:0.35m/s [L0/8 ep104 W[0.0,0.5]] | timeout:dtf=9.6mm,z=117mm,tilt=0.148,yaw=0.000
+       PPO PL:-0.016 VL: 0.982 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6109 rmse_raw:0.6697 hidden:50%
+Ep 104 [13582262] ❌ R: -4.45(-126.39) SR:   0% S:  8 dist:6.6cm W:0.42m/s [L0/8 ep105 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.5712 rmse_raw:0.2185 hidden:50%
+Ep 105 [13582507] ❌ R:-157.35(-126.68) SR:   0% S:245 dist:4.1cm W:0.04m/s [L0/8 ep106 W[0.0,0.5]] | early_stop:dtf=41.0mm>xy_fail=25mm,z=124mm,patience=20
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.5761 rmse_raw:0.2979 hidden:50%
+Ep 106 [13582715] ❌ R:-136.10(-126.77) SR:   0% S:208 dist:3.9cm W:0.14m/s [L0/8 ep107 W[0.0,0.5]] | early_stop:dtf=38.6mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6107 rmse_raw:0.1927 hidden:50%
+Ep 107 [13582886] ❌ R:-70.32(-126.24) SR:   0% S:171 dist:0.3cm W:0.46m/s [L0/8 ep108 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.1mm,tilt=0.001,yaw=0.012,insert=20.1/25mm,rebar=3.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6385 rmse_raw:0.1842 hidden:50%
+Ep 108 [13583084] ❌ R:-134.45(-126.32) SR:   0% S:198 dist:12.6cm W:0.13m/s [L0/8 ep109 W[0.0,0.5]] | early_stop:dtf=125.6mm>xy_fail=25mm,z=129mm,patience=20
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.5696 rmse_raw:0.2480 hidden:50%
+Ep 109 [13583240] ❌ R:-89.47(-125.98) SR:   0% S:156 dist:2.9cm W:0.32m/s [L0/8 ep110 W[0.0,0.5]] | early_stop:dtf=29.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.811 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6298 rmse_raw:0.1608 hidden:50%
+Ep 110 [13583286] ❌ R:-20.97(-125.04) SR:   0% S: 46 dist:1.0cm W:0.42m/s [L0/8 ep111 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.5847 rmse_raw:0.7494 hidden:50%
+Ep 111 [13583529] ❌ R:-156.57(-125.32) SR:   0% S:243 dist:8.1cm W:0.22m/s [L0/8 ep112 W[0.0,0.5]] | early_stop:dtf=81.3mm>xy_fail=25mm,z=131mm,patience=20
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.5949 rmse_raw:0.2163 hidden:50%
+Ep 112 [13583689] ❌ R:-56.82(-124.71) SR:   0% S:160 dist:0.1cm W:0.05m/s [L0/8 ep113 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.3mm,tilt=0.024,yaw=0.028,insert=18.9/25mm,rebar=2.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6488 rmse_raw:0.1526 hidden:50%
+Ep 113 [13583919] ❌ R:-153.00(-124.96) SR:   0% S:230 dist:20.3cm W:0.34m/s [L0/8 ep114 W[0.0,0.5]] | early_stop:dtf=203.0mm>xy_fail=25mm,z=212mm,patience=20
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.5381 rmse_raw:0.2957 hidden:50%
+Ep 114 [13584104] ❌ R:-118.16(-124.90) SR:   0% S:185 dist:3.1cm W:0.14m/s [L0/8 ep115 W[0.0,0.5]] | early_stop:dtf=31.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6168 rmse_raw:0.2037 hidden:50%
+Ep 115 [13584262] ❌ R:-102.36(-124.71) SR:   0% S:158 dist:4.6cm W:0.49m/s [L0/8 ep116 W[0.0,0.5]] | early_stop:dtf=45.7mm>xy_fail=25mm,z=122mm,patience=20
+       PPO PL:-0.015 VL: 1.447 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6241 rmse_raw:0.1743 hidden:50%
+Ep 116 [13584310] ❌ R:-23.98(-123.85) SR:   0% S: 48 dist:5.3cm W:0.03m/s [L0/8 ep117 W[0.0,0.5]] | running
+       PPO PL:-0.009 VL: 1.401 E: 0.782 KL:0.0051
+       ObsPred loss:-0.5786 rmse_raw:0.4629 hidden:50%
+Ep 117 [13584489] ❌ R:-125.47(-123.86) SR:   0% S:179 dist:3.7cm W:0.13m/s [L0/8 ep118 W[0.0,0.5]] | early_stop:dtf=37.3mm>xy_fail=25mm,z=124mm,patience=20
+       PPO PL:-0.009 VL: 1.401 E: 0.782 KL:0.0051
+       ObsPred loss:-0.5982 rmse_raw:0.2029 hidden:50%
+Ep 118 [13584709] ❌ R:-111.76(-123.76) SR:   0% S:220 dist:2.0cm W:0.39m/s [L0/8 ep119 W[0.0,0.5]] | stuck_on_rebar:dtf=20.0mm,rebar=22.3mm,z=118.5mm,insert=1.5/25mm,gap=-1.5mm,vz=0.9mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.401 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6413 rmse_raw:0.1709 hidden:50%
+Ep 119 [13584905] ❌ R:-105.77(-123.61) SR:   0% S:196 dist:0.7cm W:0.37m/s [L0/8 ep120 W[0.0,0.5]] | stuck_on_rebar:dtf=7.1mm,rebar=7.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.401 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6209 rmse_raw:0.2329 hidden:50%
+Ep 120 [13585066] ❌ R:-75.66(-123.21) SR:   0% S:161 dist:0.2cm W:0.16m/s [L0/8 ep121 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=2.3mm,tilt=0.039,yaw=0.000,insert=18.1/25mm,rebar=2.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 1.401 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6393 rmse_raw:0.1929 hidden:50%
+Ep 121 [13585334] ❌ R:-137.16(-123.33) SR:   0% S:268 dist:26.0cm W:0.28m/s [L0/8 ep122 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 1.583 E: 0.782 KL:0.0077
+       ObsPred loss:-0.5205 rmse_raw:0.6344 hidden:50%
+Ep 122 [13585515] ❌ R:-125.75(-123.35) SR:   0% S:181 dist:6.1cm W:0.42m/s [L0/8 ep123 W[0.0,0.5]] | early_stop:dtf=61.2mm>xy_fail=25mm,z=133mm,patience=20
+       PPO PL:-0.015 VL: 1.583 E: 0.782 KL:0.0077
+       ObsPred loss:-0.6028 rmse_raw:0.1905 hidden:50%
+Ep 123 [13585710] ❌ R:-109.72(-123.24) SR:   0% S:195 dist:1.5cm W:0.01m/s [L0/8 ep124 W[0.0,0.5]] | stuck_on_rebar:dtf=15.1mm,rebar=16.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.583 E: 0.782 KL:0.0077
+       ObsPred loss:-0.6247 rmse_raw:0.1987 hidden:50%
+Ep 124 [13585887] ❌ R:-123.61(-123.24) SR:   0% S:177 dist:3.7cm W:0.42m/s [L0/8 ep125 W[0.0,0.5]] | early_stop:dtf=37.4mm>xy_fail=25mm,z=124mm,patience=20
+       PPO PL:-0.015 VL: 1.583 E: 0.782 KL:0.0077
+       ObsPred loss:-0.6071 rmse_raw:0.2178 hidden:50%
+Ep 125 [13586092] ❌ R:-127.69(-123.28) SR:   0% S:205 dist:2.8cm W:0.32m/s [L0/8 ep126 W[0.0,0.5]] | early_stop:dtf=27.7mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.015 VL: 1.583 E: 0.782 KL:0.0077
+       ObsPred loss:-0.6192 rmse_raw:0.2007 hidden:50%
+Ep 126 [13586358] ❌ R:-136.30(-123.38) SR:   0% S:266 dist:12.0cm W:0.17m/s [L0/8 ep127 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.5590 rmse_raw:0.3706 hidden:50%
+Ep 127 [13586561] ❌ R:-137.92(-123.49) SR:   0% S:203 dist:3.7cm W:0.06m/s [L0/8 ep128 W[0.0,0.5]] | early_stop:dtf=36.9mm>xy_fail=25mm,z=129mm,patience=20
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.5614 rmse_raw:0.3495 hidden:50%
+Ep 128 [13586742] ❌ R:-117.25(-123.44) SR:   0% S:181 dist:2.9cm W:0.25m/s [L0/8 ep129 W[0.0,0.5]] | early_stop:dtf=28.5mm>xy_fail=25mm,z=120mm,patience=26
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6117 rmse_raw:0.2014 hidden:50%
+Ep 129 [13587000] ❌ R:-168.43(-123.79) SR:   0% S:258 dist:12.0cm W:0.38m/s [L0/8 ep130 W[0.0,0.5]] | early_stop:dtf=119.7mm>xy_fail=25mm,z=132mm,patience=20
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.5737 rmse_raw:0.2251 hidden:50%
+Ep 130 [13587164] ❌ R:-75.35(-123.42) SR:   0% S:164 dist:2.1cm W:0.17m/s [L0/8 ep131 W[0.0,0.5]] | stuck_on_rebar:dtf=21.4mm,rebar=23.9mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6481 rmse_raw:0.1786 hidden:50%
+Ep 131 [13587342] ❌ R:-102.83(-123.26) SR:   0% S:178 dist:2.0cm W:0.36m/s [L0/8 ep132 W[0.0,0.5]] | stuck_on_rebar:dtf=19.8mm,rebar=22.1mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.263 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6300 rmse_raw:0.1965 hidden:50%
+Ep 132 [13587382] ❌ R:-19.62(-122.48) SR:   0% S: 40 dist:6.3cm W:0.33m/s [L0/8 ep133 W[0.0,0.5]] | running
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.5900 rmse_raw:0.8179 hidden:50%
+Ep 133 [13587542] ❌ R:-118.31(-122.45) SR:   0% S:160 dist:16.5cm W:0.37m/s [L0/8 ep134 W[0.0,0.5]] | early_stop:dtf=164.5mm>xy_fail=25mm,z=136mm,patience=20
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.5403 rmse_raw:0.5076 hidden:50%
+Ep 134 [13587812] ❌ R:-174.86(-122.84) SR:   0% S:270 dist:20.2cm W:0.42m/s [L0/8 ep135 W[0.0,0.5]] | early_stop:dtf=201.7mm>xy_fail=25mm,z=209mm,patience=20
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.5434 rmse_raw:0.3585 hidden:50%
+Ep 135 [13588059] ❌ R:-161.53(-123.13) SR:   0% S:247 dist:5.1cm W:0.35m/s [L0/8 ep136 W[0.0,0.5]] | early_stop:dtf=51.3mm>xy_fail=25mm,z=128mm,patience=20
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.5768 rmse_raw:0.2364 hidden:50%
+Ep 136 [13588224] ❌ R:-101.11(-122.97) SR:   0% S:165 dist:2.8cm W:0.06m/s [L0/8 ep137 W[0.0,0.5]] | early_stop:dtf=28.5mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6335 rmse_raw:0.2675 hidden:50%
+Ep 137 [13588395] ❌ R:-114.31(-122.90) SR:   0% S:171 dist:2.8cm W:0.36m/s [L0/8 ep138 W[0.0,0.5]] | early_stop:dtf=27.9mm>xy_fail=25mm,z=124mm,patience=20
+       PPO PL:-0.007 VL: 1.756 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6100 rmse_raw:0.2113 hidden:50%
+Ep 138 [13588406] ❌ R: -5.70(-122.06) SR:   0% S: 11 dist:7.8cm W:0.39m/s [L0/8 ep139 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 0.890 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6046 rmse_raw:0.1685 hidden:55%
+Ep 139 [13588570] ❌ R:-80.56(-121.76) SR:   0% S:164 dist:0.9cm W:0.33m/s [L0/8 ep140 W[0.0,0.5]] | stuck_on_rebar:dtf=9.4mm,rebar=10.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 0.890 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6452 rmse_raw:0.1835 hidden:50%
+Ep 140 [13588780] ❌ R:-141.46(-121.90) SR:   0% S:210 dist:5.2cm W:0.14m/s [L0/8 ep141 W[0.0,0.5]] | early_stop:dtf=52.5mm>xy_fail=25mm,z=124mm,patience=20
+       PPO PL:-0.015 VL: 0.890 E: 0.782 KL:0.0051
+       ObsPred loss:-0.5579 rmse_raw:0.4437 hidden:50%
+Ep 141 [13589036] ❌ R:-167.71(-122.22) SR:   0% S:256 dist:16.0cm W:0.21m/s [L0/8 ep142 W[0.0,0.5]] | early_stop:dtf=159.9mm>xy_fail=25mm,z=139mm,patience=20
+       PPO PL:-0.015 VL: 0.890 E: 0.782 KL:0.0051
+       ObsPred loss:-0.5405 rmse_raw:0.5130 hidden:50%
+Ep 142 [13589245] ❌ R:-141.75(-122.36) SR:   0% S:209 dist:9.0cm W:0.50m/s [L0/8 ep143 W[0.0,0.5]] | early_stop:dtf=90.5mm>xy_fail=25mm,z=133mm,patience=20
+       PPO PL:-0.015 VL: 0.890 E: 0.782 KL:0.0051
+       ObsPred loss:-0.5749 rmse_raw:0.2211 hidden:50%
+Ep 143 [13589430] ❌ R:-84.91(-122.10) SR:   0% S:185 dist:1.0cm W:0.47m/s [L0/8 ep144 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=12.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.529 E: 0.782 KL:0.0043
+       ObsPred loss:-0.6422 rmse_raw:0.1419 hidden:50%
+Ep 144 [13589729] ❌ R:-189.20(-122.56) SR:   0% S:299 dist:31.2cm W:0.47m/s [L0/8 ep145 W[0.0,0.5]] | timeout:dtf=311.9mm,z=225mm,tilt=0.257,yaw=0.121
+       PPO PL:-0.014 VL: 1.529 E: 0.782 KL:0.0043
+       ObsPred loss:-0.4945 rmse_raw:0.8987 hidden:50%
+Ep 145 [13590028] ❌ R:-185.52(-123.00) SR:   0% S:299 dist:11.5cm W:0.16m/s [L0/8 ep146 W[0.0,0.5]] | timeout:dtf=115.0mm,z=176mm,tilt=0.226,yaw=0.442
+       PPO PL:-0.014 VL: 1.529 E: 0.782 KL:0.0043
+       ObsPred loss:-0.5205 rmse_raw:0.5907 hidden:50%
+Ep 146 [13590211] ❌ R:-121.17(-122.98) SR:   0% S:183 dist:6.4cm W:0.34m/s [L0/8 ep147 W[0.0,0.5]] | early_stop:dtf=64.0mm>xy_fail=25mm,z=125mm,patience=20
+       PPO PL:-0.014 VL: 1.529 E: 0.782 KL:0.0043
+       ObsPred loss:-0.6036 rmse_raw:0.1803 hidden:50%
+Ep 147 [13590454] ❌ R:-68.50(-122.61) SR:   0% S:243 dist:1.1cm W:0.30m/s [L0/8 ep148 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6409 rmse_raw:0.4430 hidden:50%
+Ep 148 [13590664] ❌ R:-143.05(-122.75) SR:   0% S:210 dist:4.6cm W:0.37m/s [L0/8 ep149 W[0.0,0.5]] | early_stop:dtf=45.9mm>xy_fail=25mm,z=125mm,patience=21
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6022 rmse_raw:0.2104 hidden:50%
+Ep 149 [13590834] ❌ R:-119.79(-122.73) SR:   0% S:170 dist:4.6cm W:0.06m/s [L0/8 ep150 W[0.0,0.5]] | early_stop:dtf=46.0mm>xy_fail=25mm,z=131mm,patience=20
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6166 rmse_raw:0.1800 hidden:50%
+Ep 150 [13591015] ❌ R:-122.37(-122.73) SR:   0% S:181 dist:4.5cm W:0.49m/s [L0/8 ep151 W[0.0,0.5]] | early_stop:dtf=44.9mm>xy_fail=25mm,z=122mm,patience=20
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6000 rmse_raw:0.1875 hidden:50%
+Ep 151 [13591227] ❌ R:-106.82(-122.63) SR:   0% S:212 dist:0.5cm W:0.20m/s [L0/8 ep152 W[0.0,0.5]] | stuck_on_rebar:dtf=4.7mm,rebar=5.2mm,z=114.5mm,insert=5.5/25mm,gap=-5.5mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6197 rmse_raw:0.6091 hidden:50%
+Ep 152 [13591449] ❌ R:-150.08(-122.80) SR:   0% S:222 dist:31.1cm W:0.40m/s [L0/8 ep153 W[0.0,0.5]] | early_stop:dtf=311.2mm>xy_fail=25mm,z=184mm,patience=20
+       PPO PL:-0.016 VL: 1.109 E: 0.782 KL:0.0048
+       ObsPred loss:-0.5328 rmse_raw:0.4202 hidden:50%
+Ep 153 [13591478] ❌ R:-11.02(-122.08) SR:   0% S: 29 dist:6.8cm W:0.27m/s [L0/8 ep154 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.210 E: 0.782 KL:0.0049
+       ObsPred loss:-0.5847 rmse_raw:0.5821 hidden:52%
+Ep 154 [13591648] ❌ R:-89.58(-121.87) SR:   0% S:170 dist:2.1cm W:0.25m/s [L0/8 ep155 W[0.0,0.5]] | stuck_on_rebar:dtf=21.4mm,rebar=24.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.210 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6342 rmse_raw:0.1936 hidden:50%
+Ep 155 [13591947] ❌ R:-187.92(-122.29) SR:   0% S:299 dist:16.6cm W:0.46m/s [L0/8 ep156 W[0.0,0.5]] | timeout:dtf=165.9mm,z=201mm,tilt=0.313,yaw=0.318
+       PPO PL:-0.014 VL: 1.210 E: 0.782 KL:0.0049
+       ObsPred loss:-0.5294 rmse_raw:0.3817 hidden:50%
+Ep 156 [13592163] ❌ R:-117.73(-122.26) SR:   0% S:216 dist:1.7cm W:0.38m/s [L0/8 ep157 W[0.0,0.5]] | stuck_on_rebar:dtf=17.2mm,rebar=22.0mm,z=119.2mm,insert=0.8/25mm,gap=-0.8mm,vz=0.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.210 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6405 rmse_raw:0.1745 hidden:50%
+Ep 157 [13592416] ❌ R:-88.01(-122.05) SR:   0% S:253 dist:0.6cm W:0.33m/s [L0/8 ep158 W[0.0,0.5]] | stuck_on_rebar:dtf=6.4mm,rebar=7.0mm,z=114.0mm,insert=6.0/25mm,gap=-6.0mm,vz=1.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.210 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6088 rmse_raw:1.2212 hidden:50%
+Ep 158 [13592502] ❌ R:-34.34(-121.49) SR:   0% S: 86 dist:1.1cm W:0.24m/s [L0/8 ep159 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.809 E: 0.783 KL:0.0051
+       ObsPred loss:-0.6066 rmse_raw:0.4776 hidden:50%
+Ep 159 [13592670] ❌ R:-116.01(-121.46) SR:   0% S:168 dist:2.8cm W:0.30m/s [L0/8 ep160 W[0.0,0.5]] | early_stop:dtf=27.5mm>xy_fail=25mm,z=125mm,patience=22
+       PPO PL:-0.013 VL: 1.809 E: 0.783 KL:0.0051
+       ObsPred loss:-0.6212 rmse_raw:0.1884 hidden:50%
+Ep 160 [13592848] ❌ R:-127.50(-121.50) SR:   0% S:178 dist:8.7cm W:0.00m/s [L0/8 ep161 W[0.0,0.5]] | early_stop:dtf=87.2mm>xy_fail=25mm,z=134mm,patience=20
+       PPO PL:-0.013 VL: 1.809 E: 0.783 KL:0.0051
+       ObsPred loss:-0.6072 rmse_raw:0.1986 hidden:50%
+Ep 161 [13593142] ❌ R:-128.88(-121.54) SR:   0% S:294 dist:0.2cm W:0.07m/s [L0/8 ep162 W[0.0,0.5]] | stuck_on_rebar:dtf=2.4mm,rebar=3.2mm,z=114.6mm,insert=5.4/25mm,gap=-5.4mm,vz=1.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.809 E: 0.783 KL:0.0051
+       ObsPred loss:-0.6389 rmse_raw:0.2535 hidden:50%
+Ep 162 [13593320] ❌ R:-116.02(-121.51) SR:   0% S:178 dist:2.6cm W:0.08m/s [L0/8 ep163 W[0.0,0.5]] | early_stop:dtf=26.1mm>xy_fail=25mm,z=123mm,patience=21
+       PPO PL:-0.013 VL: 1.809 E: 0.783 KL:0.0051
+       ObsPred loss:-0.6137 rmse_raw:0.2085 hidden:50%
+Ep 163 [13593526] ❌ R:-103.45(-121.40) SR:   0% S:206 dist:15.9cm W:0.32m/s [L0/8 ep164 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.429 E: 0.783 KL:0.0036
+       ObsPred loss:-0.5433 rmse_raw:0.3895 hidden:50%
+Ep 164 [13593695] ❌ R:-115.50(-121.36) SR:   0% S:169 dist:5.0cm W:0.20m/s [L0/8 ep165 W[0.0,0.5]] | early_stop:dtf=49.8mm>xy_fail=25mm,z=133mm,patience=20
+       PPO PL:-0.011 VL: 1.429 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6111 rmse_raw:0.2029 hidden:50%
+Ep 165 [13593994] ❌ R:-69.34(-121.05) SR:   0% S:299 dist:1.1cm W:0.43m/s [L0/8 ep166 W[0.0,0.5]] | timeout:dtf=11.2mm,z=113mm,tilt=0.274,yaw=0.000
+       PPO PL:-0.011 VL: 1.429 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6028 rmse_raw:1.6335 hidden:50%
+Ep 166 [13594232] ❌ R:-131.47(-121.11) SR:   0% S:238 dist:1.1cm W:0.18m/s [L0/8 ep167 W[0.0,0.5]] | stuck_on_rebar:dtf=11.3mm,rebar=11.4mm,z=116.5mm,insert=3.5/25mm,gap=-3.5mm,vz=0.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.429 E: 0.783 KL:0.0036
+       ObsPred loss:-0.5916 rmse_raw:0.4957 hidden:50%
+Ep 167 [13594402] ❌ R:-122.42(-121.12) SR:   0% S:170 dist:10.3cm W:0.18m/s [L0/8 ep168 W[0.0,0.5]] | early_stop:dtf=102.6mm>xy_fail=25mm,z=128mm,patience=20
+       PPO PL:-0.011 VL: 1.429 E: 0.783 KL:0.0036
+       ObsPred loss:-0.5542 rmse_raw:0.3903 hidden:50%
+Ep 168 [13594550] ❌ R:-42.17(-120.65) SR:   0% S:148 dist:1.2cm W:0.05m/s [L0/8 ep169 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6505 rmse_raw:0.1551 hidden:50%
+Ep 169 [13594708] ❌ R:-83.49(-120.44) SR:   0% S:158 dist:1.5cm W:0.13m/s [L0/8 ep170 W[0.0,0.5]] | stuck_on_rebar:dtf=15.3mm,rebar=21.3mm,z=120.2mm,insert=0.0/25mm,gap=0.2mm,vz=0.4mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6506 rmse_raw:0.1779 hidden:50%
+Ep 170 [13594875] ❌ R:-105.13(-120.35) SR:   0% S:167 dist:2.6cm W:0.21m/s [L0/8 ep171 W[0.0,0.5]] | early_stop:dtf=25.7mm>xy_fail=25mm,z=120mm,patience=22
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6316 rmse_raw:0.1642 hidden:50%
+Ep 171 [13595022] ❌ R:-64.38(-120.02) SR:   0% S:147 dist:0.3cm W:0.34m/s [L0/8 ep172 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=3.1mm,tilt=0.029,yaw=0.033,insert=17.8/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6486 rmse_raw:0.1687 hidden:50%
+Ep 172 [13595199] ❌ R:-120.90(-120.03) SR:   0% S:177 dist:3.6cm W:0.33m/s [L0/8 ep173 W[0.0,0.5]] | early_stop:dtf=36.1mm>xy_fail=25mm,z=122mm,patience=20
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6143 rmse_raw:0.2804 hidden:50%
+Ep 173 [13595360] ❌ R:-86.33(-119.83) SR:   0% S:161 dist:1.8cm W:0.41m/s [L0/8 ep174 W[0.0,0.5]] | stuck_on_rebar:dtf=18.2mm,rebar=20.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6300 rmse_raw:0.1811 hidden:50%
+Ep 174 [13595552] ❌ R:-109.31(-119.77) SR:   0% S:192 dist:0.9cm W:0.44m/s [L0/8 ep175 W[0.0,0.5]] | stuck_on_rebar:dtf=9.0mm,rebar=12.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.167 E: 0.783 KL:0.0061
+       ObsPred loss:-0.6198 rmse_raw:0.2006 hidden:50%
+Ep 175 [13595574] ❌ R: -6.98(-119.13) SR:   0% S: 22 dist:8.3cm W:0.27m/s [L0/8 ep176 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6509 rmse_raw:0.1732 hidden:50%
+Ep 176 [13595873] ❌ R:-104.90(-119.05) SR:   0% S:299 dist:0.8cm W:0.08m/s [L0/8 ep177 W[0.0,0.5]] | timeout:dtf=7.8mm,z=115mm,tilt=0.191,yaw=0.000
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6206 rmse_raw:0.8991 hidden:50%
+Ep 177 [13596029] ❌ R:-77.85(-118.82) SR:   0% S:156 dist:1.5cm W:0.15m/s [L0/8 ep178 W[0.0,0.5]] | stuck_on_rebar:dtf=14.8mm,rebar=15.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6535 rmse_raw:0.1786 hidden:50%
+Ep 178 [13596175] ❌ R:-84.71(-118.63) SR:   0% S:146 dist:2.9cm W:0.36m/s [L0/8 ep179 W[0.0,0.5]] | early_stop:dtf=29.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6433 rmse_raw:0.1557 hidden:50%
+Ep 179 [13596320] ❌ R:-72.93(-118.37) SR:   0% S:145 dist:1.6cm W:0.45m/s [L0/8 ep180 W[0.0,0.5]] | stuck_on_rebar:dtf=15.7mm,rebar=16.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6551 rmse_raw:0.1880 hidden:50%
+Ep 180 [13596484] ❌ R:-85.85(-118.19) SR:   0% S:164 dist:1.6cm W:0.24m/s [L0/8 ep181 W[0.0,0.5]] | stuck_on_rebar:dtf=16.3mm,rebar=25.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 2.134 E: 0.783 KL:0.0049
+       ObsPred loss:-0.6352 rmse_raw:0.1874 hidden:50%
+Ep 181 [13596598] ❌ R:-47.62(-117.81) SR:   0% S:114 dist:1.5cm W:0.27m/s [L0/8 ep182 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6312 rmse_raw:0.3396 hidden:50%
+Ep 182 [13596742] ❌ R:-91.43(-117.66) SR:   0% S:144 dist:2.7cm W:0.20m/s [L0/8 ep183 W[0.0,0.5]] | early_stop:dtf=26.8mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6293 rmse_raw:0.1835 hidden:50%
+Ep 183 [13596877] ❌ R:-66.65(-117.39) SR:   0% S:135 dist:0.4cm W:0.45m/s [L0/8 ep184 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=3.9mm,tilt=0.036,yaw=0.002,insert=16.4/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6440 rmse_raw:0.1798 hidden:50%
+Ep 184 [13597047] ❌ R:-103.82(-117.31) SR:   0% S:170 dist:1.5cm W:0.45m/s [L0/8 ep185 W[0.0,0.5]] | stuck_on_rebar:dtf=15.4mm,rebar=16.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6276 rmse_raw:0.1833 hidden:50%
+Ep 185 [13597230] ❌ R:-121.62(-117.34) SR:   0% S:183 dist:7.5cm W:0.35m/s [L0/8 ep186 W[0.0,0.5]] | early_stop:dtf=75.0mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6030 rmse_raw:0.2116 hidden:50%
+Ep 186 [13597389] ❌ R:-86.52(-117.17) SR:   0% S:159 dist:1.9cm W:0.32m/s [L0/8 ep187 W[0.0,0.5]] | stuck_on_rebar:dtf=18.8mm,rebar=25.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6537 rmse_raw:0.1522 hidden:50%
+Ep 187 [13597551] ❌ R:-111.29(-117.14) SR:   0% S:162 dist:2.9cm W:0.40m/s [L0/8 ep188 W[0.0,0.5]] | early_stop:dtf=28.7mm>xy_fail=25mm,z=124mm,patience=25
+       PPO PL:-0.014 VL: 2.149 E: 0.782 KL:0.0060
+       ObsPred loss:-0.6017 rmse_raw:0.2284 hidden:50%
+Ep 188 [13597622] ❌ R:-28.34(-116.67) SR:   0% S: 71 dist:0.5cm W:0.25m/s [L0/8 ep189 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6244 rmse_raw:0.2936 hidden:51%
+Ep 189 [13597786] ❌ R:-76.40(-116.46) SR:   0% S:164 dist:0.2cm W:0.01m/s [L0/8 ep190 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.6mm,tilt=0.020,yaw=0.010,insert=18.8/25mm,rebar=2.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6360 rmse_raw:0.1712 hidden:50%
+Ep 190 [13598085] ❌ R:-123.96(-116.50) SR:   0% S:299 dist:1.7cm W:0.45m/s [L0/8 ep191 W[0.0,0.5]] | timeout:dtf=17.1mm,z=114mm,tilt=0.135,yaw=0.023
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6324 rmse_raw:0.2457 hidden:50%
+Ep 191 [13598259] ❌ R:-115.93(-116.49) SR:   0% S:174 dist:2.6cm W:0.16m/s [L0/8 ep192 W[0.0,0.5]] | early_stop:dtf=26.2mm>xy_fail=25mm,z=121mm,patience=24
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6212 rmse_raw:0.1762 hidden:50%
+Ep 192 [13598423] ❌ R:-81.30(-116.31) SR:   0% S:164 dist:1.6cm W:0.10m/s [L0/8 ep193 W[0.0,0.5]] | stuck_on_rebar:dtf=15.9mm,rebar=17.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6519 rmse_raw:0.1539 hidden:50%
+Ep 193 [13598578] ❌ R:-70.19(-116.07) SR:   0% S:155 dist:0.8cm W:0.22m/s [L0/8 ep194 W[0.0,0.5]] | stuck_on_rebar:dtf=7.5mm,rebar=9.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.928 E: 0.782 KL:0.0058
+       ObsPred loss:-0.6402 rmse_raw:0.3573 hidden:50%
+Ep 194 [13598646] ❌ R:-33.04(-115.65) SR:   0% S: 68 dist:6.3cm W:0.01m/s [L0/8 ep195 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.5387 rmse_raw:0.4118 hidden:50%
+Ep 195 [13598803] ❌ R:-99.43(-115.57) SR:   0% S:157 dist:4.6cm W:0.11m/s [L0/8 ep196 W[0.0,0.5]] | early_stop:dtf=46.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6208 rmse_raw:0.1939 hidden:50%
+Ep 196 [13598990] ❌ R:-108.42(-115.53) SR:   0% S:187 dist:1.1cm W:0.15m/s [L0/8 ep197 W[0.0,0.5]] | stuck_on_rebar:dtf=11.1mm,rebar=13.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6142 rmse_raw:0.2802 hidden:50%
+Ep 197 [13599148] ❌ R:-69.02(-115.29) SR:   0% S:158 dist:1.8cm W:0.33m/s [L0/8 ep198 W[0.0,0.5]] | stuck_on_rebar:dtf=17.6mm,rebar=18.6mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6583 rmse_raw:0.1500 hidden:50%
+Ep 198 [13599365] ❌ R:-147.54(-115.46) SR:   0% S:217 dist:2.9cm W:0.03m/s [L0/8 ep199 W[0.0,0.5]] | early_stop:dtf=28.9mm>xy_fail=25mm,z=122mm,patience=22
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.5633 rmse_raw:0.2525 hidden:50%
+  [Curriculum-descent] ep=200 wind=[0.00,0.50]/10.0m/s SR=0% n=100/100 pause=200
+Ep 199 [13599511] ❌ R:-91.87(-115.34) SR:   0% S:146 dist:2.9cm W:0.43m/s [L0/8 ep200 W[0.0,0.5]] | early_stop:dtf=29.2mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.882 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6311 rmse_raw:0.1680 hidden:50%
+Ep 200 [13599670] ❌ R:-51.93(-115.02) SR:   0% S:159 dist:1.5cm W:0.32m/s [L0/8 ep201 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6475 rmse_raw:0.1901 hidden:50%
+Ep 201 [13599814] ❌ R:-62.48(-114.76) SR:   0% S:144 dist:1.5cm W:0.29m/s [L0/8 ep202 W[0.0,0.5]] | stuck_on_rebar:dtf=14.6mm,rebar=17.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6612 rmse_raw:0.1449 hidden:50%
+Ep 202 [13599957] ❌ R:-69.71(-114.54) SR:   0% S:143 dist:3.0cm W:0.42m/s [L0/8 ep203 W[0.0,0.5]] | early_stop:dtf=29.7mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6561 rmse_raw:0.1742 hidden:50%
+Ep 203 [13600112] ❌ R:-68.47(-114.31) SR:   0% S:155 dist:0.8cm W:0.29m/s [L0/8 ep204 W[0.0,0.5]] | stuck_on_rebar:dtf=7.9mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6550 rmse_raw:0.1840 hidden:50%
+Ep 204 [13600268] ❌ R:-88.52(-114.19) SR:   0% S:156 dist:1.3cm W:0.22m/s [L0/8 ep205 W[0.0,0.5]] | stuck_on_rebar:dtf=13.0mm,rebar=13.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6394 rmse_raw:0.1642 hidden:50%
+Ep 205 [13600450] ❌ R:-114.10(-114.19) SR:   0% S:182 dist:1.5cm W:0.49m/s [L0/8 ep206 W[0.0,0.5]] | stuck_on_rebar:dtf=14.5mm,rebar=16.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6268 rmse_raw:0.1816 hidden:50%
+Ep 206 [13600616] ❌ R:-109.26(-114.16) SR:   0% S:166 dist:2.8cm W:0.30m/s [L0/8 ep207 W[0.0,0.5]] | early_stop:dtf=28.3mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.013 VL: 1.846 E: 0.782 KL:0.0031
+       ObsPred loss:-0.6355 rmse_raw:0.1726 hidden:50%
+Ep 207 [13600694] ❌ R:-35.67(-113.79) SR:   0% S: 78 dist:2.2cm W:0.33m/s [L0/8 ep208 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.5982 rmse_raw:0.2658 hidden:50%
+Ep 208 [13600887] ❌ R:-94.71(-113.70) SR:   0% S:193 dist:0.9cm W:0.36m/s [L0/8 ep209 W[0.0,0.5]] | stuck_on_rebar:dtf=9.3mm,rebar=9.8mm,z=115.8mm,insert=4.2/25mm,gap=-4.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6362 rmse_raw:0.4126 hidden:50%
+Ep 209 [13601024] ❌ R:-63.60(-113.46) SR:   0% S:137 dist:0.3cm W:0.09m/s [L0/8 ep210 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.2mm,tilt=0.028,yaw=0.017,insert=18.8/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6374 rmse_raw:0.1602 hidden:50%
+Ep 210 [13601152] ❌ R:-74.36(-113.27) SR:   0% S:128 dist:3.5cm W:0.43m/s [L0/8 ep211 W[0.0,0.5]] | early_stop:dtf=34.8mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6477 rmse_raw:0.1663 hidden:50%
+Ep 211 [13601309] ❌ R:-87.12(-113.15) SR:   0% S:157 dist:1.6cm W:0.36m/s [L0/8 ep212 W[0.0,0.5]] | stuck_on_rebar:dtf=15.6mm,rebar=15.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6345 rmse_raw:0.1628 hidden:50%
+Ep 212 [13601463] ❌ R:-79.47(-112.99) SR:   0% S:154 dist:1.2cm W:0.24m/s [L0/8 ep213 W[0.0,0.5]] | stuck_on_rebar:dtf=12.1mm,rebar=18.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6537 rmse_raw:0.1919 hidden:50%
+Ep 213 [13601694] ❌ R:-111.03(-112.98) SR:   0% S:231 dist:1.1cm W:0.18m/s [L0/8 ep214 W[0.0,0.5]] | stuck_on_rebar:dtf=10.7mm,rebar=11.0mm,z=114.3mm,insert=5.7/25mm,gap=-5.7mm,vz=0.8mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.967 E: 0.782 KL:0.0056
+       ObsPred loss:-0.6306 rmse_raw:0.4276 hidden:50%
+Ep 214 [13601718] ❌ R:-11.24(-112.51) SR:   0% S: 24 dist:8.4cm W:0.36m/s [L0/8 ep215 W[0.0,0.5]] | running
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.5604 rmse_raw:0.7004 hidden:50%
+Ep 215 [13601868] ❌ R:-101.01(-112.46) SR:   0% S:150 dist:5.2cm W:0.17m/s [L0/8 ep216 W[0.0,0.5]] | early_stop:dtf=51.8mm>xy_fail=25mm,z=125mm,patience=20
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.6148 rmse_raw:0.1995 hidden:50%
+Ep 216 [13602167] ❌ R:-72.73(-112.27) SR:   0% S:299 dist:0.8cm W:0.25m/s [L0/8 ep217 W[0.0,0.5]] | timeout:dtf=7.9mm,z=116mm,tilt=0.165,yaw=0.000
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.6500 rmse_raw:0.4654 hidden:50%
+Ep 217 [13602348] ❌ R:-98.57(-112.21) SR:   0% S:181 dist:2.5cm W:0.29m/s [L0/8 ep218 W[0.0,0.5]] | early_stop:dtf=25.5mm>xy_fail=25mm,z=117mm,patience=48
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.6394 rmse_raw:0.1930 hidden:50%
+Ep 218 [13602517] ❌ R:-59.14(-111.97) SR:   0% S:169 dist:0.5cm W:0.08m/s [L0/8 ep219 W[0.0,0.5]] | stuck_on_rebar:dtf=4.7mm,rebar=5.1mm,z=114.6mm,insert=5.4/25mm,gap=-5.4mm,vz=0.4mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.6379 rmse_raw:0.6451 hidden:50%
+Ep 219 [13602673] ❌ R:-98.09(-111.90) SR:   0% S:156 dist:3.7cm W:0.47m/s [L0/8 ep220 W[0.0,0.5]] | early_stop:dtf=37.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.005 VL: 2.138 E: 0.782 KL:0.0040
+       ObsPred loss:-0.6389 rmse_raw:0.1690 hidden:50%
+Ep 220 [13602742] ❌ R:-22.77(-111.50) SR:   0% S: 69 dist:2.7cm W:0.31m/s [L0/8 ep221 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6497 rmse_raw:0.2219 hidden:51%
+Ep 221 [13602866] ❌ R:-43.31(-111.19) SR:   0% S:124 dist:0.7cm W:0.31m/s [L0/8 ep222 W[0.0,0.5]] | stuck_on_rebar:dtf=6.8mm,rebar=7.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6560 rmse_raw:0.3359 hidden:50%
+Ep 222 [13603027] ❌ R:-86.75(-111.08) SR:   0% S:161 dist:1.7cm W:0.17m/s [L0/8 ep223 W[0.0,0.5]] | stuck_on_rebar:dtf=17.3mm,rebar=19.0mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6444 rmse_raw:0.1741 hidden:50%
+Ep 223 [13603172] ❌ R:-60.26(-110.86) SR:   0% S:145 dist:0.9cm W:0.37m/s [L0/8 ep224 W[0.0,0.5]] | stuck_on_rebar:dtf=9.3mm,rebar=11.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6612 rmse_raw:0.1515 hidden:50%
+Ep 224 [13603317] ❌ R:-49.73(-110.59) SR:   0% S:145 dist:0.3cm W:0.37m/s [L0/8 ep225 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.7mm,tilt=0.007,yaw=0.017,insert=20.3/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6593 rmse_raw:0.1549 hidden:50%
+Ep 225 [13603495] ❌ R:-100.92(-110.54) SR:   0% S:178 dist:2.1cm W:0.08m/s [L0/8 ep226 W[0.0,0.5]] | stuck_on_rebar:dtf=20.7mm,rebar=21.5mm,z=119.2mm,insert=0.8/25mm,gap=-0.8mm,vz=0.7mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6166 rmse_raw:0.1903 hidden:50%
+Ep 226 [13603641] ❌ R:-92.60(-110.46) SR:   0% S:146 dist:4.0cm W:0.28m/s [L0/8 ep227 W[0.0,0.5]] | early_stop:dtf=39.5mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 2.576 E: 0.782 KL:0.0035
+       ObsPred loss:-0.6252 rmse_raw:0.1758 hidden:50%
+Ep 227 [13603766] ❌ R:-45.85(-110.18) SR:   0% S:125 dist:1.7cm W:0.20m/s [L0/8 ep228 W[0.0,0.5]] | running
+       PPO PL:-0.009 VL: 2.314 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6389 rmse_raw:0.1721 hidden:50%
+Ep 228 [13603974] ❌ R:-74.05(-110.02) SR:   0% S:208 dist:0.1cm W:0.15m/s [L0/8 ep229 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.3mm,tilt=0.020,yaw=0.067,insert=19.0/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 2.314 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6430 rmse_raw:0.1563 hidden:50%
+Ep 229 [13604135] ❌ R:-82.78(-109.90) SR:   0% S:161 dist:1.0cm W:0.21m/s [L0/8 ep230 W[0.0,0.5]] | stuck_on_rebar:dtf=9.9mm,rebar=15.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 2.314 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6416 rmse_raw:0.1978 hidden:50%
+Ep 230 [13604434] ❌ R:-70.30(-109.73) SR:   0% S:299 dist:1.8cm W:0.15m/s [L0/8 ep231 W[0.0,0.5]] | timeout:dtf=18.1mm,z=113mm,tilt=0.153,yaw=0.050
+       PPO PL:-0.009 VL: 2.314 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6613 rmse_raw:0.1784 hidden:50%
+Ep 231 [13604613] ❌ R:-119.87(-109.78) SR:   0% S:179 dist:2.8cm W:0.24m/s [L0/8 ep232 W[0.0,0.5]] | early_stop:dtf=28.0mm>xy_fail=25mm,z=127mm,patience=21
+       PPO PL:-0.009 VL: 2.314 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6017 rmse_raw:0.3179 hidden:50%
+Ep 232 [13604790] ❌ R:-76.70(-109.63) SR:   0% S:177 dist:1.9cm W:0.21m/s [L0/8 ep233 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6129 rmse_raw:0.2152 hidden:50%
+Ep 233 [13604965] ❌ R:-117.57(-109.67) SR:   0% S:175 dist:3.7cm W:0.03m/s [L0/8 ep234 W[0.0,0.5]] | early_stop:dtf=37.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6164 rmse_raw:0.2093 hidden:50%
+Ep 234 [13605123] ❌ R:-77.92(-109.53) SR:   0% S:158 dist:0.3cm W:0.17m/s [L0/8 ep235 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.4mm,tilt=0.009,yaw=0.007,insert=20.3/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6112 rmse_raw:0.6013 hidden:50%
+Ep 235 [13605301] ❌ R:-106.06(-109.52) SR:   0% S:178 dist:1.4cm W:0.12m/s [L0/8 ep236 W[0.0,0.5]] | stuck_on_rebar:dtf=13.7mm,rebar=15.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6346 rmse_raw:0.1783 hidden:50%
+Ep 236 [13605493] ❌ R:-119.29(-109.56) SR:   0% S:192 dist:1.1cm W:0.32m/s [L0/8 ep237 W[0.0,0.5]] | stuck_on_rebar:dtf=11.3mm,rebar=12.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6181 rmse_raw:0.1880 hidden:50%
+Ep 237 [13605677] ❌ R:-58.34(-109.34) SR:   0% S:184 dist:0.3cm W:0.50m/s [L0/8 ep238 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.3mm,tilt=0.007,yaw=0.003,insert=18.8/25mm,rebar=3.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.015 VL: 2.011 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6603 rmse_raw:0.2371 hidden:50%
+Ep 238 [13605814] ❌ R:-66.68(-109.17) SR:   0% S:137 dist:0.6cm W:0.32m/s [L0/8 ep239 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.5617 rmse_raw:0.3638 hidden:50%
+Ep 239 [13606051] ❌ R:-89.47(-109.08) SR:   0% S:237 dist:1.3cm W:0.08m/s [L0/8 ep240 W[0.0,0.5]] | stuck_on_rebar:dtf=13.0mm,rebar=13.4mm,z=113.8mm,insert=6.2/25mm,gap=-6.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6322 rmse_raw:0.7281 hidden:50%
+Ep 240 [13606186] ❌ R:-60.75(-108.88) SR:   0% S:135 dist:0.8cm W:0.22m/s [L0/8 ep241 W[0.0,0.5]] | stuck_on_rebar:dtf=7.6mm,rebar=10.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6570 rmse_raw:0.1589 hidden:50%
+Ep 241 [13606319] ❌ R:-58.19(-108.67) SR:   0% S:133 dist:1.1cm W:0.42m/s [L0/8 ep242 W[0.0,0.5]] | stuck_on_rebar:dtf=10.7mm,rebar=13.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6578 rmse_raw:0.2922 hidden:50%
+Ep 242 [13606475] ❌ R:-107.22(-108.67) SR:   0% S:156 dist:3.8cm W:0.44m/s [L0/8 ep243 W[0.0,0.5]] | early_stop:dtf=38.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.5994 rmse_raw:0.2124 hidden:50%
+Ep 243 [13606654] ❌ R:-121.95(-108.72) SR:   0% S:179 dist:2.7cm W:0.17m/s [L0/8 ep244 W[0.0,0.5]] | early_stop:dtf=27.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6125 rmse_raw:0.1898 hidden:50%
+Ep 244 [13606819] ❌ R:-110.24(-108.73) SR:   0% S:165 dist:3.6cm W:0.09m/s [L0/8 ep245 W[0.0,0.5]] | early_stop:dtf=35.8mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.894 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6329 rmse_raw:0.1929 hidden:50%
+Ep 245 [13606838] ❌ R: -8.56(-108.32) SR:   0% S: 19 dist:4.8cm W:0.40m/s [L0/8 ep246 W[0.0,0.5]] | running
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6411 rmse_raw:0.1833 hidden:53%
+Ep 246 [13606996] ❌ R:-110.71(-108.33) SR:   0% S:158 dist:2.8cm W:0.04m/s [L0/8 ep247 W[0.0,0.5]] | early_stop:dtf=27.7mm>xy_fail=25mm,z=125mm,patience=22
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6310 rmse_raw:0.1990 hidden:50%
+Ep 247 [13607295] ❌ R:-80.35(-108.22) SR:   0% S:299 dist:0.7cm W:0.41m/s [L0/8 ep248 W[0.0,0.5]] | timeout:dtf=6.6mm,z=117mm,tilt=0.120,yaw=0.000
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6429 rmse_raw:0.2125 hidden:50%
+Ep 248 [13607460] ❌ R:-96.04(-108.17) SR:   0% S:165 dist:2.2cm W:0.33m/s [L0/8 ep249 W[0.0,0.5]] | stuck_on_rebar:dtf=22.5mm,rebar=23.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6406 rmse_raw:0.1609 hidden:50%
+Ep 249 [13607600] ❌ R:-81.06(-108.06) SR:   0% S:140 dist:2.9cm W:0.22m/s [L0/8 ep250 W[0.0,0.5]] | early_stop:dtf=29.2mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6449 rmse_raw:0.1902 hidden:50%
+Ep 250 [13607752] ❌ R:-75.78(-107.93) SR:   0% S:152 dist:1.0cm W:0.03m/s [L0/8 ep251 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=11.4mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.016 VL: 2.120 E: 0.782 KL:0.0053
+       ObsPred loss:-0.6494 rmse_raw:0.1828 hidden:50%
+Ep 251 [13607862] ❌ R:-11.64(-107.55) SR:   0% S:110 dist:1.3cm W:0.27m/s [L0/8 ep252 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6574 rmse_raw:0.3146 hidden:50%
+Ep 252 [13608015] ❌ R:-97.45(-107.51) SR:   0% S:153 dist:4.1cm W:0.20m/s [L0/8 ep253 W[0.0,0.5]] | early_stop:dtf=41.0mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6465 rmse_raw:0.1875 hidden:50%
+Ep 253 [13608192] ❌ R:-115.70(-107.54) SR:   0% S:177 dist:4.7cm W:0.25m/s [L0/8 ep254 W[0.0,0.5]] | early_stop:dtf=47.2mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6108 rmse_raw:0.1782 hidden:50%
+Ep 254 [13608370] ❌ R:-99.40(-107.51) SR:   0% S:178 dist:0.8cm W:0.40m/s [L0/8 ep255 W[0.0,0.5]] | stuck_on_rebar:dtf=8.0mm,rebar=10.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6202 rmse_raw:0.4552 hidden:50%
+Ep 255 [13608535] ❌ R:-101.84(-107.49) SR:   0% S:165 dist:3.8cm W:0.27m/s [L0/8 ep256 W[0.0,0.5]] | early_stop:dtf=38.0mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6301 rmse_raw:0.1840 hidden:50%
+Ep 256 [13608692] ❌ R:-102.66(-107.47) SR:   0% S:157 dist:2.5cm W:0.23m/s [L0/8 ep257 W[0.0,0.5]] | early_stop:dtf=25.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6270 rmse_raw:0.1921 hidden:50%
+Ep 257 [13608827] ❌ R:-57.46(-107.28) SR:   0% S:135 dist:0.9cm W:0.31m/s [L0/8 ep258 W[0.0,0.5]] | stuck_on_rebar:dtf=8.8mm,rebar=9.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 2.552 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6488 rmse_raw:0.1993 hidden:50%
+Ep 258 [13608886] ❌ R:-14.61(-106.92) SR:   0% S: 59 dist:2.4cm W:0.42m/s [L0/8 ep259 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6421 rmse_raw:0.3117 hidden:51%
+Ep 259 [13609185] ❌ R:-79.80(-106.81) SR:   0% S:299 dist:1.0cm W:0.06m/s [L0/8 ep260 W[0.0,0.5]] | timeout:dtf=9.8mm,z=115mm,tilt=0.162,yaw=0.020
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6593 rmse_raw:0.1955 hidden:50%
+Ep 260 [13609355] ❌ R:-55.18(-106.62) SR:   0% S:170 dist:0.1cm W:0.45m/s [L0/8 ep261 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.4mm,tilt=0.039,yaw=0.005,insert=19.3/25mm,rebar=1.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6534 rmse_raw:0.1887 hidden:50%
+Ep 261 [13609526] ❌ R:-118.35(-106.66) SR:   0% S:171 dist:3.8cm W:0.33m/s [L0/8 ep262 W[0.0,0.5]] | early_stop:dtf=37.9mm>xy_fail=25mm,z=121mm,patience=21
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.5993 rmse_raw:0.2085 hidden:50%
+Ep 262 [13609703] ❌ R:-97.50(-106.63) SR:   0% S:177 dist:1.0cm W:0.41m/s [L0/8 ep263 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=10.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6431 rmse_raw:0.1788 hidden:50%
+Ep 263 [13609841] ❌ R:-85.84(-106.55) SR:   0% S:138 dist:3.3cm W:0.17m/s [L0/8 ep264 W[0.0,0.5]] | early_stop:dtf=33.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.834 E: 0.782 KL:0.0055
+       ObsPred loss:-0.6471 rmse_raw:0.1872 hidden:50%
+Ep 264 [13609910] ❌ R:-27.21(-106.25) SR:   0% S: 69 dist:0.7cm W:0.31m/s [L0/8 ep265 W[0.0,0.5]] | running
+       PPO PL:-0.009 VL: 1.667 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6280 rmse_raw:0.2975 hidden:51%
+Ep 265 [13610082] ❌ R:-84.30(-106.17) SR:   0% S:172 dist:0.3cm W:0.31m/s [L0/8 ep266 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.9mm,tilt=0.014,yaw=0.006,insert=19.6/25mm,rebar=3.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 1.667 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6201 rmse_raw:0.2014 hidden:50%
+Ep 266 [13610249] ❌ R:-93.51(-106.12) SR:   0% S:167 dist:2.3cm W:0.38m/s [L0/8 ep267 W[0.0,0.5]] | stuck_on_rebar:dtf=23.0mm,rebar=23.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.667 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6426 rmse_raw:0.2774 hidden:50%
+Ep 267 [13610548] ❌ R:-76.27(-106.01) SR:   0% S:299 dist:1.1cm W:0.39m/s [L0/8 ep268 W[0.0,0.5]] | timeout:dtf=10.7mm,z=117mm,tilt=0.146,yaw=0.002
+       PPO PL:-0.009 VL: 1.667 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6607 rmse_raw:0.1721 hidden:50%
+Ep 268 [13610847] ❌ R:-76.26(-105.90) SR:   0% S:299 dist:0.3cm W:0.10m/s [L0/8 ep269 W[0.0,0.5]] | timeout:dtf=2.6mm,z=114mm,tilt=0.220,yaw=0.000
+       PPO PL:-0.009 VL: 1.667 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6570 rmse_raw:0.1815 hidden:50%
+Ep 269 [13610934] ❌ R:-38.67(-105.65) SR:   0% S: 87 dist:2.5cm W:0.41m/s [L0/8 ep270 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6127 rmse_raw:0.2039 hidden:51%
+Ep 270 [13611080] ❌ R:-86.74(-105.58) SR:   0% S:146 dist:0.7cm W:0.06m/s [L0/8 ep271 W[0.0,0.5]] | stuck_on_rebar:dtf=7.1mm,rebar=8.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6008 rmse_raw:0.2164 hidden:50%
+Ep 271 [13611244] ❌ R:-114.30(-105.61) SR:   0% S:164 dist:4.7cm W:0.20m/s [L0/8 ep272 W[0.0,0.5]] | early_stop:dtf=46.9mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6027 rmse_raw:0.3689 hidden:50%
+Ep 272 [13611423] ❌ R:-109.28(-105.62) SR:   0% S:179 dist:1.4cm W:0.46m/s [L0/8 ep273 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=16.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6154 rmse_raw:0.2900 hidden:50%
+Ep 273 [13611599] ❌ R:-82.06(-105.54) SR:   0% S:176 dist:1.2cm W:0.28m/s [L0/8 ep274 W[0.0,0.5]] | stuck_on_rebar:dtf=12.0mm,rebar=12.2mm,z=115.0mm,insert=5.0/25mm,gap=-5.0mm,vz=0.9mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6449 rmse_raw:0.4607 hidden:50%
+Ep 274 [13611776] ❌ R:-103.69(-105.53) SR:   0% S:177 dist:1.6cm W:0.04m/s [L0/8 ep275 W[0.0,0.5]] | stuck_on_rebar:dtf=16.2mm,rebar=17.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.6238 rmse_raw:0.1860 hidden:50%
+Ep 275 [13611948] ❌ R:-120.89(-105.59) SR:   0% S:172 dist:4.0cm W:0.04m/s [L0/8 ep276 W[0.0,0.5]] | early_stop:dtf=40.2mm>xy_fail=25mm,z=126mm,patience=20
+       PPO PL:-0.010 VL: 1.760 E: 0.782 KL:0.0074
+       ObsPred loss:-0.5969 rmse_raw:0.2015 hidden:50%
+Ep 276 [13611958] ❌ R: -5.29(-105.22) SR:   0% S: 10 dist:5.8cm W:0.30m/s [L0/8 ep277 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.5751 rmse_raw:0.1837 hidden:50%
+Ep 277 [13612128] ❌ R:-90.77(-105.17) SR:   0% S:170 dist:1.2cm W:0.03m/s [L0/8 ep278 W[0.0,0.5]] | stuck_on_rebar:dtf=12.4mm,rebar=16.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.6475 rmse_raw:0.1618 hidden:50%
+Ep 278 [13612332] ❌ R:-121.63(-105.23) SR:   0% S:204 dist:1.6cm W:0.19m/s [L0/8 ep279 W[0.0,0.5]] | stuck_on_rebar:dtf=16.3mm,rebar=19.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.6212 rmse_raw:0.1974 hidden:50%
+Ep 279 [13612480] ❌ R:-71.28(-105.11) SR:   0% S:148 dist:1.3cm W:0.48m/s [L0/8 ep280 W[0.0,0.5]] | stuck_on_rebar:dtf=13.3mm,rebar=14.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.6594 rmse_raw:0.1747 hidden:50%
+Ep 280 [13612681] ❌ R:-101.61(-105.10) SR:   0% S:201 dist:1.0cm W:0.37m/s [L0/8 ep281 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=13.4mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.6440 rmse_raw:0.1704 hidden:50%
+Ep 281 [13612835] ❌ R:-99.11(-105.08) SR:   0% S:154 dist:3.0cm W:0.42m/s [L0/8 ep282 W[0.0,0.5]] | early_stop:dtf=29.6mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.872 E: 0.782 KL:0.0076
+       ObsPred loss:-0.6248 rmse_raw:0.2057 hidden:50%
+Ep 282 [13612982] ❌ R:-32.72(-104.82) SR:   0% S:147 dist:1.4cm W:0.45m/s [L0/8 ep283 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6473 rmse_raw:0.3811 hidden:50%
+Ep 283 [13613252] ❌ R:-84.91(-104.75) SR:   0% S:270 dist:1.1cm W:0.02m/s [L0/8 ep284 W[0.0,0.5]] | stuck_on_rebar:dtf=11.3mm,rebar=11.8mm,z=113.6mm,insert=6.4/25mm,gap=-6.4mm,vz=2.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6482 rmse_raw:0.3638 hidden:50%
+Ep 284 [13613450] ❌ R:-118.25(-104.80) SR:   0% S:198 dist:2.1cm W:0.13m/s [L0/8 ep285 W[0.0,0.5]] | stuck_on_rebar:dtf=21.1mm,rebar=22.3mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6356 rmse_raw:0.1842 hidden:50%
+Ep 285 [13613588] ✅ R: 10.78(-104.39) SR:   0% S:138 dist:0.3cm W:0.33m/s [L0/8 ep286 W[0.0,0.5]] | insertion_success:z=100mm,dtf=2.6mm,tilt=0.004,yaw=0.034,insert=20.2/25mm,rebar=4.3/4.5mm,floor=1,xy_tol=5.0mm
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6522 rmse_raw:0.1725 hidden:50%
+Ep 286 [13613759] ❌ R:-101.78(-104.38) SR:   0% S:171 dist:1.1cm W:0.31m/s [L0/8 ep287 W[0.0,0.5]] | stuck_on_rebar:dtf=11.4mm,rebar=16.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6273 rmse_raw:0.1715 hidden:50%
+Ep 287 [13613905] ❌ R:-71.49(-104.27) SR:   0% S:146 dist:1.0cm W:0.15m/s [L0/8 ep288 W[0.0,0.5]] | stuck_on_rebar:dtf=10.4mm,rebar=10.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.668 E: 0.782 KL:0.0048
+       ObsPred loss:-0.6530 rmse_raw:0.2030 hidden:50%
+Ep 288 [13614006] ❌ R:-46.00(-104.07) SR:   0% S:101 dist:1.2cm W:0.16m/s [L0/8 ep289 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6076 rmse_raw:0.2544 hidden:50%
+Ep 289 [13614170] ❌ R:-77.79(-103.98) SR:   0% S:164 dist:0.2cm W:0.48m/s [L0/8 ep290 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.6mm,tilt=0.004,yaw=0.030,insert=19.8/25mm,rebar=2.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6353 rmse_raw:0.1609 hidden:50%
+Ep 290 [13614325] ❌ R:-90.71(-103.93) SR:   0% S:155 dist:1.5cm W:0.48m/s [L0/8 ep291 W[0.0,0.5]] | stuck_on_rebar:dtf=14.6mm,rebar=15.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6243 rmse_raw:0.2020 hidden:50%
+Ep 291 [13614544] ❌ R:-100.04(-103.92) SR:   0% S:219 dist:0.5cm W:0.02m/s [L0/8 ep292 W[0.0,0.5]] | stuck_on_rebar:dtf=4.6mm,rebar=5.3mm,z=114.2mm,insert=5.8/25mm,gap=-5.8mm,vz=1.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6496 rmse_raw:0.1702 hidden:50%
+Ep 292 [13614688] ❌ R:-69.83(-103.80) SR:   0% S:144 dist:1.1cm W:0.06m/s [L0/8 ep293 W[0.0,0.5]] | stuck_on_rebar:dtf=11.1mm,rebar=13.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6551 rmse_raw:0.1535 hidden:50%
+Ep 293 [13614819] ❌ R:-68.62(-103.68) SR:   0% S:131 dist:2.5cm W:0.17m/s [L0/8 ep294 W[0.0,0.5]] | early_stop:dtf=25.5mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6545 rmse_raw:0.1792 hidden:50%
+Ep 294 [13614983] ❌ R:-86.83(-103.63) SR:   0% S:164 dist:0.8cm W:0.37m/s [L0/8 ep295 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=8.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 2.875 E: 0.783 KL:0.0059
+       ObsPred loss:-0.6418 rmse_raw:0.1833 hidden:50%
+Ep 295 [13615030] ❌ R:-16.19(-103.33) SR:   0% S: 47 dist:0.9cm W:0.47m/s [L0/8 ep296 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6278 rmse_raw:0.3764 hidden:51%
+Ep 296 [13615182] ❌ R:-104.91(-103.34) SR:   0% S:152 dist:5.9cm W:0.41m/s [L0/8 ep297 W[0.0,0.5]] | early_stop:dtf=58.9mm>xy_fail=25mm,z=125mm,patience=20
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6225 rmse_raw:0.1998 hidden:50%
+Ep 297 [13615366] ❌ R:-98.59(-103.32) SR:   0% S:184 dist:0.3cm W:0.07m/s [L0/8 ep298 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.9mm,tilt=0.003,yaw=0.013,insert=20.3/25mm,rebar=3.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.5943 rmse_raw:0.2056 hidden:50%
+Ep 298 [13615558] ❌ R:-113.20(-103.35) SR:   0% S:192 dist:1.3cm W:0.14m/s [L0/8 ep299 W[0.0,0.5]] | stuck_on_rebar:dtf=13.1mm,rebar=17.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6368 rmse_raw:0.1740 hidden:50%
+  [Curriculum-descent] ep=300 wind=[0.00,0.50]/10.0m/s SR=1% n=100/100 pause=300
+Ep 299 [13615708] ❌ R:-73.96(-103.25) SR:   0% S:150 dist:2.2cm W:0.38m/s [L0/8 ep300 W[0.0,0.5]] | stuck_on_rebar:dtf=22.2mm,rebar=22.9mm,z=119.6mm,insert=0.4/25mm,gap=-0.4mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6572 rmse_raw:0.1787 hidden:50%
+Ep 300 [13615852] ❌ R:-88.47(-103.21) SR:   0% S:144 dist:3.6cm W:0.45m/s [L0/8 ep301 W[0.0,0.5]] | early_stop:dtf=36.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6294 rmse_raw:0.1917 hidden:50%
+Ep 301 [13615984] ❌ R:-59.79(-103.06) SR:   0% S:132 dist:1.7cm W:0.36m/s [L0/8 ep302 W[0.0,0.5]] | stuck_on_rebar:dtf=17.0mm,rebar=17.9mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 2.043 E: 0.783 KL:0.0050
+       ObsPred loss:-0.6434 rmse_raw:0.4260 hidden:50%
+Ep 302 [13616054] ❌ R:-24.74(-102.80) SR:   0% S: 70 dist:2.4cm W:0.13m/s [L0/8 ep303 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6167 rmse_raw:0.2909 hidden:50%
+Ep 303 [13616185] ❌ R:-55.24(-102.65) SR:   0% S:131 dist:1.1cm W:0.31m/s [L0/8 ep304 W[0.0,0.5]] | stuck_on_rebar:dtf=11.1mm,rebar=13.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6667 rmse_raw:0.1853 hidden:50%
+Ep 304 [13616367] ❌ R:-107.47(-102.66) SR:   0% S:182 dist:1.6cm W:0.09m/s [L0/8 ep305 W[0.0,0.5]] | stuck_on_rebar:dtf=16.5mm,rebar=17.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6336 rmse_raw:0.1696 hidden:50%
+Ep 305 [13616524] ❌ R:-114.22(-102.70) SR:   0% S:157 dist:3.1cm W:0.17m/s [L0/8 ep306 W[0.0,0.5]] | early_stop:dtf=31.0mm>xy_fail=25mm,z=125mm,patience=20
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6183 rmse_raw:0.1889 hidden:50%
+Ep 306 [13616745] ❌ R:-101.78(-102.70) SR:   0% S:221 dist:0.9cm W:0.16m/s [L0/8 ep307 W[0.0,0.5]] | stuck_on_rebar:dtf=9.2mm,rebar=9.5mm,z=114.6mm,insert=5.4/25mm,gap=-5.4mm,vz=1.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6456 rmse_raw:0.2609 hidden:50%
+Ep 307 [13616920] ❌ R:-90.62(-102.66) SR:   0% S:175 dist:0.4cm W:0.09m/s [L0/8 ep308 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.9mm,tilt=0.014,yaw=0.014,insert=19.3/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 1.843 E: 0.783 KL:0.0036
+       ObsPred loss:-0.6281 rmse_raw:0.2047 hidden:50%
+Ep 308 [13617078] ❌ R:-40.64(-102.46) SR:   0% S:158 dist:1.4cm W:0.12m/s [L0/8 ep309 W[0.0,0.5]] | running
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6546 rmse_raw:0.2619 hidden:50%
+Ep 309 [13617241] ❌ R:-94.89(-102.43) SR:   0% S:163 dist:1.8cm W:0.30m/s [L0/8 ep310 W[0.0,0.5]] | stuck_on_rebar:dtf=17.6mm,rebar=17.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6401 rmse_raw:0.1907 hidden:50%
+Ep 310 [13617376] ❌ R:-74.97(-102.34) SR:   0% S:135 dist:2.8cm W:0.48m/s [L0/8 ep311 W[0.0,0.5]] | early_stop:dtf=27.7mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6452 rmse_raw:0.1500 hidden:50%
+Ep 311 [13617522] ❌ R:-75.68(-102.26) SR:   0% S:146 dist:1.4cm W:0.49m/s [L0/8 ep312 W[0.0,0.5]] | stuck_on_rebar:dtf=13.5mm,rebar=19.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6492 rmse_raw:0.1907 hidden:50%
+Ep 312 [13617664] ❌ R:-74.65(-102.17) SR:   0% S:142 dist:1.4cm W:0.22m/s [L0/8 ep313 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=16.5mm,z=119.4mm,insert=0.6/25mm,gap=-0.6mm,vz=1.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6507 rmse_raw:0.3471 hidden:50%
+Ep 313 [13617893] ❌ R:-96.88(-102.15) SR:   0% S:229 dist:0.5cm W:0.36m/s [L0/8 ep314 W[0.0,0.5]] | stuck_on_rebar:dtf=5.3mm,rebar=6.3mm,z=113.6mm,insert=6.4/25mm,gap=-6.4mm,vz=0.6mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6334 rmse_raw:0.6646 hidden:50%
+Ep 314 [13618032] ❌ R:-63.82(-102.03) SR:   0% S:139 dist:0.9cm W:0.42m/s [L0/8 ep315 W[0.0,0.5]] | stuck_on_rebar:dtf=9.1mm,rebar=10.7mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.007 VL: 1.977 E: 0.783 KL:0.0062
+       ObsPred loss:-0.6567 rmse_raw:0.1905 hidden:50%
+Ep 315 [13618102] ❌ R:-33.23(-101.81) SR:   0% S: 70 dist:2.0cm W:0.31m/s [L0/8 ep316 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.5832 rmse_raw:0.2656 hidden:50%
+Ep 316 [13618244] ❌ R:-65.95(-101.70) SR:   0% S:142 dist:1.8cm W:0.35m/s [L0/8 ep317 W[0.0,0.5]] | stuck_on_rebar:dtf=18.3mm,rebar=19.5mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6637 rmse_raw:0.1776 hidden:50%
+Ep 317 [13618387] ❌ R:-86.90(-101.65) SR:   0% S:143 dist:2.6cm W:0.14m/s [L0/8 ep318 W[0.0,0.5]] | early_stop:dtf=26.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6379 rmse_raw:0.1948 hidden:50%
+Ep 318 [13618519] ❌ R:-83.97(-101.60) SR:   0% S:132 dist:2.5cm W:0.30m/s [L0/8 ep319 W[0.0,0.5]] | early_stop:dtf=25.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6343 rmse_raw:0.1972 hidden:50%
+Ep 319 [13618668] ❌ R:-72.27(-101.51) SR:   0% S:149 dist:2.3cm W:0.13m/s [L0/8 ep320 W[0.0,0.5]] | stuck_on_rebar:dtf=22.5mm,rebar=26.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6610 rmse_raw:0.1683 hidden:50%
+Ep 320 [13618814] ❌ R:-88.69(-101.47) SR:   0% S:146 dist:2.9cm W:0.44m/s [L0/8 ep321 W[0.0,0.5]] | early_stop:dtf=28.9mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6412 rmse_raw:0.1982 hidden:50%
+Ep 321 [13619047] ❌ R:-81.26(-101.41) SR:   0% S:233 dist:1.2cm W:0.35m/s [L0/8 ep322 W[0.0,0.5]] | stuck_on_rebar:dtf=12.4mm,rebar=12.4mm,z=115.1mm,insert=4.9/25mm,gap=-4.9mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.665 E: 0.782 KL:0.0059
+       ObsPred loss:-0.6324 rmse_raw:0.6359 hidden:50%
+Ep 322 [13619126] ❌ R:-19.31(-101.15) SR:   0% S: 79 dist:0.4cm W:0.37m/s [L0/8 ep323 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6586 rmse_raw:0.1851 hidden:51%
+Ep 323 [13619272] ❌ R:-74.85(-101.07) SR:   0% S:146 dist:0.8cm W:0.43m/s [L0/8 ep324 W[0.0,0.5]] | stuck_on_rebar:dtf=8.0mm,rebar=9.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6375 rmse_raw:0.2877 hidden:50%
+Ep 324 [13619403] ❌ R:-73.87(-100.99) SR:   0% S:131 dist:3.0cm W:0.43m/s [L0/8 ep325 W[0.0,0.5]] | early_stop:dtf=30.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6422 rmse_raw:0.1611 hidden:50%
+Ep 325 [13619533] ❌ R:-44.53(-100.81) SR:   0% S:130 dist:0.4cm W:0.43m/s [L0/8 ep326 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=4.3mm,tilt=0.003,yaw=0.004,insert=20.1/25mm,rebar=4.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6635 rmse_raw:0.1885 hidden:50%
+Ep 326 [13619691] ❌ R:-96.60(-100.80) SR:   0% S:158 dist:2.0cm W:0.06m/s [L0/8 ep327 W[0.0,0.5]] | stuck_on_rebar:dtf=19.8mm,rebar=23.2mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6418 rmse_raw:0.2746 hidden:50%
+Ep 327 [13619849] ❌ R:-113.28(-100.84) SR:   0% S:158 dist:5.3cm W:0.27m/s [L0/8 ep328 W[0.0,0.5]] | early_stop:dtf=53.2mm>xy_fail=25mm,z=127mm,patience=20
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.5544 rmse_raw:0.3776 hidden:50%
+Ep 328 [13620081] ❌ R:-100.97(-100.84) SR:   0% S:232 dist:0.4cm W:0.30m/s [L0/8 ep329 W[0.0,0.5]] | stuck_on_rebar:dtf=4.5mm,rebar=5.4mm,z=113.8mm,insert=6.2/25mm,gap=-6.2mm,vz=0.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.655 E: 0.782 KL:0.0049
+       ObsPred loss:-0.6185 rmse_raw:0.7258 hidden:50%
+Ep 329 [13620150] ❌ R:-25.91(-100.61) SR:   0% S: 69 dist:1.5cm W:0.17m/s [L0/8 ep330 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6328 rmse_raw:0.2796 hidden:51%
+Ep 330 [13620292] ❌ R:-69.15(-100.52) SR:   0% S:142 dist:1.4cm W:0.22m/s [L0/8 ep331 W[0.0,0.5]] | stuck_on_rebar:dtf=14.4mm,rebar=18.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6515 rmse_raw:0.1879 hidden:50%
+Ep 331 [13620444] ❌ R:-77.73(-100.45) SR:   0% S:152 dist:0.3cm W:0.36m/s [L0/8 ep332 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.6mm,tilt=0.017,yaw=0.000,insert=16.3/25mm,rebar=2.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6266 rmse_raw:0.2008 hidden:50%
+Ep 332 [13620626] ❌ R:-100.33(-100.45) SR:   0% S:182 dist:2.6cm W:0.17m/s [L0/8 ep333 W[0.0,0.5]] | early_stop:dtf=25.5mm>xy_fail=25mm,z=117mm,patience=51
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6275 rmse_raw:0.6446 hidden:50%
+Ep 333 [13620795] ❌ R:-116.22(-100.49) SR:   0% S:169 dist:4.3cm W:0.22m/s [L0/8 ep334 W[0.0,0.5]] | early_stop:dtf=43.5mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6035 rmse_raw:0.2261 hidden:50%
+Ep 334 [13620946] ❌ R:-100.78(-100.50) SR:   0% S:151 dist:2.8cm W:0.24m/s [L0/8 ep335 W[0.0,0.5]] | early_stop:dtf=28.0mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6233 rmse_raw:0.3203 hidden:50%
+Ep 335 [13621170] ❌ R:-63.79(-100.39) SR:   0% S:224 dist:0.3cm W:0.06m/s [L0/8 ep336 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.1mm,tilt=0.031,yaw=0.025,insert=18.5/25mm,rebar=4.3/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.832 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6684 rmse_raw:0.1320 hidden:50%
+Ep 336 [13621174] ❌ R: -1.94(-100.09) SR:   0% S:  4 dist:2.7cm W:0.48m/s [L0/8 ep337 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.686 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6649 rmse_raw:0.1381 hidden:50%
+Ep 337 [13621370] ❌ R:-78.01(-100.03) SR:   0% S:196 dist:0.5cm W:0.02m/s [L0/8 ep338 W[0.0,0.5]] | stuck_on_rebar:dtf=4.8mm,rebar=5.3mm,z=114.3mm,insert=5.7/25mm,gap=-5.7mm,vz=2.8mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.686 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6298 rmse_raw:0.8435 hidden:50%
+Ep 338 [13621511] ❌ R:-61.83(-99.92) SR:   0% S:141 dist:0.7cm W:0.03m/s [L0/8 ep339 W[0.0,0.5]] | stuck_on_rebar:dtf=6.6mm,rebar=7.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.686 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6561 rmse_raw:0.1821 hidden:50%
+Ep 339 [13621810] ❌ R:-84.13(-99.87) SR:   0% S:299 dist:0.5cm W:0.11m/s [L0/8 ep340 W[0.0,0.5]] | timeout:dtf=5.2mm,z=113mm,tilt=0.255,yaw=0.000
+       PPO PL:-0.014 VL: 1.686 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6044 rmse_raw:1.3375 hidden:50%
+Ep 340 [13621954] ❌ R:-78.09(-99.81) SR:   0% S:144 dist:1.9cm W:0.43m/s [L0/8 ep341 W[0.0,0.5]] | stuck_on_rebar:dtf=19.3mm,rebar=23.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.686 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6411 rmse_raw:0.3681 hidden:50%
+Ep 341 [13622198] ❌ R:-41.55(-99.64) SR:   0% S:244 dist:0.7cm W:0.26m/s [L0/8 ep342 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6175 rmse_raw:1.2649 hidden:50%
+Ep 342 [13622341] ❌ R:-77.62(-99.57) SR:   0% S:143 dist:1.6cm W:0.19m/s [L0/8 ep343 W[0.0,0.5]] | stuck_on_rebar:dtf=15.8mm,rebar=16.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6419 rmse_raw:0.1876 hidden:50%
+Ep 343 [13622496] ❌ R:-108.49(-99.60) SR:   0% S:155 dist:5.0cm W:0.16m/s [L0/8 ep344 W[0.0,0.5]] | early_stop:dtf=50.2mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6036 rmse_raw:0.2123 hidden:50%
+Ep 344 [13622692] ❌ R:-86.09(-99.56) SR:   0% S:196 dist:0.9cm W:0.26m/s [L0/8 ep345 W[0.0,0.5]] | stuck_on_rebar:dtf=9.1mm,rebar=9.5mm,z=114.8mm,insert=5.2/25mm,gap=-5.2mm,vz=4.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6286 rmse_raw:0.5176 hidden:50%
+Ep 345 [13622840] ❌ R:-70.64(-99.47) SR:   0% S:148 dist:1.7cm W:0.02m/s [L0/8 ep346 W[0.0,0.5]] | stuck_on_rebar:dtf=16.7mm,rebar=16.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6653 rmse_raw:0.1759 hidden:50%
+Ep 346 [13622985] ❌ R:-92.42(-99.45) SR:   0% S:145 dist:3.9cm W:0.30m/s [L0/8 ep347 W[0.0,0.5]] | early_stop:dtf=39.2mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6317 rmse_raw:0.1737 hidden:50%
+Ep 347 [13623137] ❌ R:-78.59(-99.39) SR:   0% S:152 dist:1.0cm W:0.28m/s [L0/8 ep348 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=10.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.710 E: 0.782 KL:0.0036
+       ObsPred loss:-0.6502 rmse_raw:0.1945 hidden:50%
+Ep 348 [13623222] ❌ R:-28.71(-99.19) SR:   0% S: 85 dist:1.7cm W:0.12m/s [L0/8 ep349 W[0.0,0.5]] | running
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6515 rmse_raw:0.2081 hidden:51%
+Ep 349 [13623392] ❌ R:-72.97(-99.12) SR:   0% S:170 dist:1.8cm W:0.18m/s [L0/8 ep350 W[0.0,0.5]] | stuck_on_rebar:dtf=17.7mm,rebar=19.5mm,z=113.8mm,insert=6.2/25mm,gap=-6.2mm,vz=0.3mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6599 rmse_raw:0.3767 hidden:50%
+Ep 350 [13623531] ❌ R:-64.91(-99.02) SR:   0% S:139 dist:1.4cm W:0.04m/s [L0/8 ep351 W[0.0,0.5]] | stuck_on_rebar:dtf=14.4mm,rebar=16.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6627 rmse_raw:0.2747 hidden:50%
+Ep 351 [13623677] ❌ R:-70.10(-98.94) SR:   0% S:146 dist:2.0cm W:0.24m/s [L0/8 ep352 W[0.0,0.5]] | stuck_on_rebar:dtf=19.9mm,rebar=23.1mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6559 rmse_raw:0.1802 hidden:50%
+Ep 352 [13623801] ❌ R:-51.24(-98.80) SR:   0% S:124 dist:0.2cm W:0.16m/s [L0/8 ep353 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=1.8mm,tilt=0.038,yaw=0.044,insert=18.2/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6500 rmse_raw:0.1703 hidden:50%
+Ep 353 [13623981] ❌ R:-124.35(-98.87) SR:   0% S:180 dist:2.6cm W:0.41m/s [L0/8 ep354 W[0.0,0.5]] | early_stop:dtf=26.1mm>xy_fail=25mm,z=120mm,patience=23
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.5956 rmse_raw:0.2135 hidden:50%
+Ep 354 [13624127] ❌ R:-67.60(-98.79) SR:   0% S:146 dist:1.7cm W:0.02m/s [L0/8 ep355 W[0.0,0.5]] | stuck_on_rebar:dtf=17.4mm,rebar=18.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.015 VL: 1.694 E: 0.782 KL:0.0075
+       ObsPred loss:-0.6651 rmse_raw:0.1396 hidden:50%
+Ep 355 [13624246] ❌ R:-32.97(-98.60) SR:   0% S:119 dist:1.1cm W:0.40m/s [L0/8 ep356 W[0.0,0.5]] | running
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6440 rmse_raw:0.1978 hidden:50%
+Ep 356 [13624409] ❌ R:-89.64(-98.58) SR:   0% S:163 dist:2.0cm W:0.49m/s [L0/8 ep357 W[0.0,0.5]] | stuck_on_rebar:dtf=20.3mm,rebar=23.7mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6398 rmse_raw:0.1849 hidden:50%
+Ep 357 [13624545] ❌ R:-68.49(-98.49) SR:   0% S:136 dist:1.0cm W:0.11m/s [L0/8 ep358 W[0.0,0.5]] | stuck_on_rebar:dtf=9.6mm,rebar=14.1mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6452 rmse_raw:0.1910 hidden:50%
+Ep 358 [13624675] ❌ R:-82.93(-98.45) SR:   0% S:130 dist:2.7cm W:0.44m/s [L0/8 ep359 W[0.0,0.5]] | early_stop:dtf=27.0mm>xy_fail=25mm,z=118mm,patience=20
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6410 rmse_raw:0.1932 hidden:50%
+Ep 359 [13624822] ❌ R:-63.91(-98.35) SR:   0% S:147 dist:1.5cm W:0.09m/s [L0/8 ep360 W[0.0,0.5]] | stuck_on_rebar:dtf=15.4mm,rebar=15.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6631 rmse_raw:0.1817 hidden:50%
+Ep 360 [13624966] ❌ R:-71.17(-98.28) SR:   0% S:144 dist:1.7cm W:0.35m/s [L0/8 ep361 W[0.0,0.5]] | stuck_on_rebar:dtf=17.1mm,rebar=22.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6512 rmse_raw:0.1796 hidden:50%
+Ep 361 [13625108] ❌ R:-81.06(-98.23) SR:   0% S:142 dist:1.7cm W:0.15m/s [L0/8 ep362 W[0.0,0.5]] | stuck_on_rebar:dtf=16.6mm,rebar=19.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6403 rmse_raw:0.1941 hidden:50%
+Ep 362 [13625265] ❌ R:-86.94(-98.20) SR:   0% S:157 dist:1.5cm W:0.29m/s [L0/8 ep363 W[0.0,0.5]] | stuck_on_rebar:dtf=15.3mm,rebar=15.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.014 VL: 1.526 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6498 rmse_raw:0.1869 hidden:50%
+Ep 363 [13625270] ❌ R: -2.33(-97.94) SR:   0% S:  5 dist:2.7cm W:0.12m/s [L0/8 ep364 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6615 rmse_raw:0.1613 hidden:60%
+Ep 364 [13625408] ❌ R:-60.72(-97.83) SR:   0% S:138 dist:1.8cm W:0.20m/s [L0/8 ep365 W[0.0,0.5]] | stuck_on_rebar:dtf=18.0mm,rebar=19.9mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6664 rmse_raw:0.1793 hidden:50%
+Ep 365 [13625548] ❌ R:-63.35(-97.74) SR:   0% S:140 dist:1.2cm W:0.38m/s [L0/8 ep366 W[0.0,0.5]] | stuck_on_rebar:dtf=12.4mm,rebar=13.5mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6609 rmse_raw:0.1821 hidden:50%
+Ep 366 [13625684] ❌ R:-69.93(-97.66) SR:   0% S:136 dist:2.5cm W:0.03m/s [L0/8 ep367 W[0.0,0.5]] | early_stop:dtf=25.3mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6628 rmse_raw:0.1433 hidden:50%
+Ep 367 [13625983] ❌ R:-89.98(-97.64) SR:   0% S:299 dist:1.3cm W:0.44m/s [L0/8 ep368 W[0.0,0.5]] | timeout:dtf=12.9mm,z=112mm,tilt=0.304,yaw=0.000
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6329 rmse_raw:0.8852 hidden:50%
+Ep 368 [13626140] ❌ R:-49.63(-97.51) SR:   0% S:157 dist:0.2cm W:0.01m/s [L0/8 ep369 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=1.7mm,tilt=0.005,yaw=0.000,insert=20.7/25mm,rebar=1.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6623 rmse_raw:0.1515 hidden:50%
+Ep 369 [13626272] ❌ R:-58.77(-97.41) SR:   0% S:132 dist:1.5cm W:0.43m/s [L0/8 ep370 W[0.0,0.5]] | stuck_on_rebar:dtf=15.0mm,rebar=15.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.163 E: 0.781 KL:0.0034
+       ObsPred loss:-0.6621 rmse_raw:0.1530 hidden:50%
+Ep 370 [13626294] ❌ R:-10.64(-97.17) SR:   0% S: 22 dist:7.4cm W:0.43m/s [L0/8 ep371 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.5959 rmse_raw:0.7399 hidden:50%
+Ep 371 [13626438] ❌ R:-65.70(-97.09) SR:   0% S:144 dist:1.1cm W:0.42m/s [L0/8 ep372 W[0.0,0.5]] | stuck_on_rebar:dtf=10.6mm,rebar=13.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6589 rmse_raw:0.2265 hidden:50%
+Ep 372 [13626579] ❌ R:-62.01(-97.00) SR:   0% S:141 dist:1.5cm W:0.30m/s [L0/8 ep373 W[0.0,0.5]] | stuck_on_rebar:dtf=15.5mm,rebar=17.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6591 rmse_raw:0.1523 hidden:50%
+Ep 373 [13626709] ❌ R:-38.71(-96.84) SR:   0% S:130 dist:0.3cm W:0.11m/s [L0/8 ep374 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.1mm,tilt=0.002,yaw=0.016,insert=20.1/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6570 rmse_raw:0.2006 hidden:50%
+Ep 374 [13626861] ❌ R:-87.27(-96.81) SR:   0% S:152 dist:1.0cm W:0.17m/s [L0/8 ep375 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=13.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6457 rmse_raw:0.3060 hidden:50%
+Ep 375 [13627019] ❌ R:-86.14(-96.79) SR:   0% S:158 dist:1.1cm W:0.12m/s [L0/8 ep376 W[0.0,0.5]] | stuck_on_rebar:dtf=11.3mm,rebar=12.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6417 rmse_raw:0.1850 hidden:50%
+Ep 376 [13627163] ❌ R:-76.27(-96.73) SR:   0% S:144 dist:0.7cm W:0.47m/s [L0/8 ep377 W[0.0,0.5]] | stuck_on_rebar:dtf=6.7mm,rebar=8.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6407 rmse_raw:0.2057 hidden:50%
+Ep 377 [13627297] ❌ R:-76.32(-96.68) SR:   0% S:134 dist:1.5cm W:0.03m/s [L0/8 ep378 W[0.0,0.5]] | stuck_on_rebar:dtf=15.4mm,rebar=17.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.563 E: 0.781 KL:0.0043
+       ObsPred loss:-0.6458 rmse_raw:0.1984 hidden:50%
+Ep 378 [13627318] ❌ R: -4.88(-96.43) SR:   0% S: 21 dist:7.3cm W:0.44m/s [L0/8 ep379 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6509 rmse_raw:0.1608 hidden:52%
+Ep 379 [13627458] ❌ R:-52.62(-96.32) SR:   0% S:140 dist:0.6cm W:0.12m/s [L0/8 ep380 W[0.0,0.5]] | stuck_on_rebar:dtf=6.5mm,rebar=6.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6693 rmse_raw:0.1445 hidden:50%
+Ep 380 [13627586] ❌ R:-35.65(-96.16) SR:   0% S:128 dist:0.2cm W:0.33m/s [L0/8 ep381 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.2mm,tilt=0.023,yaw=0.005,insert=16.0/25mm,rebar=2.5/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6704 rmse_raw:0.1755 hidden:50%
+Ep 381 [13627736] ❌ R:-71.68(-96.10) SR:   0% S:150 dist:1.7cm W:0.07m/s [L0/8 ep382 W[0.0,0.5]] | stuck_on_rebar:dtf=16.9mm,rebar=19.4mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6497 rmse_raw:0.1731 hidden:50%
+Ep 382 [13627882] ❌ R:-56.19(-95.99) SR:   0% S:146 dist:0.1cm W:0.21m/s [L0/8 ep383 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=1.0mm,tilt=0.014,yaw=0.061,insert=21.1/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6477 rmse_raw:0.1968 hidden:50%
+Ep 383 [13628039] ❌ R:-89.24(-95.97) SR:   0% S:157 dist:1.5cm W:0.03m/s [L0/8 ep384 W[0.0,0.5]] | stuck_on_rebar:dtf=15.1mm,rebar=17.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6437 rmse_raw:0.1909 hidden:50%
+Ep 384 [13628338] ❌ R:-86.47(-95.95) SR:   0% S:299 dist:1.0cm W:0.13m/s [L0/8 ep385 W[0.0,0.5]] | timeout:dtf=10.4mm,z=113mm,tilt=0.259,yaw=0.000
+       PPO PL:-0.011 VL: 1.167 E: 0.782 KL:0.0032
+       ObsPred loss:-0.6608 rmse_raw:0.4484 hidden:50%
+Ep 385 [13628342] ❌ R: -2.07(-95.71) SR:   0% S:  4 dist:2.9cm W:0.21m/s [L0/8 ep386 W[0.0,0.5]] | running
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6578 rmse_raw:0.1641 hidden:50%
+Ep 386 [13628468] ❌ R:-43.84(-95.57) SR:   0% S:126 dist:0.7cm W:0.17m/s [L0/8 ep387 W[0.0,0.5]] | stuck_on_rebar:dtf=7.4mm,rebar=9.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6755 rmse_raw:0.1509 hidden:50%
+Ep 387 [13628636] ❌ R:-83.58(-95.54) SR:   0% S:168 dist:0.3cm W:0.12m/s [L0/8 ep388 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=3.2mm,tilt=0.032,yaw=0.012,insert=21.2/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6204 rmse_raw:0.1913 hidden:50%
+Ep 388 [13628935] ❌ R:-88.48(-95.52) SR:   0% S:299 dist:0.5cm W:0.11m/s [L0/8 ep389 W[0.0,0.5]] | timeout:dtf=5.4mm,z=113mm,tilt=0.217,yaw=0.041
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6256 rmse_raw:1.1010 hidden:50%
+Ep 389 [13629130] ❌ R:-88.56(-95.51) SR:   0% S:195 dist:1.2cm W:0.47m/s [L0/8 ep390 W[0.0,0.5]] | stuck_on_rebar:dtf=12.0mm,rebar=16.0mm,z=116.4mm,insert=3.6/25mm,gap=-3.6mm,vz=4.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6552 rmse_raw:0.1541 hidden:50%
+Ep 390 [13629272] ❌ R:-64.80(-95.43) SR:   0% S:142 dist:1.7cm W:0.15m/s [L0/8 ep391 W[0.0,0.5]] | stuck_on_rebar:dtf=16.7mm,rebar=18.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.646 E: 0.782 KL:0.0047
+       ObsPred loss:-0.6685 rmse_raw:0.1471 hidden:50%
+Ep 391 [13629366] ❌ R:-38.93(-95.28) SR:   0% S: 94 dist:3.0cm W:0.16m/s [L0/8 ep392 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6344 rmse_raw:0.2381 hidden:50%
+Ep 392 [13629520] ❌ R:-78.47(-95.24) SR:   0% S:154 dist:0.9cm W:0.43m/s [L0/8 ep393 W[0.0,0.5]] | stuck_on_rebar:dtf=8.9mm,rebar=9.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6453 rmse_raw:0.1584 hidden:50%
+Ep 393 [13629654] ❌ R:-57.76(-95.15) SR:   0% S:134 dist:0.8cm W:0.45m/s [L0/8 ep394 W[0.0,0.5]] | stuck_on_rebar:dtf=8.5mm,rebar=10.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6629 rmse_raw:0.1885 hidden:50%
+Ep 394 [13629841] ❌ R:-89.81(-95.13) SR:   0% S:187 dist:0.5cm W:0.07m/s [L0/8 ep395 W[0.0,0.5]] | stuck_on_rebar:dtf=5.1mm,rebar=6.0mm,z=113.7mm,insert=6.3/25mm,gap=-6.3mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6244 rmse_raw:0.3506 hidden:50%
+Ep 395 [13629994] ❌ R:-79.92(-95.09) SR:   0% S:153 dist:1.1cm W:0.19m/s [L0/8 ep396 W[0.0,0.5]] | stuck_on_rebar:dtf=10.8mm,rebar=10.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6498 rmse_raw:0.2663 hidden:50%
+Ep 396 [13630166] ❌ R:-102.16(-95.11) SR:   0% S:172 dist:2.0cm W:0.09m/s [L0/8 ep397 W[0.0,0.5]] | stuck_on_rebar:dtf=20.1mm,rebar=24.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6255 rmse_raw:0.2746 hidden:50%
+Ep 397 [13630345] ❌ R:-124.05(-95.18) SR:   0% S:179 dist:3.4cm W:0.40m/s [L0/8 ep398 W[0.0,0.5]] | early_stop:dtf=33.6mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.745 E: 0.782 KL:0.0066
+       ObsPred loss:-0.6195 rmse_raw:0.1792 hidden:50%
+Ep 398 [13630390] ❌ R:-14.98(-94.98) SR:   0% S: 45 dist:2.1cm W:0.28m/s [L0/8 ep399 W[0.0,0.5]] | running
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6161 rmse_raw:0.3873 hidden:51%
+  [Curriculum-descent] ep=400 wind=[0.00,0.50]/10.0m/s SR=0% n=100/100 pause=400
+Ep 399 [13630689] ❌ R:-112.04(-95.03) SR:   0% S:299 dist:1.9cm W:0.48m/s [L0/8 ep400 W[0.0,0.5]] | timeout:dtf=18.8mm,z=118mm,tilt=0.068,yaw=0.075
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6442 rmse_raw:0.1889 hidden:50%
+Ep 400 [13630834] ❌ R:-64.00(-94.95) SR:   0% S:145 dist:0.9cm W:0.28m/s [L0/8 ep401 W[0.0,0.5]] | stuck_on_rebar:dtf=9.2mm,rebar=9.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6609 rmse_raw:0.1816 hidden:50%
+Ep 401 [13631015] ❌ R:-67.04(-94.88) SR:   0% S:181 dist:0.6cm W:0.47m/s [L0/8 ep402 W[0.0,0.5]] | stuck_on_rebar:dtf=5.5mm,rebar=6.5mm,z=113.5mm,insert=6.5/25mm,gap=-6.5mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6248 rmse_raw:1.1252 hidden:50%
+Ep 402 [13631160] ❌ R:-62.95(-94.80) SR:   0% S:145 dist:0.8cm W:0.34m/s [L0/8 ep403 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6645 rmse_raw:0.1793 hidden:50%
+Ep 403 [13631355] ❌ R:-78.34(-94.76) SR:   0% S:195 dist:1.6cm W:0.44m/s [L0/8 ep404 W[0.0,0.5]] | stuck_on_rebar:dtf=16.2mm,rebar=16.4mm,z=115.3mm,insert=4.7/25mm,gap=-4.7mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.019 VL: 1.686 E: 0.782 KL:0.0080
+       ObsPred loss:-0.6614 rmse_raw:0.1510 hidden:50%
+Ep 404 [13631414] ❌ R:-17.10(-94.57) SR:   0% S: 59 dist:1.2cm W:0.35m/s [L0/8 ep405 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6506 rmse_raw:0.2359 hidden:51%
+Ep 405 [13631563] ❌ R:-79.93(-94.53) SR:   0% S:149 dist:1.8cm W:0.03m/s [L0/8 ep406 W[0.0,0.5]] | stuck_on_rebar:dtf=18.2mm,rebar=19.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6538 rmse_raw:0.1805 hidden:50%
+Ep 406 [13631713] ❌ R:-57.32(-94.44) SR:   0% S:150 dist:0.4cm W:0.02m/s [L0/8 ep407 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.7mm,tilt=0.003,yaw=0.004,insert=20.2/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6398 rmse_raw:0.3167 hidden:50%
+Ep 407 [13631868] ❌ R:-90.67(-94.43) SR:   0% S:155 dist:1.0cm W:0.40m/s [L0/8 ep408 W[0.0,0.5]] | stuck_on_rebar:dtf=10.4mm,rebar=14.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6253 rmse_raw:0.3200 hidden:50%
+Ep 408 [13632030] ❌ R:-100.21(-94.44) SR:   0% S:162 dist:1.2cm W:0.47m/s [L0/8 ep409 W[0.0,0.5]] | stuck_on_rebar:dtf=11.8mm,rebar=15.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6345 rmse_raw:0.1723 hidden:50%
+Ep 409 [13632192] ❌ R:-106.01(-94.47) SR:   0% S:162 dist:2.7cm W:0.44m/s [L0/8 ep410 W[0.0,0.5]] | early_stop:dtf=26.9mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6300 rmse_raw:0.2818 hidden:50%
+Ep 410 [13632334] ❌ R:-87.46(-94.46) SR:   0% S:142 dist:3.1cm W:0.49m/s [L0/8 ep411 W[0.0,0.5]] | early_stop:dtf=31.1mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.011 VL: 1.783 E: 0.782 KL:0.0038
+       ObsPred loss:-0.6484 rmse_raw:0.1852 hidden:50%
+Ep 411 [13632438] ❌ R:-32.68(-94.31) SR:   0% S:104 dist:0.8cm W:0.09m/s [L0/8 ep412 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6485 rmse_raw:0.2184 hidden:50%
+Ep 412 [13632593] ❌ R:-92.47(-94.30) SR:   0% S:155 dist:1.4cm W:0.09m/s [L0/8 ep413 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=18.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6432 rmse_raw:0.1838 hidden:50%
+Ep 413 [13632743] ❌ R:-84.07(-94.28) SR:   0% S:150 dist:1.6cm W:0.37m/s [L0/8 ep414 W[0.0,0.5]] | stuck_on_rebar:dtf=15.7mm,rebar=17.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6522 rmse_raw:0.1914 hidden:50%
+Ep 414 [13632956] ❌ R:-71.89(-94.22) SR:   0% S:213 dist:1.0cm W:0.33m/s [L0/8 ep415 W[0.0,0.5]] | stuck_on_rebar:dtf=9.7mm,rebar=10.1mm,z=114.0mm,insert=6.0/25mm,gap=-6.0mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6340 rmse_raw:1.2027 hidden:50%
+Ep 415 [13633120] ❌ R:-77.21(-94.18) SR:   0% S:164 dist:0.1cm W:0.26m/s [L0/8 ep416 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.4mm,tilt=0.005,yaw=0.045,insert=19.7/25mm,rebar=3.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6418 rmse_raw:0.1805 hidden:50%
+Ep 416 [13633256] ❌ R:-66.10(-94.11) SR:   0% S:136 dist:1.1cm W:0.17m/s [L0/8 ep417 W[0.0,0.5]] | stuck_on_rebar:dtf=10.7mm,rebar=10.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.456 E: 0.782 KL:0.0071
+       ObsPred loss:-0.6601 rmse_raw:0.1886 hidden:50%
+Ep 417 [13633462] ❌ R:-45.79(-94.00) SR:   0% S:206 dist:1.0cm W:0.09m/s [L0/8 ep418 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6476 rmse_raw:0.3509 hidden:50%
+Ep 418 [13633622] ❌ R:-60.54(-93.92) SR:   0% S:160 dist:0.3cm W:0.12m/s [L0/8 ep419 W[0.0,0.5]] | lucky_rebar_insert_failure:z=102mm,dtf=3.4mm,tilt=0.021,yaw=0.000,insert=17.7/25mm,rebar=3.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6550 rmse_raw:0.1697 hidden:50%
+Ep 419 [13633785] ❌ R:-88.05(-93.90) SR:   0% S:163 dist:1.0cm W:0.16m/s [L0/8 ep420 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=11.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6305 rmse_raw:0.2974 hidden:50%
+Ep 420 [13633920] ❌ R:-38.94(-93.77) SR:   0% S:135 dist:0.3cm W:0.31m/s [L0/8 ep421 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.9mm,tilt=0.015,yaw=0.005,insert=20.2/25mm,rebar=3.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6595 rmse_raw:0.2900 hidden:50%
+Ep 421 [13634067] ❌ R:-75.10(-93.73) SR:   0% S:147 dist:1.1cm W:0.18m/s [L0/8 ep422 W[0.0,0.5]] | stuck_on_rebar:dtf=11.3mm,rebar=14.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6544 rmse_raw:0.2677 hidden:50%
+Ep 422 [13634207] ❌ R:-63.83(-93.66) SR:   0% S:140 dist:0.2cm W:0.08m/s [L0/8 ep423 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.4mm,tilt=0.001,yaw=0.014,insert=20.1/25mm,rebar=3.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 1.507 E: 0.782 KL:0.0054
+       ObsPred loss:-0.6386 rmse_raw:0.1652 hidden:50%
+Ep 423 [13634486] ❌ R:-64.20(-93.59) SR:   0% S:279 dist:0.6cm W:0.31m/s [L0/8 ep424 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.339 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6014 rmse_raw:1.1550 hidden:50%
+Ep 424 [13634628] ❌ R:-59.61(-93.51) SR:   0% S:142 dist:0.9cm W:0.18m/s [L0/8 ep425 W[0.0,0.5]] | stuck_on_rebar:dtf=8.8mm,rebar=10.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.339 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6626 rmse_raw:0.3003 hidden:50%
+Ep 425 [13634872] ❌ R:-113.45(-93.56) SR:   0% S:244 dist:0.5cm W:0.08m/s [L0/8 ep426 W[0.0,0.5]] | stuck_on_rebar:dtf=5.1mm,rebar=5.6mm,z=114.5mm,insert=5.5/25mm,gap=-5.5mm,vz=0.7mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.339 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6390 rmse_raw:0.2350 hidden:50%
+Ep 426 [13635171] ❌ R:-94.81(-93.56) SR:   0% S:299 dist:1.5cm W:0.44m/s [L0/8 ep427 W[0.0,0.5]] | timeout:dtf=15.2mm,z=113mm,tilt=0.230,yaw=0.158
+       PPO PL:-0.010 VL: 1.339 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6715 rmse_raw:0.1305 hidden:50%
+Ep 427 [13635351] ❌ R:-109.51(-93.60) SR:   0% S:180 dist:2.1cm W:0.39m/s [L0/8 ep428 W[0.0,0.5]] | stuck_on_rebar:dtf=20.9mm,rebar=22.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.339 E: 0.782 KL:0.0045
+       ObsPred loss:-0.6306 rmse_raw:0.1714 hidden:50%
+Ep 428 [13635510] ❌ R:-36.07(-93.46) SR:   0% S:159 dist:1.3cm W:0.14m/s [L0/8 ep429 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6516 rmse_raw:0.2710 hidden:50%
+Ep 429 [13635660] ❌ R:-74.73(-93.42) SR:   0% S:150 dist:1.8cm W:0.18m/s [L0/8 ep430 W[0.0,0.5]] | stuck_on_rebar:dtf=18.2mm,rebar=21.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6508 rmse_raw:0.1652 hidden:50%
+Ep 430 [13635798] ❌ R:-67.55(-93.36) SR:   0% S:138 dist:1.6cm W:0.38m/s [L0/8 ep431 W[0.0,0.5]] | stuck_on_rebar:dtf=15.9mm,rebar=18.3mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6665 rmse_raw:0.1394 hidden:50%
+Ep 431 [13635973] ❌ R:-109.37(-93.40) SR:   0% S:175 dist:1.2cm W:0.14m/s [L0/8 ep432 W[0.0,0.5]] | stuck_on_rebar:dtf=11.9mm,rebar=12.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6108 rmse_raw:0.2185 hidden:50%
+Ep 432 [13636162] ❌ R:-78.23(-93.36) SR:   0% S:189 dist:0.1cm W:0.16m/s [L0/8 ep433 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.0mm,tilt=0.002,yaw=0.066,insert=20.1/25mm,rebar=4.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6400 rmse_raw:0.1825 hidden:50%
+Ep 433 [13636461] ❌ R:-72.76(-93.31) SR:   0% S:299 dist:0.6cm W:0.23m/s [L0/8 ep434 W[0.0,0.5]] | timeout:dtf=6.1mm,z=113mm,tilt=0.202,yaw=0.005
+       PPO PL:-0.012 VL: 1.398 E: 0.782 KL:0.0051
+       ObsPred loss:-0.6658 rmse_raw:0.1585 hidden:50%
+Ep 434 [13636534] ❌ R:-32.50(-93.17) SR:   0% S: 73 dist:2.5cm W:0.45m/s [L0/8 ep435 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6286 rmse_raw:0.2414 hidden:51%
+Ep 435 [13636668] ❌ R:-39.43(-93.05) SR:   0% S:134 dist:0.3cm W:0.48m/s [L0/8 ep436 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.1mm,tilt=0.003,yaw=0.017,insert=20.1/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6637 rmse_raw:0.1776 hidden:50%
+Ep 436 [13636829] ❌ R:-82.21(-93.03) SR:   0% S:161 dist:1.5cm W:0.14m/s [L0/8 ep437 W[0.0,0.5]] | stuck_on_rebar:dtf=14.8mm,rebar=18.4mm,z=114.5mm,insert=5.5/25mm,gap=-5.5mm,vz=5.6mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6515 rmse_raw:0.1779 hidden:50%
+Ep 437 [13636959] ❌ R:-76.96(-92.99) SR:   0% S:130 dist:2.5cm W:0.42m/s [L0/8 ep438 W[0.0,0.5]] | early_stop:dtf=25.4mm>xy_fail=25mm,z=119mm,patience=20
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6438 rmse_raw:0.2821 hidden:50%
+Ep 438 [13637090] ❌ R:-62.76(-92.92) SR:   0% S:131 dist:1.2cm W:0.29m/s [L0/8 ep439 W[0.0,0.5]] | stuck_on_rebar:dtf=11.7mm,rebar=14.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6627 rmse_raw:0.1947 hidden:50%
+Ep 439 [13637232] ❌ R:-65.00(-92.86) SR:   0% S:142 dist:1.4cm W:0.45m/s [L0/8 ep440 W[0.0,0.5]] | stuck_on_rebar:dtf=14.3mm,rebar=16.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6645 rmse_raw:0.1771 hidden:50%
+Ep 440 [13637372] ❌ R:-57.12(-92.78) SR:   0% S:140 dist:0.3cm W:0.12m/s [L0/8 ep441 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=2.9mm,tilt=0.030,yaw=0.018,insert=21.0/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6408 rmse_raw:0.1691 hidden:50%
+Ep 441 [13637515] ❌ R:-68.59(-92.72) SR:   0% S:143 dist:1.4cm W:0.00m/s [L0/8 ep442 W[0.0,0.5]] | stuck_on_rebar:dtf=13.7mm,rebar=14.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.644 E: 0.782 KL:0.0044
+       ObsPred loss:-0.6581 rmse_raw:0.2812 hidden:50%
+Ep 442 [13637558] ❌ R:-11.94(-92.54) SR:   0% S: 43 dist:1.9cm W:0.10m/s [L0/8 ep443 W[0.0,0.5]] | running
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6445 rmse_raw:0.2928 hidden:51%
+Ep 443 [13637685] ❌ R:-79.50(-92.51) SR:   0% S:127 dist:1.4cm W:0.00m/s [L0/8 ep444 W[0.0,0.5]] | stuck_on_rebar:dtf=13.7mm,rebar=15.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6221 rmse_raw:0.2117 hidden:50%
+Ep 444 [13637827] ❌ R:-91.91(-92.51) SR:   0% S:142 dist:2.6cm W:0.06m/s [L0/8 ep445 W[0.0,0.5]] | early_stop:dtf=26.0mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6407 rmse_raw:0.2018 hidden:50%
+Ep 445 [13637968] ❌ R:-56.64(-92.43) SR:   0% S:141 dist:0.7cm W:0.06m/s [L0/8 ep446 W[0.0,0.5]] | stuck_on_rebar:dtf=6.9mm,rebar=10.7mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6666 rmse_raw:0.1776 hidden:50%
+Ep 446 [13638104] ❌ R:-63.92(-92.36) SR:   0% S:136 dist:1.6cm W:0.13m/s [L0/8 ep447 W[0.0,0.5]] | stuck_on_rebar:dtf=15.9mm,rebar=16.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6713 rmse_raw:0.1702 hidden:50%
+Ep 447 [13638403] ❌ R:-94.07(-92.37) SR:   0% S:299 dist:1.3cm W:0.45m/s [L0/8 ep448 W[0.0,0.5]] | timeout:dtf=13.2mm,z=113mm,tilt=0.235,yaw=0.166
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6201 rmse_raw:1.0405 hidden:50%
+Ep 448 [13638531] ❌ R:-63.10(-92.30) SR:   0% S:128 dist:0.8cm W:0.45m/s [L0/8 ep449 W[0.0,0.5]] | stuck_on_rebar:dtf=8.1mm,rebar=10.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.012 VL: 1.874 E: 0.782 KL:0.0041
+       ObsPred loss:-0.6385 rmse_raw:0.2193 hidden:50%
+Ep 449 [13638582] ❌ R:-20.90(-92.14) SR:   0% S: 51 dist:4.8cm W:0.45m/s [L0/8 ep450 W[0.0,0.5]] | running
+       PPO PL:-0.001 VL: 1.613 E: 0.783 KL:0.0047
+       ObsPred loss:-0.6239 rmse_raw:0.2780 hidden:51%
+Ep 450 [13638881] ❌ R:-103.52(-92.17) SR:   0% S:299 dist:1.4cm W:0.19m/s [L0/8 ep451 W[0.0,0.5]] | timeout:dtf=13.8mm,z=116mm,tilt=0.179,yaw=0.000
+       PPO PL:-0.001 VL: 1.613 E: 0.783 KL:0.0047
+       ObsPred loss:-0.6541 rmse_raw:0.2491 hidden:50%
+Ep 451 [13639180] ❌ R:-109.36(-92.21) SR:   0% S:299 dist:1.0cm W:0.17m/s [L0/8 ep452 W[0.0,0.5]] | timeout:dtf=9.5mm,z=114mm,tilt=0.222,yaw=0.001
+       PPO PL:-0.001 VL: 1.613 E: 0.783 KL:0.0047
+       ObsPred loss:-0.6286 rmse_raw:0.2666 hidden:50%
+Ep 452 [13639337] ❌ R:-91.55(-92.21) SR:   0% S:157 dist:1.2cm W:0.30m/s [L0/8 ep453 W[0.0,0.5]] | stuck_on_rebar:dtf=12.2mm,rebar=13.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.001 VL: 1.613 E: 0.783 KL:0.0047
+       ObsPred loss:-0.6482 rmse_raw:0.1594 hidden:50%
+Ep 453 [13639479] ❌ R:-75.18(-92.17) SR:   0% S:142 dist:1.4cm W:0.28m/s [L0/8 ep454 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=14.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.001 VL: 1.613 E: 0.783 KL:0.0047
+       ObsPred loss:-0.6456 rmse_raw:0.1569 hidden:50%
+Ep 454 [13639606] ❌ R:-63.51(-92.11) SR:   0% S:127 dist:2.6cm W:0.42m/s [L0/8 ep455 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6222 rmse_raw:0.2066 hidden:50%
+Ep 455 [13639751] ❌ R:-86.45(-92.09) SR:   0% S:145 dist:2.5cm W:0.32m/s [L0/8 ep456 W[0.0,0.5]] | early_stop:dtf=25.1mm>xy_fail=25mm,z=121mm,patience=20
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6467 rmse_raw:0.1609 hidden:50%
+Ep 456 [13639919] ❌ R:-93.32(-92.10) SR:   0% S:168 dist:0.9cm W:0.17m/s [L0/8 ep457 W[0.0,0.5]] | stuck_on_rebar:dtf=9.1mm,rebar=11.5mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6413 rmse_raw:0.2001 hidden:50%
+Ep 457 [13640085] ❌ R:-96.10(-92.10) SR:   0% S:166 dist:1.5cm W:0.14m/s [L0/8 ep458 W[0.0,0.5]] | stuck_on_rebar:dtf=15.1mm,rebar=19.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6479 rmse_raw:0.1594 hidden:50%
+Ep 458 [13640247] ❌ R:-95.30(-92.11) SR:   0% S:162 dist:2.2cm W:0.32m/s [L0/8 ep459 W[0.0,0.5]] | stuck_on_rebar:dtf=22.3mm,rebar=24.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6478 rmse_raw:0.1867 hidden:50%
+Ep 459 [13640362] ❌ R:-34.74(-91.99) SR:   0% S:115 dist:0.3cm W:0.05m/s [L0/8 ep460 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.4mm,tilt=0.022,yaw=0.006,insert=19.1/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6639 rmse_raw:0.3086 hidden:50%
+Ep 460 [13640525] ❌ R:-109.20(-92.02) SR:   0% S:163 dist:3.0cm W:0.06m/s [L0/8 ep461 W[0.0,0.5]] | early_stop:dtf=30.5mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.011 VL: 1.343 E: 0.783 KL:0.0044
+       ObsPred loss:-0.6190 rmse_raw:0.1939 hidden:50%
+Ep 461 [13640630] ❌ R:-18.71(-91.87) SR:   0% S:105 dist:0.9cm W:0.19m/s [L0/8 ep462 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6562 rmse_raw:0.1687 hidden:50%
+Ep 462 [13640778] ❌ R:-83.19(-91.85) SR:   0% S:148 dist:1.2cm W:0.19m/s [L0/8 ep463 W[0.0,0.5]] | stuck_on_rebar:dtf=12.4mm,rebar=13.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6469 rmse_raw:0.2827 hidden:50%
+Ep 463 [13640922] ❌ R:-76.30(-91.81) SR:   0% S:144 dist:1.9cm W:0.35m/s [L0/8 ep464 W[0.0,0.5]] | stuck_on_rebar:dtf=18.6mm,rebar=21.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6569 rmse_raw:0.1552 hidden:50%
+Ep 464 [13641040] ❌ R:-62.42(-91.75) SR:   0% S:118 dist:1.8cm W:0.37m/s [L0/8 ep465 W[0.0,0.5]] | stuck_on_rebar:dtf=18.0mm,rebar=24.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6494 rmse_raw:0.2013 hidden:50%
+Ep 465 [13641196] ❌ R:-114.67(-91.80) SR:   0% S:156 dist:3.3cm W:0.16m/s [L0/8 ep466 W[0.0,0.5]] | early_stop:dtf=32.9mm>xy_fail=25mm,z=124mm,patience=21
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.5554 rmse_raw:0.2271 hidden:50%
+Ep 466 [13641346] ❌ R:-97.29(-91.81) SR:   0% S:150 dist:2.6cm W:0.31m/s [L0/8 ep467 W[0.0,0.5]] | early_stop:dtf=26.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6276 rmse_raw:0.1785 hidden:50%
+Ep 467 [13641478] ❌ R:-72.88(-91.77) SR:   0% S:132 dist:2.6cm W:0.01m/s [L0/8 ep468 W[0.0,0.5]] | early_stop:dtf=26.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6537 rmse_raw:0.2904 hidden:50%
+Ep 468 [13641618] ❌ R:-64.08(-91.71) SR:   0% S:140 dist:1.5cm W:0.15m/s [L0/8 ep469 W[0.0,0.5]] | stuck_on_rebar:dtf=15.5mm,rebar=19.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.778 E: 0.783 KL:0.0037
+       ObsPred loss:-0.6629 rmse_raw:0.1800 hidden:50%
+Ep 469 [13641654] ❌ R:-13.09(-91.54) SR:   0% S: 36 dist:4.7cm W:0.46m/s [L0/8 ep470 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6240 rmse_raw:0.4661 hidden:50%
+Ep 470 [13641813] ❌ R:-85.31(-91.53) SR:   0% S:159 dist:0.8cm W:0.50m/s [L0/8 ep471 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=9.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6461 rmse_raw:0.2789 hidden:50%
+Ep 471 [13642112] ❌ R:-105.63(-91.56) SR:   0% S:299 dist:1.5cm W:0.04m/s [L0/8 ep472 W[0.0,0.5]] | timeout:dtf=14.8mm,z=115mm,tilt=0.109,yaw=0.034
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6473 rmse_raw:0.1742 hidden:50%
+Ep 472 [13642342] ❌ R:-106.05(-91.59) SR:   0% S:230 dist:1.2cm W:0.15m/s [L0/8 ep473 W[0.0,0.5]] | stuck_on_rebar:dtf=11.7mm,rebar=11.9mm,z=114.3mm,insert=5.7/25mm,gap=-5.7mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6059 rmse_raw:1.0721 hidden:50%
+Ep 473 [13642498] ❌ R:-90.25(-91.59) SR:   0% S:156 dist:1.0cm W:0.04m/s [L0/8 ep474 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=10.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6271 rmse_raw:0.3125 hidden:50%
+Ep 474 [13642649] ❌ R:-94.66(-91.59) SR:   0% S:151 dist:2.5cm W:0.34m/s [L0/8 ep475 W[0.0,0.5]] | early_stop:dtf=25.1mm>xy_fail=25mm,z=119mm,patience=22
+       PPO PL:-0.013 VL: 1.437 E: 0.783 KL:0.0045
+       ObsPred loss:-0.6483 rmse_raw:0.1559 hidden:50%
+Ep 475 [13642678] ❌ R:-13.75(-91.43) SR:   0% S: 29 dist:6.7cm W:0.05m/s [L0/8 ep476 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.5653 rmse_raw:0.5797 hidden:52%
+Ep 476 [13642833] ❌ R:-87.37(-91.42) SR:   0% S:155 dist:1.0cm W:0.41m/s [L0/8 ep477 W[0.0,0.5]] | stuck_on_rebar:dtf=9.6mm,rebar=11.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6441 rmse_raw:0.1626 hidden:50%
+Ep 477 [13642973] ❌ R:-92.81(-91.43) SR:   0% S:140 dist:3.1cm W:0.43m/s [L0/8 ep478 W[0.0,0.5]] | early_stop:dtf=31.1mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6189 rmse_raw:0.2172 hidden:50%
+Ep 478 [13643162] ❌ R:-80.51(-91.40) SR:   0% S:189 dist:1.1cm W:0.15m/s [L0/8 ep479 W[0.0,0.5]] | stuck_on_rebar:dtf=10.6mm,rebar=10.9mm,z=114.4mm,insert=5.6/25mm,gap=-5.6mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6590 rmse_raw:0.2301 hidden:50%
+Ep 479 [13643324] ❌ R:-94.33(-91.41) SR:   0% S:162 dist:1.1cm W:0.20m/s [L0/8 ep480 W[0.0,0.5]] | stuck_on_rebar:dtf=10.6mm,rebar=10.9mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6405 rmse_raw:0.1985 hidden:50%
+Ep 480 [13643470] ❌ R:-74.66(-91.37) SR:   0% S:146 dist:1.1cm W:0.41m/s [L0/8 ep481 W[0.0,0.5]] | stuck_on_rebar:dtf=11.1mm,rebar=12.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6540 rmse_raw:0.1876 hidden:50%
+Ep 481 [13643620] ❌ R:-77.81(-91.35) SR:   0% S:150 dist:1.7cm W:0.32m/s [L0/8 ep482 W[0.0,0.5]] | stuck_on_rebar:dtf=17.0mm,rebar=17.6mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.686 E: 0.783 KL:0.0054
+       ObsPred loss:-0.6632 rmse_raw:0.1453 hidden:50%
+Ep 482 [13643702] ❌ R:-28.51(-91.22) SR:   0% S: 82 dist:1.2cm W:0.49m/s [L0/8 ep483 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6396 rmse_raw:0.2569 hidden:50%
+Ep 483 [13643840] ❌ R:-64.61(-91.16) SR:   0% S:138 dist:2.0cm W:0.42m/s [L0/8 ep484 W[0.0,0.5]] | stuck_on_rebar:dtf=20.0mm,rebar=21.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6605 rmse_raw:0.1469 hidden:50%
+Ep 484 [13643988] ❌ R:-69.37(-91.12) SR:   0% S:148 dist:1.0cm W:0.32m/s [L0/8 ep485 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=11.0mm,z=120.0mm,insert=0.0/25mm,gap=-0.0mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6522 rmse_raw:0.1845 hidden:50%
+Ep 485 [13644137] ❌ R:-80.54(-91.09) SR:   0% S:149 dist:1.3cm W:0.02m/s [L0/8 ep486 W[0.0,0.5]] | stuck_on_rebar:dtf=12.8mm,rebar=15.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6477 rmse_raw:0.2738 hidden:50%
+Ep 486 [13644300] ❌ R:-79.61(-91.07) SR:   0% S:163 dist:1.9cm W:0.23m/s [L0/8 ep487 W[0.0,0.5]] | stuck_on_rebar:dtf=18.7mm,rebar=21.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6539 rmse_raw:0.1709 hidden:50%
+Ep 487 [13644457] ❌ R:-86.19(-91.06) SR:   0% S:157 dist:1.8cm W:0.43m/s [L0/8 ep488 W[0.0,0.5]] | stuck_on_rebar:dtf=17.9mm,rebar=20.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6552 rmse_raw:0.1862 hidden:50%
+Ep 488 [13644607] ❌ R:-77.04(-91.03) SR:   0% S:150 dist:1.5cm W:0.29m/s [L0/8 ep489 W[0.0,0.5]] | stuck_on_rebar:dtf=14.8mm,rebar=15.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.337 E: 0.783 KL:0.0031
+       ObsPred loss:-0.6569 rmse_raw:0.1581 hidden:50%
+Ep 489 [13644726] ❌ R:-37.83(-90.92) SR:   0% S:119 dist:2.0cm W:0.46m/s [L0/8 ep490 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6574 rmse_raw:0.1970 hidden:50%
+Ep 490 [13644981] ❌ R:-85.82(-90.91) SR:   0% S:255 dist:1.0cm W:0.29m/s [L0/8 ep491 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=10.4mm,z=113.6mm,insert=6.4/25mm,gap=-6.4mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6679 rmse_raw:0.1437 hidden:50%
+Ep 491 [13645109] ❌ R:-32.76(-90.79) SR:   0% S:128 dist:0.3cm W:0.34m/s [L0/8 ep492 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=2.6mm,tilt=0.002,yaw=0.030,insert=20.2/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6710 rmse_raw:0.1809 hidden:50%
+Ep 492 [13645257] ❌ R:-85.76(-90.78) SR:   0% S:148 dist:1.7cm W:0.03m/s [L0/8 ep493 W[0.0,0.5]] | stuck_on_rebar:dtf=17.3mm,rebar=23.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6485 rmse_raw:0.1605 hidden:50%
+Ep 493 [13645428] ❌ R:-101.62(-90.81) SR:   0% S:171 dist:2.2cm W:0.45m/s [L0/8 ep494 W[0.0,0.5]] | stuck_on_rebar:dtf=21.8mm,rebar=25.5mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6375 rmse_raw:0.1666 hidden:50%
+Ep 494 [13645572] ❌ R:-79.16(-90.78) SR:   0% S:144 dist:1.1cm W:0.14m/s [L0/8 ep495 W[0.0,0.5]] | stuck_on_rebar:dtf=11.0mm,rebar=11.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 0.924 E: 0.783 KL:0.0027
+       ObsPred loss:-0.6371 rmse_raw:0.1926 hidden:50%
+Ep 495 [13645750] ❌ R:-43.22(-90.69) SR:   0% S:178 dist:0.3cm W:0.28m/s [L0/8 ep496 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6378 rmse_raw:0.4949 hidden:50%
+Ep 496 [13645908] ❌ R:-75.52(-90.66) SR:   0% S:158 dist:1.0cm W:0.30m/s [L0/8 ep497 W[0.0,0.5]] | stuck_on_rebar:dtf=10.2mm,rebar=12.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6558 rmse_raw:0.1466 hidden:50%
+Ep 497 [13646059] ❌ R:-84.33(-90.64) SR:   0% S:151 dist:1.3cm W:0.30m/s [L0/8 ep498 W[0.0,0.5]] | stuck_on_rebar:dtf=12.8mm,rebar=13.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6514 rmse_raw:0.1804 hidden:50%
+Ep 498 [13646358] ❌ R:-101.08(-90.66) SR:   0% S:299 dist:1.2cm W:0.49m/s [L0/8 ep499 W[0.0,0.5]] | timeout:dtf=12.2mm,z=113mm,tilt=0.273,yaw=0.000
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6478 rmse_raw:0.4217 hidden:50%
+  [Curriculum-descent] ep=500 wind=[0.00,0.50]/10.0m/s SR=1% n=100/100 pause=500
+Ep 499 [13646470] ✅ R: 35.91(-90.41) SR:   0% S:112 dist:0.4cm W:0.24m/s [L0/8 ep500 W[0.0,0.5]] | insertion_success:z=102mm,dtf=3.6mm,tilt=0.023,yaw=0.014,insert=18.1/25mm,rebar=4.1/4.5mm,floor=1,xy_tol=5.0mm
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6734 rmse_raw:0.1504 hidden:50%
+Ep 500 [13646608] ❌ R:-49.01(-90.29) SR:   0% S:138 dist:0.2cm W:0.25m/s [L0/8 ep501 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.8mm,tilt=0.004,yaw=0.004,insert=19.9/25mm,rebar=2.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 1.791 E: 0.783 KL:0.0067
+       ObsPred loss:-0.6571 rmse_raw:0.1803 hidden:50%
+Ep 501 [13646774] ❌ R:-30.60(-90.16) SR:   0% S:166 dist:1.8cm W:0.30m/s [L0/8 ep502 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6457 rmse_raw:0.6032 hidden:50%
+Ep 502 [13647073] ❌ R:-102.28(-90.00) SR:   0% S:299 dist:1.5cm W:0.27m/s [L0/8 ep503 W[0.0,0.5]] | timeout:dtf=14.9mm,z=115mm,tilt=0.110,yaw=0.018
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6381 rmse_raw:0.2512 hidden:50%
+Ep 503 [13647248] ❌ R:-70.62(-89.78) SR:   0% S:175 dist:0.5cm W:0.43m/s [L0/8 ep504 W[0.0,0.5]] | stuck_on_rebar:dtf=5.3mm,rebar=6.1mm,z=114.0mm,insert=6.0/25mm,gap=-6.0mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6616 rmse_raw:0.2017 hidden:50%
+Ep 504 [13647387] ❌ R:-62.92(-89.89) SR:   0% S:139 dist:1.1cm W:0.18m/s [L0/8 ep505 W[0.0,0.5]] | stuck_on_rebar:dtf=11.2mm,rebar=14.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6604 rmse_raw:0.2921 hidden:50%
+Ep 505 [13647529] ❌ R:-55.33(-89.79) SR:   0% S:142 dist:0.7cm W:0.32m/s [L0/8 ep506 W[0.0,0.5]] | stuck_on_rebar:dtf=6.6mm,rebar=7.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6601 rmse_raw:0.1771 hidden:50%
+Ep 506 [13647664] ❌ R:-54.84(-89.67) SR:   0% S:135 dist:1.6cm W:0.01m/s [L0/8 ep507 W[0.0,0.5]] | stuck_on_rebar:dtf=15.9mm,rebar=16.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 2.513 E: 0.783 KL:0.0065
+       ObsPred loss:-0.6726 rmse_raw:0.1494 hidden:50%
+Ep 507 [13647798] ❌ R:-57.99(-89.51) SR:   0% S:134 dist:1.2cm W:0.26m/s [L0/8 ep508 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6345 rmse_raw:0.2047 hidden:50%
+Ep 508 [13647946] ❌ R:-71.87(-89.47) SR:   0% S:148 dist:1.7cm W:0.35m/s [L0/8 ep509 W[0.0,0.5]] | stuck_on_rebar:dtf=17.4mm,rebar=17.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6628 rmse_raw:0.1618 hidden:50%
+Ep 509 [13648081] ❌ R:-59.47(-89.46) SR:   0% S:135 dist:1.5cm W:0.08m/s [L0/8 ep510 W[0.0,0.5]] | stuck_on_rebar:dtf=14.7mm,rebar=15.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6698 rmse_raw:0.1677 hidden:50%
+Ep 510 [13648233] ❌ R:-75.78(-89.29) SR:   0% S:152 dist:1.4cm W:0.11m/s [L0/8 ep511 W[0.0,0.5]] | stuck_on_rebar:dtf=14.4mm,rebar=17.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6601 rmse_raw:0.1722 hidden:50%
+Ep 511 [13648371] ❌ R:-63.91(-89.21) SR:   0% S:138 dist:1.2cm W:0.32m/s [L0/8 ep512 W[0.0,0.5]] | stuck_on_rebar:dtf=12.4mm,rebar=13.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6579 rmse_raw:0.1873 hidden:50%
+Ep 512 [13648559] ❌ R:-48.55(-89.14) SR:   0% S:188 dist:0.4cm W:0.19m/s [L0/8 ep513 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=3.8mm,tilt=0.014,yaw=0.005,insert=19.2/25mm,rebar=4.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 1.632 E: 0.784 KL:0.0069
+       ObsPred loss:-0.6605 rmse_raw:0.4199 hidden:50%
+Ep 513 [13648822] ❌ R:-73.29(-89.07) SR:   0% S:263 dist:1.0cm W:0.13m/s [L0/8 ep514 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6417 rmse_raw:0.2287 hidden:50%
+Ep 514 [13648998] ❌ R:-76.71(-89.04) SR:   0% S:176 dist:0.3cm W:0.37m/s [L0/8 ep515 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.3mm,tilt=0.002,yaw=0.013,insert=20.1/25mm,rebar=3.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6330 rmse_raw:0.1822 hidden:50%
+Ep 515 [13649148] ❌ R:-68.70(-88.94) SR:   0% S:150 dist:0.6cm W:0.16m/s [L0/8 ep516 W[0.0,0.5]] | stuck_on_rebar:dtf=6.1mm,rebar=6.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6384 rmse_raw:0.5133 hidden:50%
+Ep 516 [13649298] ❌ R:-69.84(-88.87) SR:   0% S:150 dist:0.9cm W:0.07m/s [L0/8 ep517 W[0.0,0.5]] | stuck_on_rebar:dtf=9.2mm,rebar=11.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6381 rmse_raw:0.4303 hidden:50%
+Ep 517 [13649464] ❌ R:-93.93(-88.82) SR:   0% S:166 dist:1.4cm W:0.10m/s [L0/8 ep518 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=16.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6457 rmse_raw:0.1513 hidden:50%
+Ep 518 [13649607] ❌ R:-61.83(-88.74) SR:   0% S:143 dist:1.9cm W:0.17m/s [L0/8 ep519 W[0.0,0.5]] | stuck_on_rebar:dtf=19.3mm,rebar=23.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6673 rmse_raw:0.1729 hidden:50%
+Ep 519 [13649749] ❌ R:-70.19(-88.69) SR:   0% S:142 dist:1.6cm W:0.34m/s [L0/8 ep520 W[0.0,0.5]] | stuck_on_rebar:dtf=15.5mm,rebar=19.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.466 E: 0.784 KL:0.0041
+       ObsPred loss:-0.6491 rmse_raw:0.1925 hidden:50%
+Ep 520 [13649846] ❌ R:-48.45(-88.55) SR:   0% S: 97 dist:0.4cm W:0.43m/s [L0/8 ep521 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6256 rmse_raw:0.2500 hidden:51%
+Ep 521 [13650145] ❌ R:-87.75(-88.36) SR:   0% S:299 dist:0.7cm W:0.16m/s [L0/8 ep522 W[0.0,0.5]] | timeout:dtf=6.7mm,z=114mm,tilt=0.249,yaw=0.000
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6651 rmse_raw:0.1450 hidden:50%
+Ep 522 [13650282] ❌ R:-49.53(-88.09) SR:   0% S:137 dist:0.2cm W:0.26m/s [L0/8 ep523 W[0.0,0.5]] | lucky_rebar_insert_failure:z=99mm,dtf=1.6mm,tilt=0.002,yaw=0.028,insert=20.5/25mm,rebar=2.9/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6546 rmse_raw:0.1837 hidden:50%
+Ep 523 [13650428] ❌ R:-75.75(-88.06) SR:   0% S:146 dist:1.3cm W:0.33m/s [L0/8 ep524 W[0.0,0.5]] | stuck_on_rebar:dtf=12.5mm,rebar=14.2mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6583 rmse_raw:0.1525 hidden:50%
+Ep 524 [13650561] ❌ R:-56.14(-87.92) SR:   0% S:133 dist:1.1cm W:0.02m/s [L0/8 ep525 W[0.0,0.5]] | stuck_on_rebar:dtf=11.0mm,rebar=11.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6743 rmse_raw:0.1749 hidden:50%
+Ep 525 [13650707] ❌ R:-70.22(-87.86) SR:   0% S:146 dist:0.8cm W:0.10m/s [L0/8 ep526 W[0.0,0.5]] | stuck_on_rebar:dtf=8.2mm,rebar=10.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.6534 rmse_raw:0.1584 hidden:50%
+Ep 526 [13650838] ❌ R:-97.02(-87.86) SR:   0% S:131 dist:3.9cm W:0.39m/s [L0/8 ep527 W[0.0,0.5]] | early_stop:dtf=38.6mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.008 VL: 1.371 E: 0.784 KL:0.0047
+       ObsPred loss:-0.5673 rmse_raw:0.2534 hidden:50%
+Ep 527 [13650870] ❌ R:-10.39(-87.62) SR:   0% S: 32 dist:3.2cm W:0.10m/s [L0/8 ep528 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6466 rmse_raw:0.3674 hidden:50%
+Ep 528 [13651011] ❌ R:-31.34(-87.51) SR:   0% S:141 dist:0.1cm W:0.04m/s [L0/8 ep529 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.3mm,tilt=0.014,yaw=0.060,insert=19.3/25mm,rebar=4.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6821 rmse_raw:0.1282 hidden:50%
+Ep 529 [13651157] ❌ R:-75.82(-87.40) SR:   0% S:146 dist:0.7cm W:0.28m/s [L0/8 ep530 W[0.0,0.5]] | stuck_on_rebar:dtf=7.2mm,rebar=7.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6412 rmse_raw:0.1846 hidden:50%
+Ep 530 [13651299] ❌ R:-65.96(-87.29) SR:   0% S:142 dist:1.4cm W:0.48m/s [L0/8 ep531 W[0.0,0.5]] | stuck_on_rebar:dtf=13.9mm,rebar=15.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6622 rmse_raw:0.1823 hidden:50%
+Ep 531 [13651436] ❌ R:-80.90(-87.09) SR:   0% S:137 dist:2.2cm W:0.04m/s [L0/8 ep532 W[0.0,0.5]] | stuck_on_rebar:dtf=21.8mm,rebar=22.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6403 rmse_raw:0.1637 hidden:50%
+Ep 532 [13651606] ❌ R:-56.70(-86.92) SR:   0% S:170 dist:1.5cm W:0.16m/s [L0/8 ep533 W[0.0,0.5]] | stuck_on_rebar:dtf=14.5mm,rebar=17.7mm,z=115.1mm,insert=4.9/25mm,gap=-4.9mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.6808 rmse_raw:0.1251 hidden:50%
+Ep 533 [13651833] ❌ R:-134.97(-86.96) SR:   0% S:227 dist:1.4cm W:0.07m/s [L0/8 ep534 W[0.0,0.5]] | stuck_on_rebar:dtf=13.8mm,rebar=13.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.420 E: 0.784 KL:0.0067
+       ObsPred loss:-0.5637 rmse_raw:0.3159 hidden:50%
+Ep 534 [13651894] ❌ R:-21.58(-86.78) SR:   0% S: 61 dist:1.9cm W:0.33m/s [L0/8 ep535 W[0.0,0.5]] | running
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6493 rmse_raw:0.2317 hidden:51%
+Ep 535 [13652063] ❌ R:-70.47(-86.55) SR:   0% S:169 dist:0.9cm W:0.28m/s [L0/8 ep536 W[0.0,0.5]] | stuck_on_rebar:dtf=9.2mm,rebar=9.7mm,z=113.8mm,insert=6.2/25mm,gap=-6.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6434 rmse_raw:0.5619 hidden:50%
+Ep 536 [13652265] ❌ R:-135.96(-86.55) SR:   0% S:202 dist:3.2cm W:0.39m/s [L0/8 ep537 W[0.0,0.5]] | early_stop:dtf=32.2mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.5655 rmse_raw:0.2560 hidden:50%
+Ep 537 [13652414] ❌ R:-65.01(-86.32) SR:   0% S:149 dist:1.2cm W:0.36m/s [L0/8 ep538 W[0.0,0.5]] | stuck_on_rebar:dtf=12.3mm,rebar=12.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6690 rmse_raw:0.1386 hidden:50%
+Ep 538 [13652561] ❌ R:-86.14(-86.24) SR:   0% S:147 dist:1.0cm W:0.23m/s [L0/8 ep539 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=14.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6362 rmse_raw:0.1896 hidden:50%
+Ep 539 [13652707] ❌ R:-58.65(-85.99) SR:   0% S:146 dist:0.7cm W:0.28m/s [L0/8 ep540 W[0.0,0.5]] | stuck_on_rebar:dtf=7.4mm,rebar=7.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6679 rmse_raw:0.1662 hidden:50%
+Ep 540 [13652838] ❌ R:-79.64(-85.98) SR:   0% S:131 dist:3.2cm W:0.07m/s [L0/8 ep541 W[0.0,0.5]] | early_stop:dtf=32.4mm>xy_fail=25mm,z=120mm,patience=20
+       PPO PL:-0.011 VL: 1.701 E: 0.784 KL:0.0037
+       ObsPred loss:-0.6409 rmse_raw:0.1676 hidden:50%
+Ep 541 [13652918] ❌ R:-37.75(-85.77) SR:   0% S: 80 dist:2.8cm W:0.21m/s [L0/8 ep542 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6173 rmse_raw:0.2729 hidden:50%
+Ep 542 [13653071] ❌ R:-88.19(-85.75) SR:   0% S:153 dist:1.7cm W:0.46m/s [L0/8 ep543 W[0.0,0.5]] | stuck_on_rebar:dtf=17.0mm,rebar=22.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6455 rmse_raw:0.1906 hidden:50%
+Ep 543 [13653213] ❌ R:-73.98(-85.77) SR:   0% S:142 dist:1.3cm W:0.10m/s [L0/8 ep544 W[0.0,0.5]] | stuck_on_rebar:dtf=12.7mm,rebar=17.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6580 rmse_raw:0.1916 hidden:50%
+Ep 544 [13653388] ❌ R:-86.81(-85.57) SR:   0% S:175 dist:0.9cm W:0.31m/s [L0/8 ep545 W[0.0,0.5]] | stuck_on_rebar:dtf=8.8mm,rebar=9.0mm,z=114.6mm,insert=5.4/25mm,gap=-5.4mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6156 rmse_raw:0.5828 hidden:50%
+Ep 545 [13653530] ❌ R:-41.53(-85.54) SR:   0% S:142 dist:0.3cm W:0.06m/s [L0/8 ep546 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.0mm,tilt=0.003,yaw=0.024,insert=19.9/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6713 rmse_raw:0.1723 hidden:50%
+Ep 546 [13653684] ❌ R:-41.12(-85.36) SR:   0% S:154 dist:0.2cm W:0.42m/s [L0/8 ep547 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.0mm,tilt=0.014,yaw=0.034,insert=16.0/25mm,rebar=3.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6719 rmse_raw:0.1685 hidden:50%
+Ep 547 [13653823] ❌ R:-67.80(-85.26) SR:   0% S:139 dist:1.0cm W:0.17m/s [L0/8 ep548 W[0.0,0.5]] | stuck_on_rebar:dtf=9.5mm,rebar=11.9mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.1mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.602 E: 0.784 KL:0.0045
+       ObsPred loss:-0.6567 rmse_raw:0.1900 hidden:50%
+Ep 548 [13653942] ❌ R:-47.90(-85.01) SR:   0% S:119 dist:2.2cm W:0.28m/s [L0/8 ep549 W[0.0,0.5]] | running
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6437 rmse_raw:0.1784 hidden:50%
+Ep 549 [13654088] ❌ R:-77.27(-84.93) SR:   0% S:146 dist:1.2cm W:0.22m/s [L0/8 ep550 W[0.0,0.5]] | stuck_on_rebar:dtf=12.0mm,rebar=15.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6541 rmse_raw:0.1834 hidden:50%
+Ep 550 [13654235] ❌ R:-58.67(-84.98) SR:   0% S:147 dist:0.4cm W:0.05m/s [L0/8 ep551 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.6mm,tilt=0.010,yaw=0.000,insert=19.5/25mm,rebar=3.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6576 rmse_raw:0.1858 hidden:50%
+Ep 551 [13654365] ❌ R:-51.84(-84.84) SR:   0% S:130 dist:0.6cm W:0.31m/s [L0/8 ep552 W[0.0,0.5]] | stuck_on_rebar:dtf=6.1mm,rebar=6.4mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6587 rmse_raw:0.3312 hidden:50%
+Ep 552 [13654504] ❌ R:-74.33(-84.63) SR:   0% S:139 dist:1.3cm W:0.44m/s [L0/8 ep553 W[0.0,0.5]] | stuck_on_rebar:dtf=13.0mm,rebar=15.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6455 rmse_raw:0.1534 hidden:50%
+Ep 553 [13654646] ❌ R:-70.85(-84.45) SR:   0% S:142 dist:1.5cm W:0.49m/s [L0/8 ep554 W[0.0,0.5]] | stuck_on_rebar:dtf=14.6mm,rebar=16.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6624 rmse_raw:0.1519 hidden:50%
+Ep 554 [13654780] ❌ R:-64.06(-84.37) SR:   0% S:134 dist:0.8cm W:0.21m/s [L0/8 ep555 W[0.0,0.5]] | stuck_on_rebar:dtf=7.8mm,rebar=9.0mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6437 rmse_raw:0.3810 hidden:50%
+Ep 555 [13654926] ❌ R:-93.37(-84.19) SR:   0% S:146 dist:1.2cm W:0.50m/s [L0/8 ep556 W[0.0,0.5]] | stuck_on_rebar:dtf=12.2mm,rebar=13.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.010 VL: 1.634 E: 0.784 KL:0.0026
+       ObsPred loss:-0.6327 rmse_raw:0.1751 hidden:50%
+Ep 556 [13654966] ❌ R:-14.28(-83.84) SR:   0% S: 40 dist:4.3cm W:0.08m/s [L0/8 ep557 W[0.0,0.5]] | running
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6311 rmse_raw:0.4210 hidden:50%
+Ep 557 [13655089] ✅ R: 25.63(-83.63) SR:   1% S:123 dist:0.3cm W:0.38m/s [L0/8 ep558 W[0.0,0.5]] | insertion_success:z=100mm,dtf=2.9mm,tilt=0.007,yaw=0.004,insert=19.6/25mm,rebar=3.1/4.5mm,floor=1,xy_tol=5.0mm
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6570 rmse_raw:0.2933 hidden:50%
+Ep 558 [13655205] ❌ R:-40.96(-83.45) SR:   1% S:116 dist:0.3cm W:0.35m/s [L0/8 ep559 W[0.0,0.5]] | lucky_rebar_insert_failure:z=104mm,dtf=2.7mm,tilt=0.038,yaw=0.011,insert=15.5/25mm,rebar=3.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6659 rmse_raw:0.1948 hidden:50%
+Ep 559 [13655350] ❌ R:-64.87(-83.56) SR:   1% S:145 dist:2.5cm W:0.07m/s [L0/8 ep560 W[0.0,0.5]] | early_stop:dtf=25.4mm>xy_fail=25mm,z=117mm,patience=38
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6623 rmse_raw:0.2668 hidden:50%
+Ep 560 [13655506] ❌ R:-75.19(-83.47) SR:   1% S:156 dist:0.9cm W:0.43m/s [L0/8 ep561 W[0.0,0.5]] | stuck_on_rebar:dtf=8.6mm,rebar=11.1mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6482 rmse_raw:0.1908 hidden:50%
+Ep 561 [13655670] ❌ R:-41.17(-83.18) SR:   1% S:164 dist:0.3cm W:0.28m/s [L0/8 ep562 W[0.0,0.5]] | lucky_rebar_insert_failure:z=105mm,dtf=3.1mm,tilt=0.026,yaw=0.015,insert=15.1/25mm,rebar=3.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6561 rmse_raw:0.3599 hidden:50%
+Ep 562 [13655794] ❌ R:-46.14(-83.00) SR:   1% S:124 dist:0.4cm W:0.29m/s [L0/8 ep563 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.7mm,tilt=0.003,yaw=0.016,insert=20.0/25mm,rebar=4.4/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.013 VL: 1.397 E: 0.785 KL:0.0039
+       ObsPred loss:-0.6526 rmse_raw:0.2110 hidden:50%
+Ep 563 [13655990] ❌ R:-44.67(-82.86) SR:   1% S:196 dist:0.5cm W:0.25m/s [L0/8 ep564 W[0.0,0.5]] | running
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6515 rmse_raw:0.1680 hidden:50%
+Ep 564 [13656126] ❌ R:-65.74(-82.70) SR:   1% S:136 dist:1.8cm W:0.14m/s [L0/8 ep565 W[0.0,0.5]] | stuck_on_rebar:dtf=18.1mm,rebar=19.0mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6652 rmse_raw:0.1800 hidden:50%
+Ep 565 [13656258] ❌ R:-67.18(-82.63) SR:   1% S:132 dist:1.1cm W:0.10m/s [L0/8 ep566 W[0.0,0.5]] | stuck_on_rebar:dtf=11.4mm,rebar=11.7mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6574 rmse_raw:0.1862 hidden:50%
+Ep 566 [13656400] ❌ R:-67.42(-82.42) SR:   1% S:142 dist:1.4cm W:0.40m/s [L0/8 ep567 W[0.0,0.5]] | stuck_on_rebar:dtf=13.5mm,rebar=14.5mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6564 rmse_raw:0.2776 hidden:50%
+Ep 567 [13656546] ❌ R:-65.85(-82.31) SR:   1% S:146 dist:1.4cm W:0.33m/s [L0/8 ep568 W[0.0,0.5]] | stuck_on_rebar:dtf=14.2mm,rebar=15.8mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6668 rmse_raw:0.1419 hidden:50%
+Ep 568 [13656668] ❌ R:-42.84(-82.14) SR:   1% S:122 dist:0.1cm W:0.12m/s [L0/8 ep569 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.2mm,tilt=0.029,yaw=0.009,insert=18.6/25mm,rebar=1.7/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6617 rmse_raw:0.1847 hidden:50%
+Ep 569 [13656794] ❌ R:-54.73(-81.88) SR:   1% S:126 dist:0.1cm W:0.27m/s [L0/8 ep570 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.3mm,tilt=0.020,yaw=0.019,insert=19.3/25mm,rebar=2.2/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6178 rmse_raw:0.3249 hidden:50%
+Ep 570 [13656913] ❌ R:-37.18(-81.58) SR:   1% S:119 dist:0.4cm W:0.02m/s [L0/8 ep571 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=3.7mm,tilt=0.002,yaw=0.009,insert=20.0/25mm,rebar=4.1/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.008 VL: 2.680 E: 0.785 KL:0.0035
+       ObsPred loss:-0.6729 rmse_raw:0.1801 hidden:50%
+Ep 571 [13657014] ❌ R:-44.86(-81.44) SR:   1% S:101 dist:0.7cm W:0.43m/s [L0/8 ep572 W[0.0,0.5]] | running
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6278 rmse_raw:0.2248 hidden:50%
+Ep 572 [13657170] ❌ R:-48.57(-81.28) SR:   1% S:156 dist:0.1cm W:0.28m/s [L0/8 ep573 W[0.0,0.5]] | lucky_rebar_insert_failure:z=101mm,dtf=1.4mm,tilt=0.020,yaw=0.006,insert=19.2/25mm,rebar=1.6/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6428 rmse_raw:0.3555 hidden:50%
+Ep 573 [13657323] ❌ R:-73.29(-81.06) SR:   1% S:153 dist:1.7cm W:0.25m/s [L0/8 ep574 W[0.0,0.5]] | stuck_on_rebar:dtf=16.7mm,rebar=20.0mm,z=113.8mm,insert=6.2/25mm,gap=-6.2mm,vz=1.9mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6454 rmse_raw:0.2728 hidden:50%
+Ep 574 [13657483] ❌ R:-99.67(-80.89) SR:   1% S:160 dist:1.4cm W:0.17m/s [L0/8 ep575 W[0.0,0.5]] | stuck_on_rebar:dtf=14.0mm,rebar=16.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6281 rmse_raw:0.1983 hidden:50%
+Ep 575 [13657633] ❌ R:-79.89(-80.83) SR:   1% S:150 dist:2.1cm W:0.19m/s [L0/8 ep576 W[0.0,0.5]] | stuck_on_rebar:dtf=20.5mm,rebar=24.6mm,z=119.8mm,insert=0.2/25mm,gap=-0.2mm,vz=0.2mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6511 rmse_raw:0.1776 hidden:50%
+Ep 576 [13657764] ❌ R:-44.06(-80.55) SR:   1% S:131 dist:0.2cm W:0.08m/s [L0/8 ep577 W[0.0,0.5]] | lucky_rebar_insert_failure:z=100mm,dtf=1.6mm,tilt=0.017,yaw=0.004,insert=19.7/25mm,rebar=1.8/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6625 rmse_raw:0.1877 hidden:50%
+Ep 577 [13657909] ❌ R:-79.13(-80.33) SR:   1% S:145 dist:1.6cm W:0.28m/s [L0/8 ep578 W[0.0,0.5]] | stuck_on_rebar:dtf=15.5mm,rebar=16.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.009 VL: 1.439 E: 0.785 KL:0.0041
+       ObsPred loss:-0.6513 rmse_raw:0.1909 hidden:50%
+Ep 578 [13658038] ❌ R:-17.59(-79.99) SR:   1% S:129 dist:0.6cm W:0.46m/s [L0/8 ep579 W[0.0,0.5]] | running
+       PPO PL:-0.006 VL: 1.719 E: 0.785 KL:0.0028
+       ObsPred loss:-0.6802 rmse_raw:0.1598 hidden:50%
+Ep 579 [13658161] ❌ R:-40.52(-79.95) SR:   1% S:123 dist:0.3cm W:0.36m/s [L0/8 ep580 W[0.0,0.5]] | lucky_rebar_insert_failure:z=103mm,dtf=3.3mm,tilt=0.030,yaw=0.017,insert=16.8/25mm,rebar=4.0/4.5mm,floor=1,bad_rebar_contact_seen=1
+       PPO PL:-0.006 VL: 1.719 E: 0.785 KL:0.0028
+       ObsPred loss:-0.6676 rmse_raw:0.1781 hidden:50%
+Ep 580 [13658308] ❌ R:-67.46(-79.86) SR:   1% S:147 dist:0.7cm W:0.23m/s [L0/8 ep581 W[0.0,0.5]] | stuck_on_rebar:dtf=6.8mm,rebar=7.3mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.006 VL: 1.719 E: 0.785 KL:0.0028
+       ObsPred loss:-0.6557 rmse_raw:0.1796 hidden:50%
+Ep 581 [13658446] ❌ R:-70.52(-79.66) SR:   1% S:138 dist:1.0cm W:0.06m/s [L0/8 ep582 W[0.0,0.5]] | stuck_on_rebar:dtf=9.8mm,rebar=12.6mm,z=119.9mm,insert=0.1/25mm,gap=-0.1mm,vz=0.0mm/s,rebar_contact=1,geom_contact=1,floor=NO,patience=25
+       PPO PL:-0.006 VL: 1.719 E: 0.785 KL:0.0028
+       ObsPred loss:-0.6543 rmse_raw:0.1633 hidden:50%
+Ep 582 [13658745] ❌ R:-95.01(-79.47) SR:   1% S:299 dist:0.6cm W:0.39m/s [L0/8 ep583 W[0.0,0.5]] | timeout:dtf=5.7mm,z=114mm,tilt=0.244,yaw=0.000
+       PPO PL:-0.006 VL: 1.719 E: 0.785 KL:0.0028
+       ObsPred loss:-0.6533 rmse_raw:0.1717 hidden:50%
+
+[DESCENT-PPO] Done: 13658745 steps, 323.1 min, best_sr=1%
+wandb: updating run metadata
+wandb: uploading output.log; uploading wandb-summary.json; uploading config.yaml
+wandb: uploading history steps 581-582, summary, console lines 1755-1759
+wandb: 
+wandb: Run history:
+wandb:     cur/descent/act_noise ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:    cur/descent/eps_at_lvl ▁▂▂▂▂▂▂▃▃▃▃▄▄▄▄▄▄▄▄▅▅▅▅▅▆▆▆▆▇▇▇▇▇▇▇█████
+wandb:   cur/descent/force_noise ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:     cur/descent/last_wind ▇▄▄▂█▂▄█▃▇▇▂█▂▄▇▅▇▂▁▃▃▇▅█▄▁▂▇▁▅▇▁▆▁▄▆█▁▂
+wandb:         cur/descent/level ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:     cur/descent/obs_noise ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb: cur/descent/ramp_window_n ▁▂▃▃▄▅▆▆▆▇██████████████████████████████
+wandb:     cur/descent/sr_window ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁████████▁▁▁▁▁▁▁▁▁▁█████
+wandb:      cur/descent/wind_max ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:      cur/descent/wind_min ▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+wandb:                      +247 ...
+wandb: 
+wandb: Run summary:
+wandb:     cur/descent/act_noise 0
+wandb:    cur/descent/eps_at_lvl 583
+wandb:   cur/descent/force_noise 0
+wandb:     cur/descent/last_wind 0.38657
+wandb:         cur/descent/level 0
+wandb:     cur/descent/obs_noise 0
+wandb: cur/descent/ramp_window_n 100
+wandb:     cur/descent/sr_window 0.02
+wandb:      cur/descent/wind_max 0.5
+wandb:      cur/descent/wind_min 0
+wandb:                      +247 ...
+wandb: 
+wandb: 🚀 View run descent_ppo at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9/runs/u5d5xb41
+wandb: ⭐️ View project at: https://wandb.ai/xz573-university-of-cambridge/phase_rl_v9
+wandb: Synced 5 W&B file(s), 0 media file(s), 0 artifact file(s) and 0 other file(s)
+wandb: Find logs at: saves/descent_ppo_10hz_vision_pred_small_endpoint_ft_20260606_025811/wandb/run-20260606_025813-u5d5xb41/logs
