@@ -620,6 +620,28 @@ def build_config(args):
             config.setdefault("cruise_rl", {})["obs_dim"] = 45
         if phase in (None, "descent", "pipeline"):
             config.setdefault("descent_rl", {})["obs_dim"] = 44
+    drl_cfg = config.setdefault("descent_rl", {})
+    for arg_name, cfg_key in [
+        ("descent_z_soft_gate_full", "z_soft_gate_full"),
+        ("descent_z_hard_gate", "z_hard_gate"),
+        ("descent_z_min_speed_frac", "z_min_speed_frac"),
+        ("descent_z_trickle_xy_gate", "z_trickle_xy_gate"),
+        ("descent_base_v_max_z", "base_v_max_z"),
+    ]:
+        val = getattr(args, arg_name, None)
+        if val is not None:
+            drl_cfg[cfg_key] = float(val)
+    reward_cfg = drl_cfg.setdefault("reward", {})
+    if getattr(args, "descent_alignment_z_gate", None) is not None:
+        reward_cfg["alignment_z_gate"] = float(args.descent_alignment_z_gate)
+    if getattr(args, "descent_premature_descent_xy_gate", None) is not None:
+        reward_cfg["premature_descent_xy_gate"] = float(
+            args.descent_premature_descent_xy_gate)
+    if getattr(args, "descent_action_rms_free", None) is not None:
+        reward_cfg["action_rms_free"] = float(args.descent_action_rms_free)
+    if getattr(args, "descent_action_magnitude_coef", None) is not None:
+        reward_cfg["action_magnitude_coef"] = float(
+            args.descent_action_magnitude_coef)
     wind_cfg = config.setdefault("wind", {})
     if bool(getattr(args, "variable_wind", False)):
         wind_cfg["test_wind_variable"] = True
@@ -784,7 +806,8 @@ def _update_rope_marker_eval_acc(acc, debug):
         return
     acc["samples"] += 1
     for key in ("markers_total", "visible", "valid_after_noise",
-                "camera_estimates", "cameras", "dropout"):
+                "camera_estimates", "cameras", "dropout", "total_ms",
+                "render_ms", "algo_ms"):
         acc.setdefault(key, []).append(float(debug.get(key, 0.0) or 0.0))
     acc["source"] = str(debug.get("source", acc.get("source", "")) or "")
 
@@ -798,6 +821,9 @@ def _summarize_rope_marker_eval_acc(acc):
                 "camera_estimates", "cameras", "dropout"):
         vals = np.asarray(acc.get(key, []), dtype=np.float64)
         out[f"{key}_mean"] = float(np.mean(vals)) if vals.size else 0.0
+    for key in ("total_ms", "render_ms", "algo_ms"):
+        vals = np.asarray(acc.get(key, []), dtype=np.float64)
+        out[key] = float(np.mean(vals)) if vals.size else 0.0
     total = max(out.get("markers_total_mean", 0.0), 1e-9)
     out["visible_rate"] = out.get("visible_mean", 0.0) / total
     out["valid_rate"] = out.get("valid_after_noise_mean", 0.0) / total
@@ -2295,10 +2321,28 @@ def summarize_results(results):
         vals = [float(t[key]) for t in timings if key in t]
         if vals:
             summary[key] = float(np.mean(vals))
+    vision_summaries = [r.get("vision") or {} for r in results]
+    valid_vals = [1.0 if bool(v.get("valid", False)) else 0.0
+                  for v in vision_summaries if v]
+    if valid_vals:
+        summary["vision_valid_rate"] = float(np.mean(valid_vals))
+    for out_key, src_key, scale in [
+        ("vision_active_cameras_mean", "active_cameras", 1.0),
+        ("vision_reproj_px_mean", "reprojection_error", 1.0),
+        ("vision_depth_rmse_mm_mean", "depth_rmse", 1000.0),
+        ("vision_total_ms", "total_ms", 1.0),
+        ("vision_render_ms", "render_ms", 1.0),
+        ("vision_algo_ms", "algo_ms", 1.0),
+    ]:
+        vals = [float(v[src_key]) * scale for v in vision_summaries
+                if src_key in v]
+        if vals:
+            summary[out_key] = float(np.mean(vals))
     rope_summaries = [r.get("rope_marker") or {} for r in results]
     for key in ("visible_rate", "valid_rate", "visible_mean",
                 "valid_after_noise_mean", "camera_estimates_mean",
-                "cameras_mean", "dropout_mean"):
+                "cameras_mean", "dropout_mean", "total_ms", "render_ms",
+                "algo_ms"):
         vals = [float(s[key]) for s in rope_summaries if key in s]
         if vals:
             summary[f"rope_marker_{key}"] = float(np.mean(vals))
@@ -2306,6 +2350,12 @@ def summarize_results(results):
                if s.get("source", "")]
     if sources:
         summary["rope_marker_source"] = Counter(sources).most_common(1)[0][0]
+    compute_real_ms = 0.0
+    for key in ("rl_action_ms", "obs_pred_ms", "cable_latent_pred_ms",
+                "vision_algo_ms", "rope_marker_algo_ms"):
+        compute_real_ms += float(summary.get(key, 0.0) or 0.0)
+    if compute_real_ms > 0.0:
+        summary["compute_hz_real_est"] = float(1000.0 / compute_real_ms)
     return summary
 
 
@@ -2627,8 +2677,12 @@ def run_wind_benchmark(args, config):
                   f"rl={summary.get('rl_action_ms', 0):.2f}ms "
                   f"pred={summary.get('obs_pred_ms', 0):.2f}ms "
                   f"clp={summary.get('cable_latent_pred_ms', 0):.2f}ms "
+                  f"vis={summary.get('vision_valid_rate', 0)*100:.0f}% "
+                  f"vAlgo={summary.get('vision_algo_ms', 0):.2f}ms "
                   f"rope={summary.get('rope_marker_valid_rate', 0)*100:.0f}% "
-                  f"hz={summary.get('compute_hz_est', 0):.0f} "
+                  f"ropeAlgo={summary.get('rope_marker_algo_ms', 0):.2f}ms "
+                  f"hzModel={summary.get('compute_hz_est', 0):.0f} "
+                  f"hzReal={summary.get('compute_hz_real_est', 0):.0f} "
                   f"elapsed={time.perf_counter()-t_mode:.1f}s",
                   flush=True)
 
@@ -2650,7 +2704,9 @@ def run_wind_benchmark(args, config):
               f"steps={row['avg_steps']:6.1f} "
               f"avgKE={row.get('avg_ke_mJ', 0):6.1f}mJ "
               f"p95KE={row.get('p95_ke_mJ', 0):6.1f}mJ "
-              f"plV_rms={row.get('pl_vel_rms', 0):.3f}")
+              f"plV_rms={row.get('pl_vel_rms', 0):.3f} "
+              f"vis={row.get('vision_valid_rate', 0)*100:.0f}% "
+              f"hzReal={row.get('compute_hz_real_est', 0):.0f}")
     print(f"\nSaved benchmark CSV: {out_path}")
     if bool(getattr(args, "plot_benchmark", False)):
         plot_wind_benchmark_csv(out_path, getattr(args, "plot_out_dir", None))
@@ -3143,6 +3199,26 @@ def main():
                         help="keep cable latent dims but feed zeros for ablation")
     parser.add_argument("--disable-cable-obs", action="store_true",
                         help="remove cable latent dims; use only with matching policies")
+    parser.add_argument("--descent-z-soft-gate-full", type=float, default=None,
+                        help="descent controller full-z-speed XY gate override")
+    parser.add_argument("--descent-z-hard-gate", type=float, default=None,
+                        help="descent controller hard XY gate override")
+    parser.add_argument("--descent-z-min-speed-frac", type=float, default=None,
+                        help="descent controller minimum z-speed fraction override")
+    parser.add_argument("--descent-z-trickle-xy-gate", type=float, default=None,
+                        help="descent controller outer trickle XY gate override")
+    parser.add_argument("--descent-base-v-max-z", type=float, default=None,
+                        help="descent controller base vertical speed override")
+    parser.add_argument("--descent-alignment-z-gate", type=float, default=None,
+                        help="descent reward alignment z gate override")
+    parser.add_argument("--descent-premature-descent-xy-gate", type=float,
+                        default=None,
+                        help="descent reward premature descent XY gate override")
+    parser.add_argument("--descent-action-rms-free", type=float, default=None,
+                        help="descent reward action RMS free band override")
+    parser.add_argument("--descent-action-magnitude-coef", type=float,
+                        default=None,
+                        help="descent reward action magnitude coefficient override")
     parser.add_argument("--episodes-per-bin", type=int, default=512,
                         help="episodes per wind bin for --compare-wind-bins")
     parser.add_argument("--benchmark-rl-only", action="store_true",

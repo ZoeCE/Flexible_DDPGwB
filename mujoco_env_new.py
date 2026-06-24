@@ -35,6 +35,7 @@ import re
 import copy
 import heapq
 import tempfile
+import time
 import mujoco
 import mujoco.viewer
 import numpy as np
@@ -191,6 +192,7 @@ class CableRobotEnvWithObstacles:
         self._vision_frame_cache = {}
         self._vision_last_fused_pose = None
         self._vision_debug_dump_count = 0
+        self._vision_last_timing = {}
         self._vision_last_camera_statuses = []
 
         self.render_mode = cfg_sim["render"]
@@ -711,6 +713,8 @@ class CableRobotEnvWithObstacles:
 
     def _rope_marker_opencv_rgbd_world_estimates(self):
         """Estimate rope markers from RGB color blobs and RGB-D back-projection."""
+        t_total0 = time.perf_counter()
+        render_time_s = 0.0
         cfg_marker = self.config.get("rope_markers", {})
         n_markers = max(0, int(cfg_marker.get("markers_per_rope", 5)))
         markers_total = len(getattr(self, "_rope_marker_sites", []))
@@ -726,7 +730,9 @@ class CableRobotEnvWithObstacles:
             cam_name = str(cam_cfg.get("name", "rgbd"))
             if self._vision_camera_id(cam_name) < 0:
                 continue
+            t_render0 = time.perf_counter()
             rendered = self._render_rgbd_camera(cam_cfg)
+            render_time_s += time.perf_counter() - t_render0
             if rendered is None:
                 continue
             rgb, depth = rendered
@@ -761,6 +767,8 @@ class CableRobotEnvWithObstacles:
 
         estimates, world_clusters, support_count = (
             self._cluster_rope_marker_world_points(world_points, n_markers))
+        total_s = time.perf_counter() - t_total0
+        algo_s = max(0.0, total_s - render_time_s)
         self._rope_marker_feature_last_diag = {
             "source": "opencv_rgbd",
             "markers_total": markers_total,
@@ -773,6 +781,9 @@ class CableRobotEnvWithObstacles:
             "world_clusters": int(world_clusters),
             "world_cluster_support": int(support_count),
             "camera_names": camera_names,
+            "total_ms": float(1000.0 * total_s),
+            "render_ms": float(1000.0 * render_time_s),
+            "algo_ms": float(1000.0 * algo_s),
         }
         if error:
             self._rope_marker_feature_last_diag["error"] = error
@@ -1261,12 +1272,16 @@ class CableRobotEnvWithObstacles:
                 print(f"[vision] debug frame dump failed: {exc}")
 
     def _estimate_payload_pose_from_rgbd(self):
+        t_total0 = time.perf_counter()
+        render_time_s = 0.0
         estimator = self._ensure_vision_estimator()
         estimates = []
         statuses = []
         for cam_cfg in list(self.cfg_vision.get("cameras", [])):
             cam_name = str(cam_cfg.get("name", "rgbd"))
+            t_render0 = time.perf_counter()
             rendered = self._render_rgbd_camera(cam_cfg)
+            render_time_s += time.perf_counter() - t_render0
             if rendered is None:
                 statuses.append({
                     "name": cam_name,
@@ -1315,9 +1330,17 @@ class CableRobotEnvWithObstacles:
                 })
         self._vision_last_camera_statuses = copy.deepcopy(statuses)
         fused = estimator.fuse(estimates)
+        total_s = time.perf_counter() - t_total0
+        timing = {
+            "total_ms": float(1000.0 * total_s),
+            "render_ms": float(1000.0 * render_time_s),
+            "algo_ms": float(1000.0 * max(0.0, total_s - render_time_s)),
+        }
+        self._vision_last_timing = timing
         if fused is None:
             return None
         fused["camera_statuses"] = copy.deepcopy(statuses)
+        fused.update(timing)
         return fused
 
     def _nominal_vision_measurement(self, reason="no_detection"):
@@ -1328,6 +1351,7 @@ class CableRobotEnvWithObstacles:
             held["failure_reason"] = reason
             held["camera_statuses"] = copy.deepcopy(getattr(
                 self, "_vision_last_camera_statuses", []))
+            held.update(getattr(self, "_vision_last_timing", {}) or {})
             return held
         start_xy = np.asarray(getattr(self, "episode_start_xy",
                                       self.default_start_xy), dtype=np.float64)
@@ -1349,6 +1373,12 @@ class CableRobotEnvWithObstacles:
             "failure_reason": reason,
             "camera_statuses": copy.deepcopy(getattr(
                 self, "_vision_last_camera_statuses", [])),
+            "total_ms": float(getattr(
+                self, "_vision_last_timing", {}).get("total_ms", 0.0)),
+            "render_ms": float(getattr(
+                self, "_vision_last_timing", {}).get("render_ms", 0.0)),
+            "algo_ms": float(getattr(
+                self, "_vision_last_timing", {}).get("algo_ms", 0.0)),
         }
 
     def _opencv_pose_to_measurement(self, fused, period):
@@ -1388,6 +1418,9 @@ class CableRobotEnvWithObstacles:
             "camera_statuses": copy.deepcopy(fused.get(
                 "camera_statuses",
                 getattr(self, "_vision_last_camera_statuses", []))),
+            "total_ms": float(fused.get("total_ms", 0.0)),
+            "render_ms": float(fused.get("render_ms", 0.0)),
+            "algo_ms": float(fused.get("algo_ms", 0.0)),
         }
         self._vision_last_fused_pose = fused
         return meas
@@ -1404,6 +1437,7 @@ class CableRobotEnvWithObstacles:
             self._vision_last_fused_pose = None
             self._vision_last_camera_statuses = []
             self._vision_debug_dump_count = 0
+            self._vision_last_timing = {}
             return
 
         cfg = self.cfg_vision
@@ -1427,6 +1461,7 @@ class CableRobotEnvWithObstacles:
         self._vision_last_fused_pose = None
         self._vision_last_camera_statuses = []
         self._vision_debug_dump_count = 0
+        self._vision_last_timing = {}
 
         first = self._generate_vision_measurement(force=True)
         for _ in range(delay):
@@ -1668,6 +1703,9 @@ class CableRobotEnvWithObstacles:
             "depth_support": int(meas.get("depth_support", 0)),
             "failure_reason": str(meas.get("failure_reason", "")),
             "camera_statuses": copy.deepcopy(meas.get("camera_statuses", [])),
+            "total_ms": float(meas.get("total_ms", 0.0)),
+            "render_ms": float(meas.get("render_ms", 0.0)),
+            "algo_ms": float(meas.get("algo_ms", 0.0)),
         }
 
     def get_vision_measurement(self):

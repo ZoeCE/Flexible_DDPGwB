@@ -35,3 +35,4 @@ Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables
   bin 1/8 residual_rl progress 32/64 SR=6.2% avg_steps=114.2
   bin 1/8 residual_rl progress 40/64 SR=5.0% avg_steps=114.9
   bin 1/8 residual_rl progress 48/64 SR=4.2% avg_steps=115.2
+  bin 1/8 residual_rl progress 56/64 SR=3.6% avg_steps=114.8

@@ -1,0 +1,153 @@
+
+[Descent curriculum hardest task]
+  wind_speed_max: 10.00 m/s, sampled uniformly per episode
+  init_xy: +/-20.0 mm
+  init_payload_xy_vel: +/-0.012 m/s
+  init_tilt_noise: +/-0.005 rad
+  success_xy_tol: 5.0 mm
+  target_payload_z: 100 mm
+  z_tol/tilt_tol/yaw_tol: 20 mm / 0.050 rad / 0.080 rad
+
+[Descent train/test control settings]
+  pid_residual_mode: True
+  residual_dq_scale: 0.800
+  residual_acc_max_xy/z: 0.600 / 0.900
+  base vel_max_z_descent: 0.030 m/s
+  max_steps: 300
+  eval init: level=8, xy=+/-20.0mm, vel=+/-0.012m/s, tilt=+/-0.005rad, xy_tol=5.0mm
+
+[Benchmark] wind bins=[(0.0, 1.25), (1.25, 2.5), (2.5, 3.75), (3.75, 5.0), (5.0, 6.25), (6.25, 7.5), (7.5, 8.75), (8.75, 10.0)], episodes_per_bin=64
+[Benchmark] output=test_results/windbin_cmp_04_vision_payload_true_cable_obsPred.csv
+
+[Benchmark] preparing bin 1/8 0.00-1.25m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.3s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 1.0s
+[Benchmark] running bin 1/8 0.00-1.25m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 1/8 residual_rl progress 16/64 SR=81.2% avg_steps=110.4
+  bin 1/8 residual_rl progress 32/64 SR=90.6% avg_steps=111.2
+  bin 1/8 residual_rl progress 48/64 SR=93.8% avg_steps=110.7
+  bin 1/8 residual_rl progress 64/64 SR=89.1% avg_steps=110.8
+  -> SR=89.1% bSR=98.4% steps=110.8 KE=6.7mJ p95KE=35.5mJ rl=6.68ms pred=2.81ms clp=0.00ms vis=100% vAlgo=19.43ms rope=0% ropeAlgo=0.00ms hzModel=121 hzReal=35 elapsed=1907.1s
+[Benchmark] preparing bin 2/8 1.25-2.50m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 2/8 1.25-2.50m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 2/8 residual_rl progress 16/64 SR=87.5% avg_steps=112.9
+  bin 2/8 residual_rl progress 32/64 SR=87.5% avg_steps=111.0
+  bin 2/8 residual_rl progress 48/64 SR=87.5% avg_steps=111.1
+  bin 2/8 residual_rl progress 64/64 SR=87.5% avg_steps=111.2
+  -> SR=87.5% bSR=93.8% steps=111.2 KE=7.1mJ p95KE=37.9mJ rl=5.41ms pred=2.17ms clp=0.00ms vis=100% vAlgo=18.37ms rope=0% ropeAlgo=0.00ms hzModel=132 hzReal=39 elapsed=1837.1s
+[Benchmark] preparing bin 3/8 2.50-3.75m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 3/8 2.50-3.75m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 3/8 residual_rl progress 16/64 SR=75.0% avg_steps=110.4
+  bin 3/8 residual_rl progress 32/64 SR=84.4% avg_steps=110.7
+  bin 3/8 residual_rl progress 48/64 SR=83.3% avg_steps=111.9
+  bin 3/8 residual_rl progress 64/64 SR=81.2% avg_steps=111.7
+  -> SR=81.2% bSR=85.9% steps=111.7 KE=6.9mJ p95KE=36.1mJ rl=5.44ms pred=2.17ms clp=0.00ms vis=100% vAlgo=18.81ms rope=0% ropeAlgo=0.00ms hzModel=132 hzReal=38 elapsed=1855.0s
+[Benchmark] preparing bin 4/8 3.75-5.00m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 4/8 3.75-5.00m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 4/8 residual_rl progress 16/64 SR=56.2% avg_steps=114.5
+  bin 4/8 residual_rl progress 32/64 SR=59.4% avg_steps=115.5
+  bin 4/8 residual_rl progress 48/64 SR=58.3% avg_steps=115.3
+  bin 4/8 residual_rl progress 64/64 SR=64.1% avg_steps=113.8
+  -> SR=64.1% bSR=81.2% steps=113.8 KE=6.9mJ p95KE=34.6mJ rl=5.47ms pred=2.15ms clp=0.00ms vis=100% vAlgo=18.80ms rope=0% ropeAlgo=0.00ms hzModel=131 hzReal=38 elapsed=1890.8s
+[Benchmark] preparing bin 5/8 5.00-6.25m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 5/8 5.00-6.25m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 5/8 residual_rl progress 16/64 SR=62.5% avg_steps=118.3
+  bin 5/8 residual_rl progress 32/64 SR=46.9% avg_steps=121.4
+  bin 5/8 residual_rl progress 48/64 SR=41.7% avg_steps=124.6
+  bin 5/8 residual_rl progress 64/64 SR=40.6% avg_steps=124.6
+  -> SR=40.6% bSR=60.9% steps=124.6 KE=6.8mJ p95KE=34.0mJ rl=5.45ms pred=2.16ms clp=0.00ms vis=100% vAlgo=18.73ms rope=0% ropeAlgo=0.00ms hzModel=131 hzReal=38 elapsed=2065.4s
+[Benchmark] preparing bin 6/8 6.25-7.50m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 6/8 6.25-7.50m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 6/8 residual_rl progress 16/64 SR=12.5% avg_steps=146.9
+  bin 6/8 residual_rl progress 32/64 SR=15.6% avg_steps=141.8
+  bin 6/8 residual_rl progress 48/64 SR=22.9% avg_steps=140.2
+  bin 6/8 residual_rl progress 64/64 SR=23.4% avg_steps=140.1
+  -> SR=23.4% bSR=37.5% steps=140.1 KE=6.1mJ p95KE=30.9mJ rl=5.40ms pred=2.17ms clp=0.00ms vis=100% vAlgo=18.60ms rope=0% ropeAlgo=0.00ms hzModel=132 hzReal=38 elapsed=2318.1s
+[Benchmark] preparing bin 7/8 7.50-8.75m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 7/8 7.50-8.75m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 7/8 residual_rl progress 16/64 SR=0.0% avg_steps=177.4
+  bin 7/8 residual_rl progress 32/64 SR=0.0% avg_steps=186.3
+  bin 7/8 residual_rl progress 48/64 SR=2.1% avg_steps=195.2
+  bin 7/8 residual_rl progress 64/64 SR=3.1% avg_steps=200.1
+  -> SR=3.1% bSR=4.7% steps=200.1 KE=4.8mJ p95KE=24.4mJ rl=5.31ms pred=2.17ms clp=0.00ms vis=100% vAlgo=18.44ms rope=0% ropeAlgo=0.00ms hzModel=134 hzReal=39 elapsed=3291.9s
+[Benchmark] preparing bin 8/8 8.75-10.00m/s | residual_rl ...
+Updated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/demo_fourCable_withSteel_withSensor_cylinder.xml
+Generated: /mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/assets/iiwa14_four_cables_with_plate.xml
+  segments=10, segment_length=0.04 m -> total chain length 0.4000 m
+✅ IK Solver 初始化成功！
+[Benchmark] env ready in 0.1s
+[Benchmark] controllers ready
+[Benchmark] ckpt loaded in 0.1s
+[Benchmark] running bin 8/8 8.75-10.00m/s | residual_rl ...
+  [ObsPredictor-EVAL] loaded saves/descent_ppo_10hz_vision_pred_small_endpoint_fast_zgate_ft_continue_20260608_092016/ckpt_best_obs_predictor.pt; true obs every 2 control steps, obs_dim=86, target_mode=non_cable_latent
+  bin 8/8 residual_rl progress 16/64 SR=0.0% avg_steps=260.4
+  bin 8/8 residual_rl progress 32/64 SR=0.0% avg_steps=264.4
+  bin 8/8 residual_rl progress 48/64 SR=0.0% avg_steps=264.5
+  bin 8/8 residual_rl progress 64/64 SR=0.0% avg_steps=265.4
+  -> SR=0.0% bSR=0.0% steps=265.4 KE=4.2mJ p95KE=19.9mJ rl=5.27ms pred=2.16ms clp=0.00ms vis=100% vAlgo=18.31ms rope=0% ropeAlgo=0.00ms hzModel=135 hzReal=39 elapsed=4343.8s
+
+[Benchmark Summary]
+  bin 0 0.00-1.25m/s residual_rl: SR= 89.1% bSR= 98.4% steps= 110.8 avgKE=   6.7mJ p95KE=  35.5mJ plV_rms=0.038 vis=100% hzReal=35
+  bin 1 1.25-2.50m/s residual_rl: SR= 87.5% bSR= 93.8% steps= 111.2 avgKE=   7.1mJ p95KE=  37.9mJ plV_rms=0.038 vis=100% hzReal=39
+  bin 2 2.50-3.75m/s residual_rl: SR= 81.2% bSR= 85.9% steps= 111.7 avgKE=   6.9mJ p95KE=  36.1mJ plV_rms=0.037 vis=100% hzReal=38
+  bin 3 3.75-5.00m/s residual_rl: SR= 64.1% bSR= 81.2% steps= 113.8 avgKE=   6.9mJ p95KE=  34.6mJ plV_rms=0.038 vis=100% hzReal=38
+  bin 4 5.00-6.25m/s residual_rl: SR= 40.6% bSR= 60.9% steps= 124.6 avgKE=   6.8mJ p95KE=  34.0mJ plV_rms=0.035 vis=100% hzReal=38
+  bin 5 6.25-7.50m/s residual_rl: SR= 23.4% bSR= 37.5% steps= 140.1 avgKE=   6.1mJ p95KE=  30.9mJ plV_rms=0.033 vis=100% hzReal=38
+  bin 6 7.50-8.75m/s residual_rl: SR=  3.1% bSR=  4.7% steps= 200.1 avgKE=   4.8mJ p95KE=  24.4mJ plV_rms=0.029 vis=100% hzReal=39
+  bin 7 8.75-10.00m/s residual_rl: SR=  0.0% bSR=  0.0% steps= 265.4 avgKE=   4.2mJ p95KE=  19.9mJ plV_rms=0.027 vis=100% hzReal=39
+
+Saved benchmark CSV: test_results/windbin_cmp_04_vision_payload_true_cable_obsPred.csv
