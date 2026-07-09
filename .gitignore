@@ -12,7 +12,18 @@ saves/
 wandb/
 logs/
 results/
+*.log
+*.pid
+*.winpid
+*.tmp
 MUJOCO_LOG.TXT
+_cleanup_backup/
+
+# Local experiment archives and generated binary payloads
+*.tar
+*.tar.gz
+*.zip
+*.npz
 
 # ==========================================
 # 3. Python caches

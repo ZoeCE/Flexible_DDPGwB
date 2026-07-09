@@ -1,0 +1,267 @@
+\documentclass[10pt]{article}
+
+% Paper-ready LaTeX tables for the descent-stage experiments.
+% This file is standalone and can be compiled directly in Overleaf.
+% If inserting into an existing paper, copy only the table environments and
+% keep the package list below in the main paper preamble.
+
+\usepackage[a4paper,margin=16mm]{geometry}
+\usepackage[T1]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage{lmodern}
+\usepackage{booktabs}
+\usepackage{tabularx}
+\usepackage{array}
+\usepackage{caption}
+\usepackage{float}
+\usepackage{microtype}
+
+\captionsetup{font=footnotesize,labelfont=bf}
+\setlength{\tabcolsep}{3.5pt}
+\renewcommand{\arraystretch}{1.08}
+\newcolumntype{Y}{>{\raggedright\arraybackslash}X}
+
+\title{Paper Experiment Tables for Cable-Suspended Payload Insertion}
+\author{}
+\date{2026-07-06}
+
+\begin{document}
+\maketitle
+\vspace{-1.5em}
+\noindent
+These paper-ready tables summarize the final controlled-variable descent
+evaluation, the highest-difficulty ablation study, and the concentrated
+high-wind ablation stress test.  Unless otherwise stated,
+all entries use $n=512$ episodes.  Broad success denotes strict insertion plus
+lucky insertion; strict success counts only clean insertion.
+
+\begin{table}[t]
+\centering
+\caption{Positioning against related work.  The key gap is precision insertion of a flexible cable-suspended payload, where trajectory tracking, rigid peg-in-hole, and pure suspended-load transport do not cover the combined cable--wind--contact setting.}
+\label{tab:related_work_positioning}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.16\linewidth}p{0.22\linewidth}p{0.16\linewidth}p{0.20\linewidth}Y@{}}
+\toprule
+Area & Representative work & Task & Main limitation for our setting & Our positioning \\
+\midrule
+Cable-suspended RL & FLARE; RoVerFly; CrazyMARL & Agile flight, payload tracking, cooperative transport & No multi-hole precision insertion; contact is not the core objective & We address contact-rich insertion with a flexible suspended payload. \\
+Classical suspended-load control & PID/LQR/input shaping/MPC; multi-cable crane insertion studies & Anti-sway transport or single-hole insertion & Strong dependence on model accuracy; limited handling of wind, multi-segment rope, and insertion contact & We keep a simple controller as a stabilizing prior and learn the residual correction. \\
+Residual robot learning & Johannink et al.; Residual Policy Learning; ResiP & Contact-rich manipulation or rigid assembly & Usually rigid manipulators or BC/MPC bases, not flexible cable-suspended insertion & We use a domain PID base and learn residuals for cable, wind, and contact mismatch. \\
+Rigid/flexible insertion RL & Peg-in-hole RL; force-based assembly; flexible flat cable insertion & Direct insertion with robot arms or deformable cable handling & The manipulator directly applies contact forces; no suspended underactuated payload & Our payload is indirectly actuated through flexible cables. \\
+Privileged sensing and encoders & Asymmetric actor--critic; privileged latent policies & Terrain or object-state compression for deployable policies & Mostly locomotion or general manipulation; not 1-D cable-state compression & We compress high-dimensional cable state into a compact learned cable latent. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Core claims and final evidence.  The main comparison uses true observations for all methods, while deployable vision and prediction modules should be reported separately as sim-to-real extensions.}
+\label{tab:claims_to_results}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.18\linewidth}p{0.28\linewidth}p{0.27\linewidth}Y@{}}
+\toprule
+Claim & What must be shown & Final evidence & Paper interpretation \\
+\midrule
+New task regime & Success should degrade as rope, wind, and precision are added one factor at a time & Traditional controllers collapse from C2--C4, while residual RL remains robust & The controlled ladder isolates the sources of difficulty instead of mixing them in one coarse scale. \\
+Hybrid control is necessary & Classical experts and simplified MPC should fail under high model mismatch & At C4, PID/Damped-PD/MPC strict success is $0.0\%$, while residual RL reaches $68.2\%$ strict success & The learned residual is not merely polishing a solved controller; it handles flexible cable/contact/wind mismatch. \\
+Cable state matters & Removing cable information should reduce insertion reliability on the hardest setting & On C4, Full 8D reaches $69.5\%$ strict success, while w/o Cable reaches $48.2\%$; at wind $8$--$10$ m/s, strict success is $47.7\%$ vs. $34.0\%$ & Cable information mainly reduces stuck-on-rebar failures and improves clean insertion. \\
+Compact cable latent is effective & A larger latent should not automatically outperform the compact one & Full 8D outperforms Full 16D in broad success, strict success, swing energy, and swing angle & The selected trainable 8D cable encoder is a better mainline than simply increasing latent size. \\
+Temporal memory refines clean insertion & Removing recurrent memory should reveal whether the recurrent policy is essential or mainly improves insertion quality & The matched 8D MLP reaches $66.6\%$ strict success, while the LSTM reaches $69.5\%$; under wind $8$--$10$ m/s, the LSTM keeps higher strict success & Most capability comes from residual control plus cable state; LSTM slightly improves clean insertion and stability. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Controlled-variable evaluation ladder for the final main comparison.  The base setting is omitted from the paper table; each displayed level adds one physical factor on top of the previous displayed level.}
+\label{tab:controlled_ladder}
+\footnotesize
+\begin{tabular}{@{}clccc@{}}
+\toprule
+Level & Added factor & Hole/rebar & Rope & Init. disturb. \\
+\midrule
+C1 & Initial randomization & 8.0 & 4 seg & L5-scale \\
+C2 & Flexible rope model & 8.0 & 10 seg & L5-scale \\
+C3 & High wind, $6$--$10$ m/s & 8.0 & 10 seg & L5-scale \\
+C4 & Precision insertion & 4.0 & 10 seg & L5-scale \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Main comparison methods.  All rows in the final controlled comparison use true environment observations, so the comparison isolates controller and representation differences rather than perception failures.}
+\label{tab:main_methods}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.14\linewidth}p{0.22\linewidth}p{0.25\linewidth}Y@{}}
+\toprule
+Method & Observation & Control structure & Purpose in the paper \\
+\midrule
+PID & True environment state & Hand-designed PID descent controller & Simple classical baseline. \\
+Damped-PD & True environment state & PID variant without integral action and with stronger damping & Anti-swing classical baseline. \\
+MPC & True environment state & Simplified shooting MPC & Model-based baseline; expected to degrade under rope and contact mismatch. \\
+Residual RL & True environment state & PID base + residual PPO + trainable 8D cable encoder & Main method for the controlled-variable comparison. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Controlled-variable descent comparison.  Each cell reports broad success rate in percent, where broad success counts clean insertion plus lucky insertion.}
+\label{tab:formal_interval_success}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{llrrrr}
+\toprule
+Level & Increment & PID & Damped-PD & MPC & Residual RL \\
+\midrule
+C1 & Initial randomization
+   & $58.8$ & $65.6$ & $83.0$ & $\mathbf{100.0}$ \\
+C2 & + 10-segment rope
+   & $25.8$ & $24.0$ & $0.0$ & $\mathbf{100.0}$ \\
+C3 & + high wind $6$--$10$ m/s
+   & $25.2$ & $24.0$ & $0.0$ & $\mathbf{92.8}$ \\
+C4 & + ratio-4 precision
+   & $1.2$ & $0.4$ & $0.0$ & $\mathbf{77.3}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Stability diagnostics on the controlled-variable ladder.  Values are average swing kinetic energy in mJ and average swing angle in degrees.}
+\label{tab:formal_interval_stability}
+\footnotesize
+\setlength{\tabcolsep}{4.5pt}
+\begin{tabular}{llrrrr}
+\toprule
+Level & Metric & PID & Damped-PD & MPC & Residual RL \\
+\midrule
+C1 & KE / angle
+   & $231.9 / 9.44$ & $235.5 / 8.81$ & $51.3 / 2.81$ & $\mathbf{10.7 / 0.89}$ \\
+C2 & KE / angle
+   & $720.8 / 14.85$ & $712.5 / 14.70$ & $1088.4 / 16.72$ & $\mathbf{12.3 / 0.93}$ \\
+C3 & KE / angle
+   & $731.3 / 14.90$ & $717.5 / 14.86$ & $1079.4 / 16.64$ & $\mathbf{10.7 / 1.51}$ \\
+C4 & KE / angle
+   & $659.5 / 14.80$ & $648.5 / 14.48$ & $947.0 / 15.57$ & $\mathbf{10.5 / 1.47}$ \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{High-wind highest-difficulty ablation results on C4.  Each row reports broad success / strict success in percent, followed by average swing kinetic energy and average swing angle.}
+\label{tab:formal_interval_ablation}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{\linewidth}{@{}Yrrrrr@{}}
+\toprule
+Variant & Broad & Strict & Avg. KE & Avg. angle & Strict count \\
+\midrule
+Full 8D cable encoder + LSTM
+  & $79.3$ & $\mathbf{69.5}$ & $10.6$ & $\mathbf{1.47}$ & $\mathbf{356/512}$ \\
+w/o Cable latent
+  & $61.3$ & $48.2$ & $8.8$ & $1.61$ & $247/512$ \\
+Full 16D cable encoder
+  & $74.6$ & $67.0$ & $15.7$ & $1.69$ & $343/512$ \\
+w/o LSTM (MLP, trainable 8D)
+  & $\mathbf{81.6}$ & $66.6$ & $13.2$ & $1.80$ & $341/512$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Concentrated high-wind C4 ablation with wind sampled from $8$--$10$ m/s.  Broad success, strict success, and average swing angle are reported.  Full16D is omitted by design.}
+\label{tab:formal_interval_ablation_wind8to10}
+\footnotesize
+\setlength{\tabcolsep}{4pt}
+\begin{tabularx}{0.82\linewidth}{@{}Yrrr@{}}
+\toprule
+Variant & Broad SR & Strict SR & Avg. angle \\
+\midrule
+Full 8D cable encoder + LSTM
+  & $56.6$ & $\mathbf{47.7}$ & $\mathbf{1.66}$ \\
+w/o Cable latent
+  & $44.7$ & $34.0$ & $1.77$ \\
+w/o LSTM (MLP, trainable 8D)
+  & $\mathbf{56.8}$ & $43.9$ & $1.98$ \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Termination composition on the hardest controlled-comparison level C4.  Counts are out of 512 episodes.}
+\label{tab:formal_interval_c4_terminations}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabular}{lrrrrrr}
+\toprule
+Method & Strict success & Lucky insert & Timeout & Early stop & Instability & Stuck \\
+\midrule
+PID & 0 & 6 & 394 & 86 & 0 & 26 \\
+Damped-PD & 0 & 2 & 405 & 78 & 2 & 25 \\
+MPC & 0 & 0 & 512 & 0 & 0 & 0 \\
+Residual RL & 349 & 47 & 31 & 0 & 0 & 85 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Termination composition for the C4 ablation study.  Counts are out of 512 episodes.}
+\label{tab:formal_interval_ablation_terminations}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\linewidth}{@{}Yrrrrrr@{}}
+\toprule
+Variant & Strict success & Lucky insert & Timeout & Early stop & Instability & Stuck \\
+\midrule
+Full 8D cable encoder + LSTM & 356 & 50 & 19 & 0 & 0 & 87 \\
+w/o Cable latent & 247 & 67 & 36 & 0 & 0 & 162 \\
+Full 16D cable encoder & 343 & 39 & 35 & 0 & 0 & 95 \\
+w/o LSTM (MLP, trainable 8D) & 341 & 77 & 8 & 0 & 0 & 86 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Termination composition for the concentrated high-wind C4 ablation with wind sampled from $8$--$10$ m/s.  Counts are out of 512 episodes.}
+\label{tab:formal_interval_ablation_wind8to10_terminations}
+\footnotesize
+\setlength{\tabcolsep}{5pt}
+\begin{tabularx}{\linewidth}{@{}Yrrrr@{}}
+\toprule
+Variant & Strict success & Lucky insert & Timeout & Stuck \\
+\midrule
+Full 8D cable encoder + LSTM & 244 & 46 & 41 & 181 \\
+w/o Cable latent & 174 & 55 & 84 & 199 \\
+w/o LSTM (MLP, trainable 8D) & 225 & 66 & 21 & 200 \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\begin{table}[t]
+\centering
+\caption{Recommended paper use of completed evidence.  The controlled-variable ladder should be the main result; older mixed-factor and deployment studies should support the narrative but not replace the causal comparison.}
+\label{tab:completed_evidence}
+\footnotesize
+\begin{tabularx}{\linewidth}{@{}p{0.22\linewidth}p{0.23\linewidth}p{0.12\linewidth}p{0.13\linewidth}Y@{}}
+\toprule
+Experiment / data source & Main setting & Episodes & Status & Paper use \\
+\midrule
+Controlled-variable ladder & PID, Damped-PD, MPC, Residual RL, true observation & 512/group & Completed & Main comparison table and primary success plot. \\
+C4 ablation & Full8D, w/o Cable, Full16D, matched MLP8D & 512/group & Completed & Main ablation table; matched 8D MLP replaces the legacy 32D row. \\
+C4 wind $8$--$10$ m/s ablation & Full8D, w/o Cable, matched MLP8D & 512/group & Completed & Stress test for concentrated high wind; Full16D intentionally omitted. \\
+Old five-level sim2real ladder & Vision + OpenCV rope markers + CableLatPred & 32/level & Completed & Supporting deployment result; mixed difficulty factors. \\
+Traditional optimized ladder & PID, Damped-PD, MPC, true observation & 128/level/expert & Completed & Superseded by controlled ladder; useful as historical baseline development. \\
+No-PID/full-action attempts & Distillation, DAgger, PPO variants & multiple runs & Completed diagnostic & Negative evidence for PID-base necessity; include only if a clean final row is added. \\
+A1--A4 ObsPred ablations & P2/P3 prediction, full/no-cable branches & trained/evaluated & Completed/diagnostic & Supplementary low-rate sensing study. \\
+\bottomrule
+\end{tabularx}
+\end{table}
+
+\end{document}

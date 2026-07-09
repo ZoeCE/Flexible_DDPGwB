@@ -7,6 +7,32 @@ from pathlib import Path
 import sys
 import re
 import math
+import os
+
+
+def _fmt_qpos_value(value):
+    value = float(value)
+    if abs(value - round(value)) < 1e-12:
+        return str(int(round(value)))
+    return f"{value:.8f}".rstrip("0").rstrip(".")
+
+
+def _default_home_keyframe_xml(cfg, num_segments):
+    """Return the demo XML keyframe used by the default 10-segment model."""
+    if int(num_segments) != 10:
+        return ""
+    arm_home = list(cfg.get("reset", {}).get("init_qpos_arm", []))
+    if len(arm_home) != 7:
+        return ""
+    rope_quats = [1, 0, 0, 0] * (4 * int(num_segments))
+    prefab_home = [0.2, 0.3, 0.5, 1, 0, 0, 0]
+    qpos = " ".join(_fmt_qpos_value(v) for v in (
+        arm_home + rope_quats + prefab_home))
+    return (
+        '  <!-- Full nq vector: arm home + rope ball joints + prefab free joint -->\n'
+        '  <keyframe>\n'
+        f'    <key name="home" qpos="{qpos}"/>\n'
+        '  </keyframe>')
 
 
 def _ensure_vision_marker_assets(assets_dir, cfg_vision):
@@ -36,6 +62,14 @@ def _ensure_vision_marker_assets(assets_dir, cfg_vision):
     grid_px = int(modules * module_px)
     asset_lines = []
     geom_lines = []
+
+    def _valid_png(path):
+        try:
+            return (path.is_file() and path.stat().st_size > 128 and
+                    cv2.imread(str(path), cv2.IMREAD_UNCHANGED) is not None)
+        except Exception:
+            return False
+
     for marker in markers:
         marker_id = int(marker.get("id", 0))
         length = float(marker.get("length", 0.06))
@@ -71,19 +105,26 @@ def _ensure_vision_marker_assets(assets_dir, cfg_vision):
 
         name = f"vision_marker_{marker_id}"
         img_path = assets_dir / f"{name}.png"
-        if hasattr(cv2.aruco, "generateImageMarker"):
-            try:
-                img = cv2.aruco.generateImageMarker(
-                    dictionary, marker_id, tex_px, None, border_bits)
-            except TypeError:
-                img = cv2.aruco.generateImageMarker(dictionary, marker_id, tex_px)
-        else:
-            try:
-                img = cv2.aruco.drawMarker(
-                    dictionary, marker_id, tex_px, borderBits=border_bits)
-            except TypeError:
-                img = cv2.aruco.drawMarker(dictionary, marker_id, tex_px)
-        cv2.imwrite(str(img_path), img)
+        if not _valid_png(img_path):
+            if hasattr(cv2.aruco, "generateImageMarker"):
+                try:
+                    img = cv2.aruco.generateImageMarker(
+                        dictionary, marker_id, tex_px, None, border_bits)
+                except TypeError:
+                    img = cv2.aruco.generateImageMarker(
+                        dictionary, marker_id, tex_px)
+            else:
+                try:
+                    img = cv2.aruco.drawMarker(
+                        dictionary, marker_id, tex_px, borderBits=border_bits)
+                except TypeError:
+                    img = cv2.aruco.drawMarker(dictionary, marker_id, tex_px)
+            tmp_path = img_path.with_name(
+                f"{img_path.stem}.{os.getpid()}.tmp{img_path.suffix}")
+            ok = cv2.imwrite(str(tmp_path), img)
+            if not ok or not _valid_png(tmp_path):
+                raise RuntimeError(f"failed to write marker PNG: {tmp_path}")
+            tmp_path.replace(img_path)
         asset_lines.append(
             f'    <texture name="{name}_tex" type="2d" file="{img_path.name}"/>')
         asset_lines.append(
@@ -197,40 +238,59 @@ def _dot(a, b):
     return sum(float(a[i]) * float(b[i]) for i in range(3))
 
 
-def _rope_marker_segment_indices(num_segments, marker_cfg):
+def _rope_marker_specs(num_segments, marker_cfg):
+    """Marker placement by normalized rope arclength, independent of segment count."""
     if not bool(marker_cfg.get("enabled", False)):
         return []
+    nseg = max(1, int(num_segments))
+    frac = max(0.05, min(0.95, float(marker_cfg.get(
+        "position_fraction", 0.55))))
     explicit = marker_cfg.get("segment_indices", None)
     if explicit:
-        out = []
+        positions = []
         for idx in explicit:
             ii = int(idx)
-            if 0 <= ii < int(num_segments):
-                out.append(ii)
-        return sorted(dict.fromkeys(out))
+            if 0 <= ii < nseg:
+                positions.append((ii + frac) / float(nseg))
+    else:
+        n_markers = max(0, int(marker_cfg.get("markers_per_rope", 5)))
+        if n_markers <= 0:
+            return []
+        if bool(marker_cfg.get("lower_half_only", True)):
+            positions = [
+                0.5 + 0.5 * (mi + frac) / float(n_markers)
+                for mi in range(n_markers)
+            ]
+        elif n_markers == 1:
+            positions = [0.5]
+        else:
+            positions = [
+                (mi + frac) / float(n_markers)
+                for mi in range(n_markers)
+            ]
 
-    n_markers = max(0, int(marker_cfg.get("markers_per_rope", 5)))
-    if n_markers <= 0:
-        return []
-    if bool(marker_cfg.get("lower_half_only", True)):
-        start = max(0, int(num_segments) - n_markers)
-        return list(range(start, int(num_segments)))
-
-    if n_markers == 1:
-        return [max(0, int(num_segments) // 2)]
-    return sorted(dict.fromkeys(
-        int(round(v)) for v in
-        [i * (int(num_segments) - 1) / float(n_markers - 1)
-         for i in range(n_markers)]
-    ))
+    specs = []
+    for marker_idx, pos_frac in enumerate(positions):
+        pos_unit = max(0.0, min(float(pos_frac) * nseg, nseg - 1e-6))
+        segment_idx = int(math.floor(pos_unit))
+        local_fraction = pos_unit - segment_idx
+        specs.append({
+            "marker_idx": marker_idx,
+            "segment_idx": segment_idx,
+            "local_fraction": max(1e-4, min(0.9999, local_fraction)),
+        })
+    return specs
 
 
 def _rope_marker_lines(rope_name, segment_idx, marker_idx, indent,
-                       segment_length, marker_cfg):
+                       segment_length, marker_cfg, local_fraction=None):
     if not bool(marker_cfg.get("enabled", False)):
         return []
-    frac = max(0.05, min(0.95, float(marker_cfg.get(
-        "position_fraction", 0.55))))
+    if local_fraction is not None:
+        frac = max(1e-4, min(0.9999, float(local_fraction)))
+    else:
+        frac = max(0.05, min(0.95, float(marker_cfg.get(
+            "position_fraction", 0.55))))
     z = float(segment_length) * frac
     marker_radius = max(1e-4, float(marker_cfg.get("marker_radius", 0.004)))
     ring_radius = max(marker_radius, float(marker_cfg.get("ring_radius", 0.006)))
@@ -420,8 +480,10 @@ def generate_single_rope_xml(
     lines = []
     sz = f"{capsule_radius:.6f}"
     marker_cfg = marker_cfg or {}
-    marker_indices = _rope_marker_segment_indices(num_segments, marker_cfg)
-    marker_lookup = {seg_idx: mi for mi, seg_idx in enumerate(marker_indices)}
+    marker_specs = _rope_marker_specs(num_segments, marker_cfg)
+    marker_lookup = {}
+    for spec in marker_specs:
+        marker_lookup.setdefault(int(spec["segment_idx"]), []).append(spec)
 
     root_indent = indent_base
     lines.append(f'{root_indent}<body name="{rope_name}_root" pos="{root_pos}">')
@@ -431,10 +493,11 @@ def generate_single_rope_xml(
     lines.append(f'{root_indent}        size="{sz}"')
     lines.append(f'{root_indent}        mass="{segment_mass}"')
     lines.append(f'{root_indent}        material="rope"/>')
-    if 0 in marker_lookup:
+    for spec in marker_lookup.get(0, []):
         lines.extend(_rope_marker_lines(
-            rope_name, 0, marker_lookup[0], root_indent,
-            segment_length, marker_cfg))
+            rope_name, 0, int(spec["marker_idx"]), root_indent,
+            segment_length, marker_cfg,
+            local_fraction=float(spec["local_fraction"])))
     lines.append("")
 
     for i in range(1, num_segments - 1):
@@ -443,10 +506,11 @@ def generate_single_rope_xml(
         lines.append(f'{indent}  <geom type="capsule" fromto="0 0 0   0 0 {segment_length:.6f}"')
         lines.append(f'{indent}        size="{sz}" mass="{segment_mass}" material="rope"/>')
         lines.append(f'{indent}  <joint type="ball" damping="{damping}"/>')
-        if i in marker_lookup:
+        for spec in marker_lookup.get(i, []):
             lines.extend(_rope_marker_lines(
-                rope_name, i, marker_lookup[i], indent,
-                segment_length, marker_cfg))
+                rope_name, i, int(spec["marker_idx"]), indent,
+                segment_length, marker_cfg,
+                local_fraction=float(spec["local_fraction"])))
         lines.append("")
 
     last_idx = num_segments - 1
@@ -455,10 +519,11 @@ def generate_single_rope_xml(
     lines.append(f'{last_indent}  <geom type="capsule" fromto="0 0 0   0 0 {segment_length:.6f}"')
     lines.append(f'{last_indent}        size="{sz}" mass="{segment_mass}" material="rope"/>')
     lines.append(f'{last_indent}  <joint type="ball" damping="{damping}"/>')
-    if last_idx in marker_lookup:
+    for spec in marker_lookup.get(last_idx, []):
         lines.extend(_rope_marker_lines(
-            rope_name, last_idx, marker_lookup[last_idx], last_indent,
-            segment_length, marker_cfg))
+            rope_name, last_idx, int(spec["marker_idx"]), last_indent,
+            segment_length, marker_cfg,
+            local_fraction=float(spec["local_fraction"])))
     lines.append("")
     lines.append(f'{last_indent}  <site name="{rope_name}_end" pos="0 0 {segment_length:.6f}"')
     lines.append(f'{last_indent}        size="0.006" rgba="1 1 0 1"/>')
@@ -472,20 +537,26 @@ def generate_single_rope_xml(
     return "\n".join(lines)
 
 
-def main():
-    # Read all rope parameters from config.py (single source of truth)
-    project_root = Path(__file__).resolve().parent.parent
-    sys.path.insert(0, str(project_root))
-    import importlib
-    import config
-    importlib.reload(config)
-    from config import DEFAULT_CONFIG
+def main(config_override=None):
+    # Read all rope/payload/target parameters from the active config.  Passing a
+    # config lets experiment scripts build easier comparison tasks without
+    # changing DEFAULT_CONFIG or the residual-RL training setup.
+    if config_override is None:
+        project_root = Path(__file__).resolve().parent.parent
+        sys.path.insert(0, str(project_root))
+        import importlib
+        import config
+        importlib.reload(config)
+        from config import DEFAULT_CONFIG
+        cfg = DEFAULT_CONFIG
+    else:
+        cfg = config_override
 
-    cfg_rope   = DEFAULT_CONFIG["rope"]
-    cfg_rope_markers = DEFAULT_CONFIG.get("rope_markers", {})
-    cfg_prefab = DEFAULT_CONFIG["prefab"]
-    cfg_target = DEFAULT_CONFIG["target"]
-    cfg_vision = DEFAULT_CONFIG.get("vision", {})
+    cfg_rope   = cfg["rope"]
+    cfg_rope_markers = cfg.get("rope_markers", {})
+    cfg_prefab = cfg["prefab"]
+    cfg_target = cfg["target"]
+    cfg_vision = cfg.get("vision", {})
     NUM_SEGMENTS     = cfg_rope["num_segments"]
     SEGMENT_LENGTH_M = cfg_rope["segment_length"]
     ROPE_DAMPING     = cfg_rope["damping"]
@@ -579,6 +650,15 @@ def main():
     demo_xml = assets_dir / "demo_fourCable_withSteel_withSensor_cylinder.xml"
     if demo_xml.exists():
         demo = demo_xml.read_text(encoding="utf-8")
+        # Older generated demo files can contain a duplicated closing tag plus a
+        # truncated keyframe comment. Clean that up before applying the usual
+        # idempotent rewrites below.
+        demo = re.sub(
+            r"\n\s*</mujoco>\s*\n\s*l nq vector:[\s\S]*?(?=\n\s*<!-- Full nq vector:)",
+            "\n",
+            demo,
+            count=1,
+        )
         demo = re.sub(
             r'<include file="[^"]+"/>',
             '<include file="iiwa14_four_cables_with_plate.xml"/>',
@@ -649,6 +729,22 @@ def main():
             count=1,
         )
         demo = re.sub(r"\n\s*<!-- 四根吊索 -->[\s\S]*?</tendon>", "", demo, count=1)
+        if int(NUM_SEGMENTS) != 10:
+            demo = re.sub(
+                r"\n\s*<!-- Full nq vector:[\s\S]*?</keyframe>",
+                "",
+                demo,
+                count=1,
+            )
+        elif "Full nq vector:" not in demo:
+            keyframe_xml = _default_home_keyframe_xml(cfg, NUM_SEGMENTS)
+            if keyframe_xml:
+                demo = re.sub(
+                    r"\n\s*</mujoco>\s*$",
+                    "\n\n" + keyframe_xml + "\n\n</mujoco>\n",
+                    demo,
+                    count=1,
+                )
 
         # --- Rewrite prefab body from config ---
         pshape = cfg_prefab["shape"]

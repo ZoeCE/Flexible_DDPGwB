@@ -72,6 +72,245 @@ def wind_obs_scale(config):
                           config.get("wind", {}).get("speed_max", 16.5)))
 
 
+def deep_update_config(base, override):
+    out = copy.deepcopy(base)
+    for key, val in (override or {}).items():
+        if isinstance(val, dict) and isinstance(out.get(key), dict):
+            out[key] = deep_update_config(out[key], val)
+        else:
+            out[key] = copy.deepcopy(val)
+    return out
+
+
+def make_phase_base_expert(phase, config, ik_solver):
+    if phase == "descent":
+        kind = str(config.get("descent_rl", {}).get(
+            "base_expert", "joint_space")).strip().lower()
+        if kind in ("mpc", "traditional_mpc", "descent_mpc"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("mpc", config, ik_solver)
+        if kind in ("traditional_pid", "paper_pid"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("pid", config, ik_solver)
+        if kind in ("damped_pd", "traditional_damped_pd"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("damped_pd", config, ik_solver)
+    return JointSpaceExpert(config, ik_solver)
+
+
+REBAR4_POSITIONS = [
+    [0.035, 0.035], [0.035, -0.035],
+    [-0.035, 0.035], [-0.035, -0.035],
+]
+
+PAPER_TASK_START_XY = list(DEFAULT_CONFIG["task"]["default_start_xy"])
+PAPER_TASK_TARGET_XY = list(DEFAULT_CONFIG["task"]["default_target_xy"])
+PAPER_PAYLOAD_Z_CRUISE = float(DEFAULT_CONFIG["planning"]["payload_z_cruise"])
+PAPER_TARGET_Z_DESCENT = float(DEFAULT_CONFIG["planning"]["target_z_descent"])
+PAPER_DESCENT_MAX_STEPS = int(DEFAULT_CONFIG["descent_rl"]["max_steps"])
+PAPER_PAYLOAD_MASS = float(DEFAULT_CONFIG["prefab"]["mass"])
+PAPER_REBAR_RADIUS = 0.0025
+PAPER_REBAR_DIAMETER = 2.0 * PAPER_REBAR_RADIUS
+
+
+def _descent_level_profile(description, n_rebars, hole_m, rope_segments,
+                           init_xy_m, init_tilt_rad, xy_tol_m,
+                           yaw_tol_rad, tilt_tol_rad, wind_mps,
+                           rope_damping, rope_mass, mass_kg=PAPER_PAYLOAD_MASS,
+                           z_tol_m=0.024, early_stop_xy_fail=0.12):
+    rebar_positions = [[0.0, 0.0]] if n_rebars == 1 else REBAR4_POSITIONS
+    segment_length = 0.40 / max(1, int(rope_segments))
+    return {
+        "description": description,
+        "sim": {"max_steps": PAPER_DESCENT_MAX_STEPS},
+        "task": {
+            "default_start_xy": PAPER_TASK_START_XY,
+            "default_target_xy": PAPER_TASK_TARGET_XY,
+            "init_position_range": 0.0,
+            "target_xy_randomize": False,
+        },
+        "planning": {
+            "payload_z_cruise": PAPER_PAYLOAD_Z_CRUISE,
+            "target_z_descent": PAPER_TARGET_Z_DESCENT,
+        },
+        "rope": {
+            "num_segments": int(rope_segments),
+            "segment_length": segment_length,
+            "damping": float(rope_damping),
+            "segment_mass": float(rope_mass),
+        },
+        "prefab": {
+            "socket_hole_positions": rebar_positions,
+            "mass": float(PAPER_PAYLOAD_MASS if mass_kg is None else mass_kg),
+        },
+        "target": {
+            "rebar_positions": rebar_positions,
+            "rebar_radius": 0.0025,
+        },
+        # Keep insertion.* tolerances at the trained defaults. build_descent_obs
+        # uses them as policy-input normalization scales, so changing them for a
+        # paper ladder silently makes the pretrained policy out-of-distribution.
+        "paper_eval": {
+            "nominal_hole_size": float(hole_m),
+            "xy_tolerance": float(xy_tol_m),
+            "z_tolerance": float(z_tol_m),
+            "tilt_tolerance": float(tilt_tol_rad),
+            "yaw_tolerance": float(yaw_tol_rad),
+        },
+        "descent_rl": {
+            "init_xy_range": float(init_xy_m),
+            "init_vel_range": 0.0,
+            "init_tilt_range": float(init_tilt_rad),
+            "max_steps": PAPER_DESCENT_MAX_STEPS,
+            "early_stop_xy_fail": float(early_stop_xy_fail),
+            "early_stop_patience": 100,
+        },
+        "curriculum": {
+            "descent_levels": [{
+                "init_xy": float(init_xy_m),
+                "init_vel": 0.0,
+                "init_tilt": float(init_tilt_rad),
+                "xy_tol": float(xy_tol_m),
+                "wind_max": float(wind_mps),
+            }],
+            "descent_start_level": 0,
+            "descent_start_wind": float(wind_mps),
+        },
+        "step_logic": {
+            "instability_grace_steps": 30,
+            "swing_xy_max": 0.55,
+            "payload_tilt_max": 1.4,
+            "payload_yaw_max": 3.2,
+        },
+    }
+
+
+PAPER_DESCENT_TASK_PROFILES = {
+    "paper-l1": _descent_level_profile(
+        "L1: four rebars, nominal 46mm gate, 4 rope segments, no wind.",
+        n_rebars=4, hole_m=0.046, rope_segments=4, init_xy_m=0.010,
+        init_tilt_rad=0.0, xy_tol_m=0.020, yaw_tol_rad=3.20,
+        tilt_tol_rad=0.90, wind_mps=0.0, rope_damping=0.20,
+        rope_mass=0.015, z_tol_m=0.025,
+        early_stop_xy_fail=0.20),
+    "paper-l2": _descent_level_profile(
+        "L2: four rebars, nominal 30mm gate, 6 rope segments, no wind.",
+        n_rebars=4, hole_m=0.030, rope_segments=6, init_xy_m=0.012,
+        init_tilt_rad=0.002, xy_tol_m=0.012, yaw_tol_rad=0.70,
+        tilt_tol_rad=0.30, wind_mps=0.0, rope_damping=0.14,
+        rope_mass=0.012, z_tol_m=0.024,
+        early_stop_xy_fail=0.12),
+    "paper-l3": _descent_level_profile(
+        "L3: four rebars, nominal 24mm gate, 6 rope segments, 2m/s wind.",
+        n_rebars=4, hole_m=0.024, rope_segments=6, init_xy_m=0.014,
+        init_tilt_rad=0.002, xy_tol_m=0.010, yaw_tol_rad=0.35,
+        tilt_tol_rad=0.18, wind_mps=2.0, rope_damping=0.14,
+        rope_mass=0.012, z_tol_m=0.024,
+        early_stop_xy_fail=0.10),
+    "paper-l4": _descent_level_profile(
+        "L4: four rebars, nominal 24mm gate, 10 rope segments, 4m/s wind.",
+        n_rebars=4, hole_m=0.024, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.003, xy_tol_m=0.010, yaw_tol_rad=0.35,
+        tilt_tol_rad=0.18, wind_mps=4.0, rope_damping=0.05,
+        rope_mass=0.010, z_tol_m=0.024,
+        early_stop_xy_fail=0.10),
+    "paper-l5": _descent_level_profile(
+        "L5: four rebars, nominal 20mm gate, 10 rope segments, 6m/s wind.",
+        n_rebars=4, hole_m=0.020, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, xy_tol_m=0.007, yaw_tol_rad=0.20,
+        tilt_tol_rad=0.12, wind_mps=6.0, rope_damping=0.05,
+        rope_mass=0.010, z_tol_m=0.022,
+        early_stop_xy_fail=0.08),
+}
+
+
+def _controlled_variable_profile(description, hole_ratio, rope_segments,
+                                 init_xy_m, init_tilt_rad, wind_mps,
+                                 rope_damping, rope_mass,
+                                 z_tol_m=0.020, yaw_tol_rad=0.20,
+                                 tilt_tol_rad=0.12,
+                                 early_stop_xy_fail=0.08):
+    """Profile for cumulative controlled-variable paper comparisons.
+
+    Unlike the historical paper-l1..l5 profiles, these profiles intentionally
+    change the physical socket size so the rebar/hole ratio is a real task
+    variable.  Keep all non-target variables fixed between adjacent profiles.
+    """
+    hole_m = float(hole_ratio) * PAPER_REBAR_DIAMETER
+    xy_tol_m = max(0.001, 0.5 * hole_m - PAPER_REBAR_RADIUS)
+    profile = _descent_level_profile(
+        description=description,
+        n_rebars=4,
+        hole_m=hole_m,
+        rope_segments=rope_segments,
+        init_xy_m=init_xy_m,
+        init_tilt_rad=init_tilt_rad,
+        xy_tol_m=xy_tol_m,
+        yaw_tol_rad=yaw_tol_rad,
+        tilt_tol_rad=tilt_tol_rad,
+        wind_mps=wind_mps,
+        rope_damping=rope_damping,
+        rope_mass=rope_mass,
+        z_tol_m=z_tol_m,
+        early_stop_xy_fail=early_stop_xy_fail,
+    )
+    insertion = profile.setdefault("insertion", {})
+    insertion.update({
+        "success_z_tolerance": float(z_tol_m),
+        "physical_rebar_xy_tolerance": float(xy_tol_m),
+        "strict_lucky_reject_always": True,
+        "train_reject_lucky_rebar_insert": True,
+    })
+    profile.setdefault("prefab", {})["socket_hole_size"] = [hole_m, hole_m]
+    profile.setdefault("paper_eval", {})["hole_ratio"] = float(hole_ratio)
+    profile["paper_eval"]["physical_socket_hole_size"] = float(hole_m)
+    return profile
+
+
+PAPER_DESCENT_TASK_PROFILES.update({
+    "ctrl-c0-base": _controlled_variable_profile(
+        "C0 base: ratio 8.0, 4 rope segments, zero init disturbance, no wind.",
+        hole_ratio=8.0, rope_segments=4, init_xy_m=0.0,
+        init_tilt_rad=0.0, wind_mps=0.0, rope_damping=0.20,
+        rope_mass=0.015, early_stop_xy_fail=0.08),
+    "ctrl-c1-init": _controlled_variable_profile(
+        "C1: add original L5 initial randomization only.",
+        hole_ratio=8.0, rope_segments=4, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=0.0, rope_damping=0.20,
+        rope_mass=0.015, early_stop_xy_fail=0.08),
+    "ctrl-c2-rope10": _controlled_variable_profile(
+        "C2: add default 10-segment rope model before wind.",
+        hole_ratio=8.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=0.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+    "ctrl-c3-wind2": _controlled_variable_profile(
+        "C3: add 2m/s wind after switching to 10-segment rope.",
+        hole_ratio=8.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=2.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+    "ctrl-c4-wind6": _controlled_variable_profile(
+        "C4-6: increase wind to 6m/s with 10-segment rope.",
+        hole_ratio=8.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=6.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+    "ctrl-c4-wind8": _controlled_variable_profile(
+        "C4-8: increase wind to 8m/s with 10-segment rope.",
+        hole_ratio=8.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=8.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+    "ctrl-c5-ratio4-w6": _controlled_variable_profile(
+        "C5-6: tighten rebar/hole ratio from 8.0 to 4.0 on the 6m/s branch.",
+        hole_ratio=4.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=6.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+    "ctrl-c5-ratio4-w8": _controlled_variable_profile(
+        "C5-8: tighten rebar/hole ratio from 8.0 to 4.0 on the 8m/s branch.",
+        hole_ratio=4.0, rope_segments=10, init_xy_m=0.016,
+        init_tilt_rad=0.004, wind_mps=8.0, rope_damping=0.05,
+        rope_mass=0.010, early_stop_xy_fail=0.08),
+})
+
+
 def angle_diff_rad(a, b):
     d = float(a) - float(b)
     return float(np.arctan2(np.sin(d), np.cos(d)))
@@ -336,6 +575,43 @@ def write_vision_shadow_csv(results, out_path):
     return out_path
 
 
+def write_eval_summary_json(results, config, args, out_path):
+    if not out_path:
+        return None
+    summary = summarize_results(results)
+    summary.update({
+        "phase": str(getattr(args, "phase", "")),
+        "algo": str(getattr(args, "algo", "")),
+        "episodes_requested": int(getattr(args, "episodes", 0)),
+        "task_profile": str(config.get("task", {}).get("profile_name", "")),
+        "wind_speed_arg": float(getattr(args, "wind_speed", 0.0)),
+        "descent_base_expert": str(
+            config.get("descent_rl", {}).get("base_expert", "joint_space")),
+        "rope_segments": int(config.get("rope", {}).get("num_segments", 0)),
+        "socket_hole_size_m": float(np.asarray(
+            config.get("prefab", {}).get("socket_hole_size", [0.0]),
+            dtype=np.float64).reshape(-1)[0]),
+        "rebar_radius_m": float(config.get("target", {}).get(
+            "rebar_radius", PAPER_REBAR_RADIUS)),
+        "paper_eval": copy.deepcopy(config.get("paper_eval", {})),
+        "vision_shadow_eval": bool(getattr(args, "vision_shadow_eval", False)),
+        "vision_apply_to_env_obs": bool(
+            config.get("vision", {}).get("apply_to_env_obs", True)),
+        "obs_predictor_enabled": bool(
+            config.get("observation_predictor", {}).get("enabled", False)),
+        "obs_period": int(config.get("observation_predictor", {}).get(
+            "measurement_period_steps", 1)),
+        "cable_latent_predictor_enabled": bool(
+            config.get("cable_latent_predictor", {}).get("enabled", False)),
+        "rope_marker_feature_source": str(
+            config.get("rope_markers", {}).get("feature_source", "")),
+    })
+    os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(summary, f, ensure_ascii=False, indent=2, sort_keys=True)
+    return out_path
+
+
 def apply_control_frequency_override(config, control_freq_hz,
                                      keep_step_budget=False,
                                      scale_limits_with_dt=False):
@@ -411,6 +687,21 @@ from stability_metrics import StabilityMetrics  # [v12.6] 共享模块, 同时�
 
 def build_config(args):
     config = copy.deepcopy(DEFAULT_CONFIG)
+    profile_name = getattr(args, "task_profile", None)
+    if profile_name:
+        if profile_name not in PAPER_DESCENT_TASK_PROFILES:
+            valid = ", ".join(sorted(PAPER_DESCENT_TASK_PROFILES))
+            raise ValueError(f"Unknown task profile: {profile_name}. Valid: {valid}")
+        config = deep_update_config(
+            config, PAPER_DESCENT_TASK_PROFILES[profile_name])
+        config.setdefault("task", {})["profile_name"] = str(profile_name)
+    expert_override_path = getattr(args, "traditional_expert_overrides_json", None)
+    if expert_override_path:
+        with open(expert_override_path, "r", encoding="utf-8") as f:
+            payload = json.load(f)
+        overrides = payload.get("traditional_experts", payload)
+        config["traditional_experts"] = deep_update_config(
+            config.get("traditional_experts", {}), overrides)
     config["sim"]["render"] = args.render
     config["train"]["gpu_id"] = args.gpu
     config.setdefault("test", {})["wait_for_space_start"] = bool(
@@ -610,6 +901,21 @@ def build_config(args):
         ce_cfg["enabled"] = True
         ce_cfg["zero_obs"] = True
         ce_cfg.setdefault("output_dim", 32)
+    if getattr(args, "cable_encoder_output_dim", None) is not None:
+        _cable_dim = max(0, int(args.cable_encoder_output_dim))
+        ce_cfg = config.setdefault("cable_encoder", {})
+        ce_cfg["enabled"] = _cable_dim > 0
+        ce_cfg["zero_obs"] = _cable_dim <= 0
+        ce_cfg["output_dim"] = _cable_dim
+        phase = getattr(args, "phase", None)
+        if phase in (None, "descent", "pipeline"):
+            config.setdefault("descent_rl", {})["obs_dim"] = 44 + _cable_dim
+        if phase in (None, "cruise", "pipeline"):
+            config.setdefault("cruise_rl", {})["obs_dim"] = 45 + _cable_dim
+    if bool(getattr(args, "trainable_cable_encoder", False)):
+        config.setdefault("cable_encoder", {})["trainable"] = True
+    if bool(getattr(args, "frozen_cable_encoder", False)):
+        config.setdefault("cable_encoder", {})["trainable"] = False
     if bool(getattr(args, "disable_cable_obs", False)):
         ce_cfg = config.setdefault("cable_encoder", {})
         ce_cfg["enabled"] = False
@@ -621,6 +927,17 @@ def build_config(args):
         if phase in (None, "descent", "pipeline"):
             config.setdefault("descent_rl", {})["obs_dim"] = 44
     drl_cfg = config.setdefault("descent_rl", {})
+    if getattr(args, "descent_base_expert", None):
+        _base_expert = str(args.descent_base_expert).strip().lower()
+        if _base_expert == "pid":
+            _base_expert = "traditional_pid"
+        drl_cfg["base_expert"] = _base_expert
+    if bool(getattr(args, "disable_descent_pid_base", False)):
+        drl_cfg["pid_residual_mode"] = False
+        drl_cfg["include_pid_base_obs"] = bool(
+            getattr(args, "keep_descent_base_obs", False))
+    elif bool(getattr(args, "keep_descent_base_obs", False)):
+        drl_cfg["include_pid_base_obs"] = True
     for arg_name, cfg_key in [
         ("descent_z_soft_gate_full", "z_soft_gate_full"),
         ("descent_z_hard_gate", "z_hard_gate"),
@@ -729,6 +1046,59 @@ def load_agent(phase, algo, ckpt_path, config):
     return agent
 
 
+class _EvalObsPredictorEnsemble:
+    """Randomly select a vectorized-training ObsPred member per eval episode."""
+
+    def __init__(self, predictors, rng=None):
+        self.predictors = [p for p in predictors if p is not None]
+        if not self.predictors:
+            raise ValueError("empty evaluation observation-predictor ensemble")
+        self.rng = rng or np.random.default_rng()
+        self.last_member_idx = int(self.rng.integers(0, len(self.predictors)))
+        self.active = self.predictors[self.last_member_idx]
+        self.enabled = True
+        self.train_enabled = False
+        self.measurement_period = self.active.measurement_period
+
+    def reset(self, initial_obs):
+        self.last_member_idx = int(self.rng.integers(0, len(self.predictors)))
+        self.active = self.predictors[self.last_member_idx]
+        self.active.reset(initial_obs)
+
+    def predict_next(self, current_obs, action, phase=None):
+        return self.active.predict_next(current_obs, action, phase)
+
+    def observe_result(self, true_next_obs, next_step_index):
+        return self.active.observe_result(true_next_obs, next_step_index)
+
+
+class _EvalCableLatentPredictorEnsemble:
+    """Randomly select a vectorized-training CableLatPred member per episode."""
+
+    def __init__(self, predictors, rng=None):
+        self.predictors = [p for p in predictors if p is not None]
+        if not self.predictors:
+            raise ValueError("empty evaluation cable-latent predictor ensemble")
+        self.rng = rng or np.random.default_rng()
+        self.last_member_idx = int(self.rng.integers(0, len(self.predictors)))
+        self.active = self.predictors[self.last_member_idx]
+        self.enabled = True
+        self.train_enabled = False
+        self.visible_dim = self.active.visible_dim
+        self.latent_dim = self.active.latent_dim
+
+    def reset(self, initial_visible_obs=None):
+        self.last_member_idx = int(self.rng.integers(0, len(self.predictors)))
+        self.active = self.predictors[self.last_member_idx]
+        self.active.reset(initial_visible_obs)
+
+    def predict_and_update(self, visible_obs, action=None, phase=None,
+                           target_latent=None):
+        return self.active.predict_and_update(
+            visible_obs, action=action, phase=phase,
+            target_latent=target_latent)
+
+
 def build_eval_obs_predictor(config, phase, initial_obs, agent=None,
                              ckpt_path=None):
     """Build a frozen observation predictor for evaluation-time hidden steps."""
@@ -738,20 +1108,44 @@ def build_eval_obs_predictor(config, phase, initial_obs, agent=None,
     cfg["train_enabled"] = False
     from train_phase import _obs_pred_target_dim, _obs_pred_target_mode
     obs_dim = _obs_pred_target_dim(config, initial_obs, agent)
-    pred = build_observation_predictor(
-        config, phase, obs_dim, device=getattr(agent, "device", None))
-    if pred is None:
-        return None
-    pred.train_enabled = False
-    if hasattr(pred, "net"):
-        pred.net.eval()
-
     load_path = str(ckpt_path or cfg.get("checkpoint", "") or "").strip()
     if not load_path:
         raise ValueError("observation predictor is enabled but no checkpoint was provided")
     if not os.path.exists(load_path):
         raise FileNotFoundError(f"observation predictor checkpoint not found: {load_path}")
-    pred.load(load_path, map_location=getattr(pred, "device", None))
+
+    device = getattr(agent, "device", None)
+    ck = torch.load(load_path, map_location=device, weights_only=False)
+    if isinstance(ck, dict) and ck.get("type") == "ensemble":
+        states = [s for s in ck.get("predictors", []) if s is not None]
+        if not states:
+            raise ValueError(f"empty observation predictor ensemble: {load_path}")
+        predictors = []
+        for state in states:
+            pred_i = build_observation_predictor(
+                config, phase, obs_dim, device=device)
+            if pred_i is None:
+                continue
+            pred_i.train_enabled = False
+            pred_i.load_state_dict(state)
+            if hasattr(pred_i, "net"):
+                pred_i.net.eval()
+            predictors.append(pred_i)
+        seed = int(config.get("scene", {}).get("seed", 0) or 0) + 7919
+        pred = _EvalObsPredictorEnsemble(
+            predictors, rng=np.random.default_rng(seed))
+        print(f"  [ObsPredictor-EVAL] loaded ensemble {load_path}; "
+              f"members={len(predictors)}, selection=episode_random(seed={seed}); "
+              f"true obs every {pred.measurement_period} control steps, "
+              f"obs_dim={obs_dim}, target_mode={_obs_pred_target_mode(config)}")
+        return pred
+
+    pred = build_observation_predictor(
+        config, phase, obs_dim, device=device)
+    if pred is None:
+        return None
+    pred.train_enabled = False
+    pred.load_state_dict(ck)
     if hasattr(pred, "net"):
         pred.net.eval()
     print(f"  [ObsPredictor-EVAL] loaded {load_path}; "
@@ -778,14 +1172,6 @@ def build_eval_cable_latent_predictor(config, phase, visible_dim, agent=None,
     if not bool(cfg.get("enabled", False)):
         return None
     cfg["train_enabled"] = False
-    pred = build_cable_latent_predictor(
-        config, phase, visible_dim=visible_dim,
-        latent_dim=int(cfg.get("latent_dim", 32)),
-        action_dim=int(cfg.get("action_dim", 7)),
-        device=getattr(agent, "device", None))
-    if pred is None:
-        return None
-    pred.train_enabled = False
     load_path = str(ckpt_path or cfg.get("checkpoint", "") or "").strip()
     if not load_path:
         raise ValueError(
@@ -793,7 +1179,42 @@ def build_eval_cable_latent_predictor(config, phase, visible_dim, agent=None,
     if not os.path.exists(load_path):
         raise FileNotFoundError(
             f"cable latent predictor checkpoint not found: {load_path}")
-    pred.load(load_path, map_location=getattr(pred, "device", None))
+
+    device = getattr(agent, "device", None)
+    latent_dim = int(cfg.get("latent_dim", 32))
+    action_dim = int(cfg.get("action_dim", 7))
+    ck = torch.load(load_path, map_location=device, weights_only=False)
+    if isinstance(ck, dict) and ck.get("type") == "ensemble":
+        states = [s for s in ck.get("predictors", []) if s is not None]
+        if not states:
+            raise ValueError(f"empty cable latent predictor ensemble: {load_path}")
+        predictors = []
+        for state in states:
+            pred_i = build_cable_latent_predictor(
+                config, phase, visible_dim=visible_dim,
+                latent_dim=latent_dim, action_dim=action_dim, device=device)
+            if pred_i is None:
+                continue
+            pred_i.train_enabled = False
+            pred_i.load_state_dict(state)
+            if hasattr(pred_i, "net"):
+                pred_i.net.eval()
+            predictors.append(pred_i)
+        seed = int(config.get("scene", {}).get("seed", 0) or 0) + 15485863
+        pred = _EvalCableLatentPredictorEnsemble(
+            predictors, rng=np.random.default_rng(seed))
+        print(f"  [CableLatPred-EVAL] loaded ensemble {load_path}; "
+              f"members={len(predictors)}, selection=episode_random(seed={seed}); "
+              f"visible_dim={visible_dim}, latent_dim={pred.latent_dim}")
+        return pred
+
+    pred = build_cable_latent_predictor(
+        config, phase, visible_dim=visible_dim,
+        latent_dim=latent_dim, action_dim=action_dim, device=device)
+    if pred is None:
+        return None
+    pred.train_enabled = False
+    pred.load_state_dict(ck)
     if hasattr(pred, "net"):
         pred.net.eval()
     print(f"  [CableLatPred-EVAL] loaded {load_path}; "
@@ -1069,6 +1490,98 @@ def check_physical_insertion(env, config):
     return (ok_z and ok_xy and ok_tilt and ok_yaw and
             ok_rebar_success and ok_insert_success and
             ok_floor_success), detail
+
+
+def get_descent_terminal_diagnostics(env, config):
+    """Return compact physical terminal metrics for descent evaluation."""
+    cfg_ins = config.get("insertion", {})
+    cfg_pref = config.get("prefab", {})
+    cfg_tgt = config.get("target", {})
+    target_pz = float(cfg_ins.get("target_payload_z", 0.10))
+
+    socket_hole_size = cfg_pref.get("socket_hole_size", [0.014, 0.014])
+    socket_hole_radius = min(socket_hole_size[0], socket_hole_size[1]) / 2.0
+    rebar_radius = float(cfg_tgt.get("rebar_radius", 0.003))
+    xy_tol = max(socket_hole_radius - rebar_radius, 0.0)
+    z_tol = float(cfg_ins.get("success_z_tolerance", 0.020))
+    tilt_tol = float(cfg_ins.get("tilt_tolerance", 0.05))
+    yaw_tol = float(cfg_ins.get("yaw_tolerance", 0.08))
+    rebar_tol = float(cfg_ins.get("physical_rebar_xy_tolerance", xy_tol))
+
+    pl_pos = env.data.body('prefab').xpos.copy()
+    payload_z = float(pl_pos[2])
+    target_xy = env.target_pos.copy()
+    dtf = float(np.linalg.norm(pl_pos[:2] - target_xy))
+
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+    tilt = float(np.sqrt(pl_euler[0] ** 2 + pl_euler[1] ** 2))
+    abs_yaw = abs(float(pl_euler[2]))
+
+    try:
+        _, worst_rebar_err, mean_rebar_err = env._compute_rebar_errors(
+            pl_pos[:2], pl_mat)
+    except Exception:
+        worst_rebar_err = dtf
+        mean_rebar_err = dtf
+
+    insert_depth, hole_depth = _estimate_rebar_insertion_depth(env, config)
+    min_insert_depth = float(cfg_ins.get(
+        "physical_insert_depth_min", min(0.025, max(hole_depth, 0.0) * 0.5)))
+    floor_contact = _check_payload_floor_contact(env, config)
+    try:
+        hit_obstacle, hit_rebar = env._check_prefab_collision_with_obstacles()
+    except Exception:
+        hit_obstacle, hit_rebar = False, False
+    try:
+        dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
+        payload_vel = env.data.qvel[dof_idx:dof_idx + 3].copy()
+        payload_vz = float(payload_vel[2])
+        payload_vxy = float(np.linalg.norm(payload_vel[:2]))
+    except Exception:
+        payload_vz = 0.0
+        payload_vxy = 0.0
+
+    ok_z = abs(payload_z - target_pz) < z_tol
+    ok_xy = dtf < xy_tol
+    ok_tilt = tilt < tilt_tol
+    ok_yaw = abs_yaw < yaw_tol
+    ok_rebar = worst_rebar_err < rebar_tol
+    ok_insert = insert_depth >= min_insert_depth
+    detail = (
+        f"final z={payload_z*1000:.1f}mm dtf={dtf*1000:.1f}mm "
+        f"rebar={worst_rebar_err*1000:.1f}/{rebar_tol*1000:.1f}mm "
+        f"insert={insert_depth*1000:.1f}/{min_insert_depth*1000:.0f}mm "
+        f"tilt={tilt:.3f} yaw={abs_yaw:.3f} "
+        f"floor={int(floor_contact)} rebar_contact={int(hit_rebar)}")
+    return {
+        "payload_z_m": payload_z,
+        "target_payload_z_m": target_pz,
+        "dtf_m": dtf,
+        "xy_tol_m": xy_tol,
+        "tilt_rad": tilt,
+        "tilt_tol_rad": tilt_tol,
+        "yaw_rad": abs_yaw,
+        "yaw_tol_rad": yaw_tol,
+        "worst_rebar_err_m": float(worst_rebar_err),
+        "mean_rebar_err_m": float(mean_rebar_err),
+        "rebar_tol_m": rebar_tol,
+        "insert_depth_m": float(insert_depth),
+        "min_insert_depth_m": min_insert_depth,
+        "hole_depth_m": float(hole_depth),
+        "floor_contact": bool(floor_contact),
+        "hit_obstacle": bool(hit_obstacle),
+        "hit_rebar": bool(hit_rebar),
+        "payload_vxy_mps": payload_vxy,
+        "payload_vz_mps": payload_vz,
+        "ok_z": bool(ok_z),
+        "ok_xy": bool(ok_xy),
+        "ok_tilt": bool(ok_tilt),
+        "ok_yaw": bool(ok_yaw),
+        "ok_rebar": bool(ok_rebar),
+        "ok_insert": bool(ok_insert),
+        "detail": detail,
+    }
 
 
 def _cruise_handoff_status(state, config, step=0, max_steps=500, env=None):
@@ -1371,12 +1884,20 @@ def check_phase_transition(phase, state, config, step=0, max_steps=500, env=None
     return False
 
 
-def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos):
+def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos,
+                                  force_descent=False):
     if planned_path is None or len(planned_path) == 0:
+        return
+    tracker = getattr(expert, "tracker", None)
+    if tracker is None:
         return
     dists = [np.linalg.norm(pl_pos - wp) for wp in planned_path]
     nearest_idx = int(np.argmin(dists))
-    expert.tracker.current_idx = nearest_idx
+    tracker.current_idx = nearest_idx
+    descent_start = getattr(tracker, "_descent_start_idx", None)
+    if force_descent or (
+            descent_start is not None and nearest_idx >= int(descent_start)):
+        tracker._is_descending = True
 
 
 def _truncate_path_for_pipeline_cruise(planned_path, config):
@@ -1417,6 +1938,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                              REWARD_FNS, REWARD_STATES,
                              _apply_descent_pid_residual,
                              clip_cruise_residual, get_last_nmpc_action,
+                             compute_descent_base_delta_q,
                              _obs_pred_target_vector,
                              _obs_pred_visible_env_obs,
                              _obs_pred_cable_latent_from_vec)
@@ -1472,7 +1994,9 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             expert.set_path(planned_path)
             if phase in ("cruise", "descent"):
                 pl_pos = env.data.body('prefab').xpos.copy()
-                _advance_expert_to_nearest_wp(expert, planned_path, pl_pos)
+                _advance_expert_to_nearest_wp(
+                    expert, planned_path, pl_pos,
+                    force_descent=(phase == "descent"))
         ee_ctrl.reset(env._get_ee_pos(), current_q)
         if z_pid is not None:
             _pl_z   = float(env.data.body('prefab').xpos[2])
@@ -1554,16 +2078,24 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             action = None
 
             if agent is None:
-                delta_q = expert.compute_delta_q_target(obs, current_q)
+                if phase == "descent":
+                    delta_q = compute_descent_base_delta_q(
+                        expert, obs, current_q, env=env)
+                else:
+                    delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
                 # [v14.0] 构建 obs: (core, cable_raw, wind, tilt, yaw)
                 _rl_t0 = time.perf_counter()
                 _wobs = build_wind_obs(env, wind_obs_scale(config))
                 base_dq_for_obs = None
-                if phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
+                if phase == "descent" and (
+                        bool(config.get("descent_rl", {}).get(
+                            "pid_residual_mode", True)) or
+                        bool(config.get("descent_rl", {}).get(
+                            "include_pid_base_obs", False))):
                     try:
-                        base_dq_for_obs = expert.compute_delta_q_target(
-                            obs, current_q.astype(np.float64))
+                        base_dq_for_obs = compute_descent_base_delta_q(
+                            expert, obs, current_q, env=env)
                     except Exception:
                         base_dq_for_obs = np.zeros(7, dtype=np.float32)
                 elif phase == "cruise" and _cruise_nmpc_residual:
@@ -1677,8 +2209,11 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
                     else:
                         _vmax_z_d = float(config.get("ee_control", {}).get(
                             "vel_max_z_descent", 0.03))
+                        _no_up_z = bool(config.get("descent_rl", {}).get(
+                            "no_pid_no_upward_z", True))
                         delta_q = ee_ctrl.compute_delta_q(
-                            action, current_q, real_ee, vel_max_z=_vmax_z_d)
+                            action, current_q, real_ee, vel_max_z=_vmax_z_d,
+                            no_upward_z=_no_up_z)
                 else:
                     raise ValueError(f"Unsupported phase: {phase}")
 
@@ -1788,6 +2323,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
         vision_shadow_summary = summarize_vision_shadow_rows(
             vision_shadow_rows,
             control_hz=float(config.get("sim", {}).get("control_freq_hz", 10.0)))
+        terminal_diag = (get_descent_terminal_diagnostics(env, config)
+                         if phase == "descent" else {})
         results.append({
             "reward":      ep_reward,
             "steps":       ep_steps,
@@ -1796,6 +2333,7 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             "stability":   stab_metrics.summary(),
             "wind_speed":  ep_wind_speed,
             "wind_dir":    ep_wind_dir,
+            "terminal":    terminal_diag,
             "vision":      vision_debug,
             "vision_shadow": vision_shadow_summary,
             "vision_shadow_rows": vision_shadow_rows,
@@ -1825,6 +2363,8 @@ def test_single_phase(env, agent, expert, ee_ctrl, phase, config,
             print(f"  Ep {ep_count:3d} {mark} | R:{ep_reward:7.2f} | "
                   f"Steps:{ep_steps:3d} | W:{ep_wind_speed:.2f}m/s | "
                   f"{term_short} | {stab_metrics.print_line()}")
+            if phase == "descent" and terminal_diag:
+                print(f"       {terminal_diag.get('detail', '')}")
             if bool(config.get("vision", {}).get("enabled", False)):
                 vdbg = vision_debug or {}
                 names = ",".join(str(n) for n in vdbg.get(
@@ -1872,7 +2412,8 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
     from train_phase import (reset_for_phase, build_phase_obs,
                              REWARD_FNS, REWARD_STATES,
                              _apply_descent_pid_residual,
-                             clip_cruise_residual, get_last_nmpc_action)
+                             clip_cruise_residual, get_last_nmpc_action,
+                             compute_descent_base_delta_q)
 
     z_pid   = CruiseZYawPID(config)
     swing_d = SwingDampingController(config)
@@ -1995,17 +2536,25 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
             _cruise_reward_base = None
             _cruise_reward_action = None
             if agent is None:
-                delta_q = expert.compute_delta_q_target(obs, current_q)
+                if current_phase == "descent":
+                    delta_q = compute_descent_base_delta_q(
+                        expert, obs, current_q, env=env)
+                else:
+                    delta_q = expert.compute_delta_q_target(obs, current_q)
             else:
                 # [v14.0] 构建 obs
                 _wobs = build_wind_obs(env, wind_obs_scale(config))
                 base_dq_for_obs = None
                 if current_phase == "cruise" and _cruise_nmpc_residual:
                     base_dq_for_obs = get_last_nmpc_action(expert)
-                elif current_phase == "descent" and bool(config.get("descent_rl", {}).get("pid_residual_mode", True)):
+                elif current_phase == "descent" and (
+                        bool(config.get("descent_rl", {}).get(
+                            "pid_residual_mode", True)) or
+                        bool(config.get("descent_rl", {}).get(
+                            "include_pid_base_obs", False))):
                     try:
-                        base_dq_for_obs = expert.compute_delta_q_target(
-                            obs, current_q.astype(np.float64))
+                        base_dq_for_obs = compute_descent_base_delta_q(
+                            expert, obs, current_q, env=env)
                     except Exception:
                         base_dq_for_obs = np.zeros(7, dtype=np.float32)
                 core, cable_raw, _wobs, prev_tilt, prev_yaw = build_phase_obs(
@@ -2075,8 +2624,11 @@ def test_pipeline(env, agents, expert, ee_ctrl, config,
                     else:
                         _vmax_z_d = float(config.get("ee_control", {}).get(
                             "vel_max_z_descent", 0.03))
+                        _no_up_z = bool(config.get("descent_rl", {}).get(
+                            "no_pid_no_upward_z", True))
                         delta_q = ee_ctrl.compute_delta_q(
-                            action, current_q, real_ee, vel_max_z=_vmax_z_d)
+                            action, current_q, real_ee, vel_max_z=_vmax_z_d,
+                            no_upward_z=_no_up_z)
                 else:
                     delta_q = ee_ctrl.compute_delta_q(action, current_q, real_ee)
 
@@ -2311,6 +2863,26 @@ def summarize_results(results):
         vals = [float(s[key]) for s in stabs if key in s]
         if vals:
             summary[key] = float(np.mean(vals))
+    terminal_summaries = [r.get("terminal") or {} for r in results]
+    terminal_float_keys = [
+        "payload_z_m", "target_payload_z_m", "dtf_m", "xy_tol_m",
+        "tilt_rad", "yaw_rad", "worst_rebar_err_m", "mean_rebar_err_m",
+        "rebar_tol_m", "insert_depth_m", "min_insert_depth_m",
+        "hole_depth_m", "payload_vxy_mps", "payload_vz_mps",
+    ]
+    for key in terminal_float_keys:
+        vals = [float(s[key]) for s in terminal_summaries if key in s]
+        if vals:
+            summary[f"terminal_{key}_mean"] = float(np.mean(vals))
+            summary[f"terminal_{key}_p95"] = float(np.percentile(vals, 95))
+    for key in [
+        "floor_contact", "hit_obstacle", "hit_rebar", "ok_z", "ok_xy",
+        "ok_tilt", "ok_yaw", "ok_rebar", "ok_insert",
+    ]:
+        vals = [1.0 if bool(s[key]) else 0.0
+                for s in terminal_summaries if key in s]
+        if vals:
+            summary[f"terminal_{key}_rate"] = float(np.mean(vals))
     pred_fracs = [float(r.get("obs_pred_hidden_frac", 0.0))
                   for r in results if "obs_pred_hidden_frac" in r]
     if pred_fracs:
@@ -2621,7 +3193,7 @@ def run_wind_benchmark(args, config):
                       flush=True)
                 if hasattr(env, 'set_curriculum_n_obstacles'):
                     env.set_curriculum_n_obstacles(bench_n_obs)
-                expert = JointSpaceExpert(config, env.ik_solver)
+                expert = make_phase_base_expert("descent", config, env.ik_solver)
                 ee_ctrl = EEAccController(config, env.ik_solver)
                 print("[Benchmark] controllers ready", flush=True)
                 agent = None
@@ -2782,7 +3354,7 @@ def run_multi_rl_wind_benchmark(args, config):
                       flush=True)
                 if hasattr(env, 'set_curriculum_n_obstacles'):
                     env.set_curriculum_n_obstacles(mode_config["scene"]["n_obstacles"])
-                expert = JointSpaceExpert(mode_config, env.ik_solver)
+                expert = make_phase_base_expert("descent", mode_config, env.ik_solver)
                 ee_ctrl = EEAccController(mode_config, env.ik_solver)
                 print("[Benchmark] controllers ready", flush=True)
 
@@ -2952,7 +3524,7 @@ def run_pred_true_expert_wind_benchmark(args, config):
                 if hasattr(env, 'set_curriculum_n_obstacles'):
                     env.set_curriculum_n_obstacles(
                         mode_config["scene"]["n_obstacles"])
-                expert = JointSpaceExpert(mode_config, env.ik_solver)
+                expert = make_phase_base_expert("descent", mode_config, env.ik_solver)
                 ee_ctrl = EEAccController(mode_config, env.ik_solver)
                 print("[Benchmark] controllers ready", flush=True)
 
@@ -3055,6 +3627,19 @@ def main():
     parser.add_argument("--episodes", type=int, default=20)
     parser.add_argument("--obstacles", type=int, default=None)
     parser.add_argument("--seed", type=int, default=21)
+    parser.add_argument("--task-profile", type=str, default=None,
+                        choices=sorted(PAPER_DESCENT_TASK_PROFILES),
+                        help="paper descent task profile: paper-l1 ... or ctrl-c*")
+    parser.add_argument("--descent-base-expert", type=str, default=None,
+                        choices=[
+                            "joint_space", "pid", "traditional_pid",
+                            "damped_pd", "traditional_damped_pd",
+                            "mpc", "traditional_mpc",
+                        ],
+                        help="Descent base expert override for controlled tests")
+    parser.add_argument("--traditional-expert-overrides-json", type=str,
+                        default=None,
+                        help="JSON config override for traditional descent experts")
     parser.add_argument("--render", action="store_true")
     parser.add_argument("--wait-for-space", action="store_true",
                         help="render only: pause after each episode reset until Space is pressed in the MuJoCo viewer")
@@ -3175,6 +3760,8 @@ def main():
                         help="run RGB-D vision in parallel for diagnostics while policy uses true obs")
     parser.add_argument("--vision-shadow-csv", type=str, default=None,
                         help="CSV path for per-step --vision-shadow-eval diagnostics")
+    parser.add_argument("--summary-out", type=str, default=None,
+                        help="JSON path for single-run aggregate evaluation metrics")
     parser.add_argument("--disable-vision", action="store_true",
                         help="force-disable RGB-D vision observations")
     parser.add_argument("--vision-latency-steps", type=int, default=None,
@@ -3199,6 +3786,12 @@ def main():
                         help="keep cable latent dims but feed zeros for ablation")
     parser.add_argument("--disable-cable-obs", action="store_true",
                         help="remove cable latent dims; use only with matching policies")
+    parser.add_argument("--cable-encoder-output-dim", type=int, default=None,
+                        help="override CableEncoder output dimension and matching phase obs_dim")
+    parser.add_argument("--trainable-cable-encoder", action="store_true",
+                        help="evaluate with trainable CableEncoder structure enabled")
+    parser.add_argument("--frozen-cable-encoder", action="store_true",
+                        help="evaluate with legacy frozen CableEncoder structure")
     parser.add_argument("--descent-z-soft-gate-full", type=float, default=None,
                         help="descent controller full-z-speed XY gate override")
     parser.add_argument("--descent-z-hard-gate", type=float, default=None,
@@ -3209,6 +3802,10 @@ def main():
                         help="descent controller outer trickle XY gate override")
     parser.add_argument("--descent-base-v-max-z", type=float, default=None,
                         help="descent controller base vertical speed override")
+    parser.add_argument("--disable-descent-pid-base", action="store_true",
+                        help="descent ablation: execute RL action directly without adding PID base")
+    parser.add_argument("--keep-descent-base-obs", action="store_true",
+                        help="with --disable-descent-pid-base, keep PID base in policy observations")
     parser.add_argument("--descent-alignment-z-gate", type=float, default=None,
                         help="descent reward alignment z gate override")
     parser.add_argument("--descent-premature-descent-xy-gate", type=float,
@@ -3281,11 +3878,16 @@ def main():
         print("[wait-for-space] 未开启 --render，等待空格设置已忽略")
     if hasattr(env, 'set_curriculum_n_obstacles'):
         env.set_curriculum_n_obstacles(test_n_obs)
-    expert  = JointSpaceExpert(config, env.ik_solver)
+    expert  = make_phase_base_expert(args.phase, config, env.ik_solver)
     ee_ctrl = EEAccController(config, env.ik_solver)
 
     print(f"\n{'='*60}")
     print(f"  测试配置: phase={args.phase} algo={args.algo} eps={args.episodes}")
+    _profile_name = config.get("task", {}).get("profile_name", "")
+    if _profile_name:
+        _profile = PAPER_DESCENT_TASK_PROFILES.get(_profile_name, {})
+        print(f"  task_profile: {_profile_name} - "
+              f"{_profile.get('description', '')}")
     print(f"  control: {float(config['sim']['control_freq_hz']):.1f}Hz "
           f"(action_dt={1.0/float(config['sim']['control_freq_hz']):.3f}s, "
           f"env_dt={float(env.dt):.3f}s, sim_steps={int(env.sim_steps)})")
@@ -3381,6 +3983,11 @@ def main():
                 results, getattr(args, "vision_shadow_csv", None))
             if csv_path:
                 print(f"Saved vision shadow CSV: {csv_path}")
+
+    summary_path = write_eval_summary_json(
+        results, config, args, getattr(args, "summary_out", None))
+    if summary_path:
+        print(f"Saved eval summary JSON: {summary_path}")
 
     env.close()
 

@@ -1,0 +1,67 @@
+{
+  "description": "Tuned PID and Damped-PD parameters selected on ctrl-c0-base, ctrl-c1-init, and ctrl-c2-wind2 with 16 episodes/profile. Used only for paper controlled-variable traditional baselines; residual-RL PID base remains unchanged.",
+  "source": {
+    "script": "test_results/paper_controlled_ladder/tune_pid_pd_controlled.py",
+    "result_csv": "test_results/paper_controlled_ladder/tuning_pid_pd_20260702/tuning_results.csv",
+    "best_params": "test_results/paper_controlled_ladder/tuning_pid_pd_20260702/best_params.json"
+  },
+  "traditional_experts": {
+    "common": {
+      "anchor_alpha": 0.12,
+      "vel_max_xy": 0.12,
+      "vel_max_z": 0.022,
+      "terminal_vel_scale": 0.6,
+      "terminal_vel_min_xy": 0.0,
+      "attitude_z_gate": true,
+      "attitude_gate_min": 0.2,
+      "terminal_align_enabled": true,
+      "terminal_align_z_margin": 0.1,
+      "terminal_align_xy": 0.11,
+      "terminal_align_kp_xy": 2.8,
+      "terminal_align_kd_xy": 0.9,
+      "terminal_align_blend": 1.0,
+      "terminal_yaw_boost_enabled": true,
+      "terminal_yaw_boost_z_margin": 0.12,
+      "terminal_yaw_kp_scale": 2.0,
+      "terminal_yaw_vel_scale": 2.5
+    },
+    "pid": {
+      "kp_xy": 2.0,
+      "ki_xy": 0.0,
+      "kd_payload_xy": 0.95,
+      "k_swing_xy": 0.55,
+      "k_rel_vel_xy": 0.32,
+      "integral_limit": 0.0,
+      "integral_active_xy": 0.0,
+      "swing_fade_xy": 0.05,
+      "swing_fade_z_margin": 0.04,
+      "z_kp": 0.7,
+      "z_kd": 0.55,
+      "z_gate": 0.03,
+      "z_full_gate": 0.01,
+      "z_trickle_gate": 0.085,
+      "z_min_gate_frac": 0.12,
+      "yaw_kp": 1.35,
+      "yaw_kd": 0.35,
+      "vel_max_yaw": 0.8
+    },
+    "damped_pd": {
+      "kp_xy": 2.0,
+      "ki_xy": 0.0,
+      "kd_payload_xy": 1.05,
+      "k_swing_xy": 0.58,
+      "k_rel_vel_xy": 0.36,
+      "swing_fade_xy": 0.05,
+      "swing_fade_z_margin": 0.04,
+      "z_kp": 0.62,
+      "z_kd": 0.6,
+      "z_gate": 0.03,
+      "z_full_gate": 0.01,
+      "z_trickle_gate": 0.08,
+      "z_min_gate_frac": 0.1,
+      "yaw_kp": 1.4,
+      "yaw_kd": 0.38,
+      "vel_max_yaw": 0.85
+    }
+  }
+}

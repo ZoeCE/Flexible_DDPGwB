@@ -91,13 +91,6 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
         env_fn = pickle.loads(env_fn_pickle)
 
     # 设置 random seed 每个 worker 不同
-    np.random.seed(int(time.time() * 1000) % 2**32 + worker_id * 1000)
-    try:
-        import random
-        random.seed(int(time.time() * 1000) % 2**32 + worker_id * 1000)
-    except Exception:
-        pass
-
     # 在子进程中构造 env + controllers + reward 函数引用
     # [v11 fix] 用 init_lock 序列化: gen_rope() 写共享 XML 文件, 多个 worker
     # 同时调用会导致 XML parse error. Lock 序列化后, env.reset() 才用 tempfile.
@@ -112,6 +105,16 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
         remote.close()
         return
 
+    # Keep worker stochasticity reproducible. The env factory assigns
+    # config["train"]["seed"] as base_seed + worker_id * 1000.
+    try:
+        worker_seed = int(config.get("train", {}).get("seed", 42))
+        np.random.seed(worker_seed % (2**32))
+        import random
+        random.seed(worker_seed)
+    except Exception:
+        pass
+
     expert = controllers.get("expert")
     ectl   = controllers.get("ee_ctrl")
     z_pid  = controllers.get("z_pid")
@@ -123,6 +126,7 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
     from train_phase import (build_phase_obs, _add_act_noise,
                              _apply_descent_pid_residual,
                              clip_cruise_residual, get_last_nmpc_action,
+                             compute_descent_base_delta_q,
                              reset_for_phase,
                              _advance_expert_to_nearest_wp as _advance_expert_to_nearest_wp_local)
     from phase_reward import (compute_cruise_reward, compute_descent_reward,
@@ -142,7 +146,11 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
             if cmd == 'reset':
                 # [v11 fix] env.reset() 只返回 obs (1 个值), 必须用 reset_for_phase
                 # 才能得到 planned_path. 单进程 train_ppo 也是这么做的.
-                obs, pp = reset_for_phase(env, worker_phase, config)
+                if init_lock is not None:
+                    with init_lock:
+                        obs, pp = reset_for_phase(env, worker_phase, config)
+                else:
+                    obs, pp = reset_for_phase(env, worker_phase, config)
                 # [v12.6] 新 episode 开始, 重置 stability tracker
                 stab.reset_episode()
                 remote.send((obs, pp))
@@ -181,7 +189,11 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                     if "xy_range" in data: kw["override_init_xy_range"] = data["xy_range"]
                     if "vel_range" in data: kw["override_init_vel_range"] = data["vel_range"]
                     if "tilt_range" in data: kw["override_init_tilt_range"] = data["tilt_range"]
-                obs, pp = reset_for_phase(env, "descent", config, **kw)
+                if init_lock is not None:
+                    with init_lock:
+                        obs, pp = reset_for_phase(env, "descent", config, **kw)
+                else:
+                    obs, pp = reset_for_phase(env, "descent", config, **kw)
                 # [v12.6] 新 episode 开始, 重置 stability tracker
                 stab.reset_episode()
                 remote.send((obs, pp))
@@ -311,9 +323,22 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                     term_reason = ri.get('termination', 'running')
 
                 elif phase == "descent":
-                    dq, _pid_dq = _apply_descent_pid_residual(
-                        expert, rl_act, obs, env, config, cq,
-                        pid_dq=base_dq)
+                    _pid_mode = payload.get(
+                        "descent_pid_residual_mode",
+                        config.get("descent_rl", {}).get(
+                            "pid_residual_mode", True))
+                    if bool(_pid_mode):
+                        dq, _pid_dq = _apply_descent_pid_residual(
+                            expert, rl_act, obs, env, config, cq,
+                            pid_dq=base_dq)
+                    else:
+                        _vmax_z_d = float(config.get("ee_control", {}).get(
+                            "vel_max_z_descent", 0.03))
+                        _no_up_z = bool(config.get("descent_rl", {}).get(
+                            "no_pid_no_upward_z", True))
+                        dq = ectl.compute_delta_q(
+                            rl_act, cq, ree, vel_max_z=_vmax_z_d,
+                            no_upward_z=_no_up_z)
                     dq = _add_act_noise(dq, act_noise)
                     no2, _, _, _, ei = env.step(dq)
                     # [v11.3] 传 rl_action
@@ -333,8 +358,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 if phase == "descent" and not done:
                     try:
                         _cq_next = env.data.qpos[:7].copy().astype(np.float32)
-                        _base_next = expert.compute_delta_q_target(
-                            no2, _cq_next.astype(np.float64))
+                        _base_next = compute_descent_base_delta_q(
+                            expert, no2, _cq_next, env=env)
                     except Exception:
                         _base_next = np.zeros(7, dtype=np.float32)
                 elif phase == "cruise":
@@ -382,8 +407,8 @@ def _vec_env_worker(remote, parent_remote, env_fn_pickle, worker_id, init_lock=N
                 if phase_b == "descent":
                     try:
                         _cq_b = env.data.qpos[:7].copy().astype(np.float32)
-                        _base_b = expert.compute_delta_q_target(
-                            np.asarray(eo, np.float32), _cq_b.astype(np.float64))
+                        _base_b = compute_descent_base_delta_q(
+                            expert, np.asarray(eo, np.float32), _cq_b, env=env)
                     except Exception:
                         _base_b = np.zeros(7, dtype=np.float32)
                 elif phase_b == "cruise" and bool(config.get("cruise_rl", {}).get(
@@ -563,7 +588,8 @@ class DummyVecEnv:
     def build_phase_obs_remote(self, idx, phase, env_obs, start_xy,
                                target_xy, prev_tilt, prev_yaw):
         """[v14.0] 主进程调用 build_phase_obs (DummyVecEnv 直接调本地 env)."""
-        from train_phase import build_phase_obs, get_last_nmpc_action
+        from train_phase import (build_phase_obs, get_last_nmpc_action,
+                                 compute_descent_base_delta_q)
         from phase_agent import build_wind_obs
         env = self.envs[idx]
         ctrls = self.controllers_list[idx]
@@ -574,8 +600,9 @@ class DummyVecEnv:
         if phase == "descent":
             try:
                 _cq = env.data.qpos[:7].copy().astype(np.float32)
-                _base = ctrls["expert"].compute_delta_q_target(
-                    np.asarray(env_obs, np.float32), _cq.astype(np.float64))
+                _base = compute_descent_base_delta_q(
+                    ctrls["expert"], np.asarray(env_obs, np.float32), _cq,
+                    env=env)
             except Exception:
                 _base = np.zeros(7, dtype=np.float32)
         elif phase == "cruise" and bool(config.get("cruise_rl", {}).get(
@@ -605,7 +632,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
     """共享逻辑: DummyVecEnv.rl_step 直接调用; SubprocVecEnv worker 也内联同样的代码."""
     from train_phase import (build_phase_obs, _add_act_noise,
                              _apply_descent_pid_residual,
-                             clip_cruise_residual, get_last_nmpc_action)
+                             clip_cruise_residual, get_last_nmpc_action,
+                             compute_descent_base_delta_q)
     from phase_reward import (compute_cruise_reward, compute_descent_reward,
                               RewardComponentTracker)
     from scipy.spatial.transform import Rotation as R
@@ -705,9 +733,21 @@ def _run_rl_step_inline(env, controllers, config, payload):
             env, no2, config, rstate, tracker=tracker, rl_action=rl_act[:2],
             base_action=_cruise_reward_base)
     elif phase == "descent":
-        dq, _pid_dq = _apply_descent_pid_residual(
-            expert, rl_act, obs, env, config, cq,
-            pid_dq=base_dq)
+        _pid_mode = payload.get(
+            "descent_pid_residual_mode",
+            config.get("descent_rl", {}).get("pid_residual_mode", True))
+        if bool(_pid_mode):
+            dq, _pid_dq = _apply_descent_pid_residual(
+                expert, rl_act, obs, env, config, cq,
+                pid_dq=base_dq)
+        else:
+            _vmax_z_d = float(config.get("ee_control", {}).get(
+                "vel_max_z_descent", 0.03))
+            _no_up_z = bool(config.get("descent_rl", {}).get(
+                "no_pid_no_upward_z", True))
+            dq = ectl.compute_delta_q(
+                rl_act, cq, ree, vel_max_z=_vmax_z_d,
+                no_upward_z=_no_up_z)
         dq = _add_act_noise(dq, act_noise)
         no2, _, _, _, ei = env.step(dq)
         # [v11.3] 传 rl_action
@@ -724,8 +764,8 @@ def _run_rl_step_inline(env, controllers, config, payload):
     if phase == "descent" and not done:
         try:
             _cq_d = env.data.qpos[:7].copy().astype(np.float32)
-            _base_d = expert.compute_delta_q_target(
-                no2, _cq_d.astype(np.float64))
+            _base_d = compute_descent_base_delta_q(
+                expert, no2, _cq_d, env=env)
         except Exception:
             _base_d = np.zeros(7, dtype=np.float32)
     elif phase == "cruise":

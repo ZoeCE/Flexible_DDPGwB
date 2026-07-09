@@ -14,6 +14,7 @@
 import os
 import sys
 import csv
+import json
 import copy
 import time
 import random
@@ -61,6 +62,47 @@ def set_global_seed(seed):
         torch.cuda.manual_seed_all(seed)
 
 
+def _json_sanitize(value):
+    if isinstance(value, dict):
+        return {str(k): _json_sanitize(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_sanitize(v) for v in value]
+    if isinstance(value, np.ndarray):
+        return value.tolist()
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        return float(value)
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def save_resolved_config_snapshot(log_dir, config, phase, algo, resume_ckpt=None):
+    """Persist the fully merged run config so checkpoints are auditable."""
+    os.makedirs(log_dir, exist_ok=True)
+    payload = {
+        "phase": phase,
+        "algo": algo,
+        "log_dir": log_dir,
+        "resume_ckpt": resume_ckpt or "",
+        "argv": list(sys.argv),
+        "saved_at_unix": time.time(),
+        "config": _json_sanitize(config),
+    }
+    out_json = os.path.join(log_dir, "resolved_config.json")
+    latest_json = os.path.join(log_dir, "resolved_config_latest.json")
+    for path in (out_json, latest_json):
+        try:
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(payload, f, indent=2, sort_keys=True)
+        except Exception as e:
+            print(f"[WARN] resolved config snapshot save failed ({path}): {e}")
+    return out_json
+
+
 def wind_speed_to_force(config, speed_mps):
     wind_cfg = config.get("wind", {})
     v = max(0.0, float(speed_mps))
@@ -92,6 +134,178 @@ def _deep_update(dst, src):
         else:
             dst[key] = copy.deepcopy(value)
     return dst
+
+
+class UnsupervisedIntrinsicReward:
+    """kNN state-entropy reward for no-PID reward-free pretraining.
+
+    The default feature intentionally uses task-relevant low-dimensional descent
+    state instead of raw cable observations, so exploration does not get paid for
+    high-frequency cable vibration by itself.
+    """
+    def __init__(self, config, phase):
+        self.config = config
+        self.phase = phase
+        self.cfg = copy.deepcopy(config.get("unsupervised_pretrain", {}))
+        self.enabled = bool(self.cfg.get("enabled", False))
+        self.method = str(self.cfg.get("method", "apt_knn")).lower()
+        self.reward_mode = str(self.cfg.get("reward_mode", "replace")).lower()
+        self.feature_source = str(
+            self.cfg.get("feature_source", "descent_task_core")).lower()
+        self.include_wind = bool(self.cfg.get("include_wind", False))
+        self.k = max(1, int(self.cfg.get("knn_k", 12)))
+        self.min_memory = max(0, int(self.cfg.get("min_memory", 256)))
+        self.max_memory = max(1, int(self.cfg.get("memory_size", 50_000)))
+        self.sample_size = max(1, int(self.cfg.get("sample_size", 4096)))
+        self.reward_scale = float(self.cfg.get("reward_scale", 1.0))
+        self.distance_temperature = max(
+            float(self.cfg.get("distance_temperature", 0.10)), 1e-6)
+        self.reward_clip = float(self.cfg.get("reward_clip", 2.0))
+        self.warmup_reward = float(self.cfg.get("warmup_reward", 0.0))
+        self.env_reward_weight = float(self.cfg.get("env_reward_weight", 0.0))
+        self.failure_penalty = float(self.cfg.get("failure_penalty", -2.0))
+        self.stuck_penalty = float(self.cfg.get("stuck_penalty", -0.5))
+        self.timeout_penalty = float(self.cfg.get("timeout_penalty", 0.0))
+        self.success_reward = float(self.cfg.get("success_reward", 0.0))
+        self.feature_clip = float(self.cfg.get("feature_clip", 10.0))
+        self._memory = None
+        self._ptr = 0
+        self._size = 0
+        seed = int(config.get("train", {}).get("seed", 42)) + 104729
+        self.rng = np.random.default_rng(seed)
+        self.last_intrinsic = 0.0
+        self.last_knn_dist = 0.0
+        self.last_safety_penalty = 0.0
+
+    @property
+    def memory_size(self):
+        return int(self._size)
+
+    def describe(self):
+        return (
+            f"method={self.method}, reward_mode={self.reward_mode}, "
+            f"feature={self.feature_source}, k={self.k}, "
+            f"memory={self.max_memory}, sample={self.sample_size}, "
+            f"scale={self.reward_scale}")
+
+    def _ensure_memory(self, dim):
+        if self._memory is not None and self._memory.shape[1] == dim:
+            return
+        self._memory = np.zeros((self.max_memory, dim), dtype=np.float32)
+        self._ptr = 0
+        self._size = 0
+
+    def _append(self, feat):
+        self._ensure_memory(int(feat.size))
+        self._memory[self._ptr] = feat
+        self._ptr = (self._ptr + 1) % self.max_memory
+        self._size = min(self._size + 1, self.max_memory)
+
+    def _feature_from_phase_obs(self, phase_obs):
+        if phase_obs is None:
+            return None
+        core = np.asarray(phase_obs[0], dtype=np.float32).reshape(-1)
+        wind = np.asarray(phase_obs[2], dtype=np.float32).reshape(-1) \
+            if len(phase_obs) > 2 and phase_obs[2] is not None \
+            else np.zeros(0, dtype=np.float32)
+        parts = []
+        if self.phase == "descent" and self.feature_source in (
+                "descent_task_core", "task_core", "task"):
+            if core.size < 34:
+                return None
+            parts.extend([
+                core[6:9] / 0.25,       # payload xyz
+                core[9:12] / 0.50,      # payload velocity
+                core[12:15] / 0.25,     # EE-payload offset
+                core[15:17] / 0.50,     # tilt, yaw
+                core[17:19] / 2.00,     # tilt/yaw rates
+                core[22:24] / 0.05,     # payload XY error
+                core[24:25] / 0.10,     # z error
+                core[25:29] / 0.05,     # rebar errors
+                core[29:34] / 5.00,     # normalized insertion state
+            ])
+        elif self.feature_source in ("core", "full_core"):
+            parts.append(core)
+        elif self.feature_source in ("policy_obs", "encoded"):
+            parts.append(core)
+        else:
+            raise ValueError(
+                f"Unknown unsupervised_pretrain.feature_source: "
+                f"{self.feature_source}")
+        if self.include_wind and wind.size:
+            parts.append(wind)
+        feat = np.concatenate(parts).astype(np.float32)
+        feat = np.nan_to_num(feat, nan=0.0, posinf=self.feature_clip,
+                             neginf=-self.feature_clip)
+        if self.feature_clip > 0:
+            feat = np.clip(feat, -self.feature_clip, self.feature_clip)
+        return feat
+
+    def compute(self, phase_obs):
+        if not self.enabled:
+            return 0.0
+        feat = self._feature_from_phase_obs(phase_obs)
+        if feat is None:
+            self.last_intrinsic = 0.0
+            self.last_knn_dist = 0.0
+            return 0.0
+        self._ensure_memory(int(feat.size))
+        if self._size < max(self.min_memory, self.k + 1):
+            reward = self.warmup_reward
+            kth_dist = 0.0
+        else:
+            n = min(self._size, self.sample_size)
+            if n < self._size:
+                idx = self.rng.choice(self._size, size=n, replace=False)
+                mem = self._memory[idx]
+            else:
+                mem = self._memory[:self._size]
+            d2 = np.sum(np.square(mem - feat.reshape(1, -1)), axis=1)
+            kk = min(self.k, d2.size)
+            kth_d2 = float(np.partition(d2, kk - 1)[kk - 1])
+            kth_dist = float(np.sqrt(max(kth_d2, 0.0)))
+            reward = self.reward_scale * float(np.log1p(
+                kth_dist / self.distance_temperature))
+            if self.reward_clip > 0:
+                reward = float(np.clip(reward, 0.0, self.reward_clip))
+        self._append(feat)
+        self.last_intrinsic = float(reward)
+        self.last_knn_dist = float(kth_dist)
+        return float(reward)
+
+    def terminal_penalty(self, termination, done, success):
+        if not self.enabled or not done:
+            self.last_safety_penalty = 0.0
+            return 0.0
+        if success:
+            self.last_safety_penalty = self.success_reward
+            return self.success_reward
+        text = str(termination or "").lower()
+        if any(k in text for k in (
+                "instability", "crash", "nan", "falling", "payload_low")):
+            penalty = self.failure_penalty
+        elif any(k in text for k in (
+                "stuck", "lucky_rebar", "bad_rebar", "contact")):
+            penalty = self.stuck_penalty
+        elif "timeout" in text:
+            penalty = self.timeout_penalty
+        else:
+            penalty = 0.0
+        self.last_safety_penalty = float(penalty)
+        return float(penalty)
+
+    def mix_reward(self, env_reward, intrinsic_reward, safety_penalty):
+        if not self.enabled:
+            return float(env_reward)
+        if self.reward_mode == "replace":
+            return float(intrinsic_reward + safety_penalty)
+        if self.reward_mode in ("add", "sum"):
+            return float(env_reward + intrinsic_reward + safety_penalty)
+        if self.reward_mode in ("blend", "weighted"):
+            return float(self.env_reward_weight * env_reward +
+                         intrinsic_reward + safety_penalty)
+        raise ValueError(
+            f"Unknown unsupervised_pretrain.reward_mode: {self.reward_mode}")
 
 
 def _apply_descent_high_freq_time_scale_fixes(overrides, new_freq, new_dt):
@@ -802,6 +1016,35 @@ def _best_checkpoint_ready(cur, cur_info, phase):
     return window_n >= min_window
 
 
+def _best_l8_checkpoint_ready(cur, cur_info, phase, min_level=8):
+    if phase != "descent":
+        return False
+    if int(getattr(cur, "level_idx", -1)) < int(min_level):
+        return False
+    return _best_checkpoint_ready(cur, cur_info, phase)
+
+
+def _write_best_l8_record(log_dir, episode, total_steps, sr, cur_sr, level_idx,
+                          eps_at_level):
+    path = os.path.join(log_dir, "ckpt_best_l8_meta.json")
+    payload = {
+        "tag": "best_l8",
+        "episode": int(episode),
+        "total_steps": int(total_steps),
+        "selection_metric": "sr",
+        "sr": float(sr),
+        "cur_sr": float(cur_sr),
+        "level_idx": int(level_idx),
+        "eps_at_level": int(eps_at_level),
+        "checkpoint": "ckpt_best_l8.pt",
+    }
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(payload, f, indent=2, sort_keys=True)
+    except Exception as e:
+        print(f"[WARN] best_l8 metadata save failed: {e}")
+
+
 def _save_obs_predictor_checkpoint(obs_predictor, path):
     if isinstance(obs_predictor, (list, tuple)):
         predictors = list(obs_predictor)
@@ -1187,6 +1430,270 @@ def build_phase_obs(phase, env_obs, env, start_xy, target_xy, prev_tilt, prev_ya
         return build_descent_obs(env_obs, env, target_xy, prev_tilt, prev_yaw,
                                  wind_obs, base_action=base_action)
     raise ValueError(f"Unknown phase: {phase}")
+
+
+def _descent_pid_base_enabled(config):
+    return bool(config.get("descent_rl", {}).get("pid_residual_mode", True))
+
+
+def _descent_include_pid_base_obs(config):
+    drl = config.get("descent_rl", {})
+    if "include_pid_base_obs" in drl:
+        return bool(drl.get("include_pid_base_obs"))
+    return _descent_pid_base_enabled(config)
+
+
+def _phase_obs_for_policy(phase, phase_obs, config):
+    """Mask descent PID-base observation dims for clean no-PID ablations."""
+    if phase != "descent" or phase_obs is None:
+        return phase_obs
+    if _descent_include_pid_base_obs(config):
+        return phase_obs
+    core, cable_raw, wind_obs, tilt, yaw, _base_dq = phase_obs
+    core = np.asarray(core, dtype=np.float32).copy()
+    if core.size >= 7:
+        core[-7:] = 0.0
+    return core, cable_raw, wind_obs, tilt, yaw, None
+
+
+def _descent_base_acc_from_phase_obs(phase_obs, config):
+    """Approximate the PID descent base as a full EE-acceleration action."""
+    if phase_obs is None:
+        return np.zeros(3, dtype=np.float32)
+    core = np.asarray(phase_obs[0], dtype=np.float32).reshape(-1)
+    if core.size < 25:
+        return np.zeros(3, dtype=np.float32)
+    pl_pos = core[6:9].astype(np.float32)
+    pl_vel = core[9:12].astype(np.float32)
+    target_xy = core[19:21].astype(np.float32)
+    target_pz = float(core[21])
+    drl = config.get("descent_rl", {})
+    acc_max_xy = float(drl.get(
+        "residual_acc_max_xy", drl.get("acc_max_xy", 0.5)))
+    acc_max_z = float(drl.get(
+        "residual_acc_max_z", drl.get("acc_max_z", 1.0)))
+
+    diff_xy = target_xy - pl_pos[:2]
+    dist_xy = float(np.linalg.norm(diff_xy))
+    if dist_xy > 0.002:
+        dir_xy = diff_xy / max(dist_xy, 1e-6)
+        vel_proj = float(np.dot(pl_vel[:2], dir_xy))
+        acc_mag = 0.6 * min(dist_xy, 0.05) / 0.05 - 0.8 * vel_proj
+        acc_xy = dir_xy * np.clip(acc_mag, -1.0, 1.0) * acc_max_xy
+    else:
+        acc_xy = -pl_vel[:2] * 1.5
+    acc_xy = np.clip(acc_xy, -acc_max_xy, acc_max_xy)
+
+    align_factor = float(np.exp(-dist_xy / 0.01))
+    z_error = float(pl_pos[2] - target_pz)
+    if z_error > 0.005 and align_factor > 0.3:
+        acc_z = -(0.5 * min(z_error, 0.15) +
+                  0.3 * max(float(pl_vel[2]), 0.0)) * align_factor
+    else:
+        acc_z = -float(pl_vel[2])
+    acc_z = float(np.clip(acc_z, -acc_max_z, acc_max_z))
+
+    return np.array([acc_xy[0], acc_xy[1], acc_z], dtype=np.float32)
+
+
+def _descent_stable_acc_from_phase_obs(phase_obs, config):
+    """Mature-controller-inspired no-PID full EE-acceleration target."""
+    if phase_obs is None:
+        return np.zeros(3, dtype=np.float32)
+    core = np.asarray(phase_obs[0], dtype=np.float32).reshape(-1)
+    if core.size < 25:
+        return np.zeros(3, dtype=np.float32)
+
+    ee_pos = core[0:3].astype(np.float32)
+    ee_vel = core[3:6].astype(np.float32)
+    pl_pos = core[6:9].astype(np.float32)
+    pl_vel = core[9:12].astype(np.float32)
+    tilt = float(core[15]) if core.size > 15 else 0.0
+    yaw = float(core[16]) if core.size > 16 else 0.0
+    target_xy = core[19:21].astype(np.float32)
+    target_pz = float(core[21])
+    rebar_err = core[25:29].astype(np.float32) if core.size >= 29 else None
+    step_frac = float(core[33]) if core.size > 33 else 0.0
+
+    drl = config.get("descent_rl", {})
+    ins = config.get("insertion", {})
+    sim = config.get("sim", {})
+    dt = 1.0 / max(float(sim.get("control_freq_hz", 10.0)), 1e-6)
+    max_steps = float(drl.get("max_steps", 300))
+    cur_step = step_frac * max(max_steps, 1.0)
+
+    acc_max_xy = float(drl.get(
+        "acc_max_xy", drl.get("residual_acc_max_xy", 0.6)))
+    acc_max_z = float(drl.get(
+        "acc_max_z", drl.get("residual_acc_max_z", 0.9)))
+    v_max_xy = float(drl.get("base_v_max_xy", 0.20))
+    v_max_z = abs(float(drl.get("base_v_max_z", 0.020)))
+
+    k_target = float(drl.get("stable_target_k", 1.0))
+    k_swing = float(drl.get("stable_swing_k", 2.5))
+    k_catch = float(drl.get("stable_catch_k", 0.5))
+    settle_steps = int(drl.get("stable_settle_steps", 8))
+    entry_z = float(ins.get("entry_z", 0.16))
+    contact_tilt_thresh = float(drl.get("stable_contact_tilt_thresh", 0.018))
+    insert_xy_gate = float(drl.get(
+        "stable_insert_xy_gate",
+        ins.get("xy_tolerance_train_end", ins.get("xy_tolerance", 0.005))))
+    insert_rebar_gate = float(drl.get(
+        "stable_insert_rebar_gate",
+        ins.get("physical_rebar_xy_tolerance", insert_xy_gate)))
+    insert_tilt_gate = float(drl.get(
+        "stable_insert_tilt_gate",
+        ins.get("tilt_tolerance_train_end", ins.get("tilt_tolerance", 0.05))))
+    insert_yaw_gate = float(drl.get(
+        "stable_insert_yaw_gate",
+        ins.get("yaw_tolerance_train_end", ins.get("yaw_tolerance", 0.08))))
+    terminal_z_band = float(drl.get("stable_terminal_z_band", 0.065))
+    hover_above_target = float(drl.get("stable_hover_above_target", 0.045))
+    bad_contact_z_band = float(drl.get("stable_bad_contact_z_band", 0.045))
+    bad_contact_lift_speed = float(drl.get(
+        "stable_bad_contact_lift_speed", 0.0))
+    insert_speed_frac = float(drl.get("stable_insert_speed_frac", 0.45))
+    terminal_recenter_speed_frac = float(drl.get(
+        "stable_terminal_recenter_speed_frac", 0.55))
+
+    pl_xy = pl_pos[:2]
+    ee_xy = ee_pos[:2]
+    pl_vxy = pl_vel[:2]
+    pl_xy_err = target_xy - pl_xy
+    xy_err_norm = float(np.linalg.norm(pl_xy_err))
+    if rebar_err is not None and rebar_err.size > 0:
+        finite_rebar = rebar_err[np.isfinite(rebar_err)]
+        worst_rebar_err = (float(np.max(np.abs(finite_rebar)))
+                           if finite_rebar.size > 0 else xy_err_norm)
+    else:
+        worst_rebar_err = xy_err_norm
+    z_above_target = max(0.0, float(pl_pos[2] - target_pz))
+    in_terminal_zone = bool(
+        pl_pos[2] < entry_z or z_above_target <= terminal_z_band)
+    aligned_for_insert = bool(
+        xy_err_norm <= insert_xy_gate and
+        worst_rebar_err <= insert_rebar_gate and
+        abs(tilt) <= insert_tilt_gate and
+        abs(yaw) <= insert_yaw_gate)
+    in_settling = cur_step <= settle_steps
+    suspected_bad_contact = bool(
+        in_terminal_zone and not aligned_for_insert and
+        z_above_target <= bad_contact_z_band and
+        (abs(float(pl_vel[2])) < 0.012 or abs(tilt) > contact_tilt_thresh))
+
+    if in_settling:
+        target_v_xy = np.zeros(2, dtype=np.float32)
+    else:
+        v_target = k_target * pl_xy_err
+        v_swing = k_swing * (pl_xy - ee_xy)
+        v_catch = k_catch * pl_vxy
+        target_v_xy = (v_target + v_swing + v_catch).astype(np.float32)
+        if in_terminal_zone:
+            target_v_xy *= terminal_recenter_speed_frac
+
+    z_reached = pl_pos[2] <= target_pz + float(
+        drl.get("stable_z_reached_margin", 0.015))
+    if z_reached:
+        target_v_xy *= float(drl.get("stable_z_reached_xy_speed_frac", 0.4))
+
+    vxy_norm = float(np.linalg.norm(target_v_xy))
+    if vxy_norm > v_max_xy and vxy_norm > 1e-8:
+        target_v_xy *= v_max_xy / vxy_norm
+
+    if z_reached or in_settling or z_above_target <= 0.0:
+        target_v_z = 0.0
+    else:
+        z_hard_gate = float(drl.get("z_hard_gate", 0.015))
+        z_soft_gate_full = float(drl.get("z_soft_gate_full", 0.005))
+        z_trickle_enabled = bool(drl.get("z_trickle_enabled", True))
+        z_trickle_xy_gate = float(drl.get("z_trickle_xy_gate", 0.080))
+        z_min_speed_frac = float(drl.get("z_min_speed_frac", 0.25))
+        z_vel_slowdown = float(drl.get("z_vel_slowdown", 0.70))
+        z_yaw_slowdown = float(drl.get("z_yaw_slowdown", 0.70))
+        z_gate_vel = float(drl.get("z_gate_vel", 0.015))
+        z_gate_yaw = float(drl.get("z_gate_yaw", 0.05))
+        z_near_margin = float(drl.get("z_near_slowdown_margin", 0.040))
+
+        if xy_err_norm >= z_hard_gate:
+            z_speed_frac = 0.0
+            if z_trickle_enabled and xy_err_norm < z_trickle_xy_gate:
+                span = max(z_trickle_xy_gate - z_hard_gate, 1e-6)
+                taper = 1.0 - (xy_err_norm - z_hard_gate) / span
+                z_speed_frac = z_min_speed_frac * np.clip(taper, 0.0, 1.0)
+        elif xy_err_norm <= z_soft_gate_full:
+            z_speed_frac = 1.0
+        else:
+            span = max(z_hard_gate - z_soft_gate_full, 1e-6)
+            z_speed_frac = 1.0 - (xy_err_norm - z_soft_gate_full) / span
+
+        if float(np.linalg.norm(pl_vxy)) >= z_gate_vel:
+            z_speed_frac *= z_vel_slowdown
+        if abs(yaw) >= z_gate_yaw:
+            z_speed_frac *= z_yaw_slowdown
+        tilt_gate = float(drl.get("stable_z_tilt_gate", 0.10))
+        if abs(tilt) >= tilt_gate:
+            z_speed_frac *= float(drl.get("stable_z_tilt_slowdown", 0.35))
+        if z_above_target < z_near_margin:
+            z_speed_frac *= max(0.25, z_above_target / max(z_near_margin, 1e-6))
+        if in_terminal_zone:
+            if suspected_bad_contact:
+                target_v_z = min(
+                    v_max_z * 0.25,
+                    max(0.0, bad_contact_lift_speed))
+                target_v = np.array(
+                    [target_v_xy[0], target_v_xy[1], target_v_z],
+                    dtype=np.float32)
+                acc = (target_v - ee_vel) / max(dt, 1e-6)
+                return np.array([
+                    np.clip(acc[0], -acc_max_xy, acc_max_xy),
+                    np.clip(acc[1], -acc_max_xy, acc_max_xy),
+                    np.clip(acc[2], -acc_max_z, acc_max_z),
+                ], dtype=np.float32)
+            if not aligned_for_insert and z_above_target <= hover_above_target:
+                z_speed_frac = 0.0
+            elif aligned_for_insert:
+                z_speed_frac = min(z_speed_frac, insert_speed_frac)
+        target_v_z = -v_max_z * float(np.clip(z_speed_frac, 0.0, 1.0))
+
+    target_v = np.array([target_v_xy[0], target_v_xy[1], target_v_z],
+                        dtype=np.float32)
+    acc = (target_v - ee_vel) / max(dt, 1e-6)
+    return np.array([
+        np.clip(acc[0], -acc_max_xy, acc_max_xy),
+        np.clip(acc[1], -acc_max_xy, acc_max_xy),
+        np.clip(acc[2], -acc_max_z, acc_max_z),
+    ], dtype=np.float32)
+
+
+def _distill_target_action(phase, phase_obs, teacher_action, config):
+    dist_cfg = config.get("policy_distill", {})
+    mode = str(dist_cfg.get("student_action_target_mode", "auto")).lower()
+    if mode == "auto":
+        mode = ("descent_stable_acc_plus_actor"
+                if phase == "descent" and not _descent_pid_base_enabled(config)
+                else "teacher_actor")
+    t_act = np.asarray(teacher_action, dtype=np.float32).copy()
+    if phase == "descent" and mode in (
+            "descent_base_acc", "descent_base_acc_plus_actor",
+            "descent_stable_acc", "descent_stable_acc_plus_actor"):
+        if mode.startswith("descent_stable_acc"):
+            base = _descent_stable_acc_from_phase_obs(phase_obs, config)
+        else:
+            base = _descent_base_acc_from_phase_obs(phase_obs, config)
+        if mode in ("descent_base_acc", "descent_stable_acc"):
+            target = base
+        else:
+            coef = float(dist_cfg.get("teacher_actor_residual_coef", 0.35))
+            target = base + coef * t_act
+        drl = config.get("descent_rl", {})
+        ax = float(drl.get("acc_max_xy", drl.get("residual_acc_max_xy", 0.6)))
+        az = float(drl.get("acc_max_z", drl.get("residual_acc_max_z", 0.9)))
+        return np.array([
+            np.clip(target[0], -ax, ax),
+            np.clip(target[1], -ax, ax),
+            np.clip(target[2], -az, az),
+        ], dtype=np.float32)
+    return t_act
 
 
 def get_last_nmpc_action(expert):
@@ -1718,12 +2225,19 @@ def reset_for_descent_with_cur(env, config, cur):
 # 专家辅助
 # ==============================================================================
 
-def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos):
+def _advance_expert_to_nearest_wp(expert, planned_path, pl_pos,
+                                  force_descent=False):
     if planned_path is None or len(planned_path) == 0:
+        return
+    if not hasattr(expert, "tracker"):
         return
     dists = [np.linalg.norm(pl_pos - wp) for wp in planned_path]
     nearest_idx = int(np.argmin(dists))
     expert.tracker.current_idx = nearest_idx
+    descent_start = getattr(expert.tracker, "_descent_start_idx", None)
+    if force_descent or (
+            descent_start is not None and nearest_idx >= int(descent_start)):
+        expert.tracker._is_descending = True
 
 
 def collect_expert_acc(expert, env, obs, current_q, phase, config):
@@ -1769,6 +2283,28 @@ def collect_expert_acc(expert, env, obs, current_q, phase, config):
     return np.zeros(config[f"{phase}_rl"]["action_dim"], dtype=np.float32)
 
 
+def compute_descent_base_delta_q(expert, obs, current_q, env=None):
+    """Compute descent base delta-q, using env state when supported."""
+    current_q = np.asarray(current_q, dtype=np.float64)
+    if env is not None:
+        accepts_env = getattr(expert, "_codex_accepts_env_arg", None)
+        if accepts_env is None:
+            try:
+                import inspect
+                accepts_env = (
+                    "env" in inspect.signature(
+                        expert.compute_delta_q_target).parameters)
+            except (TypeError, ValueError):
+                accepts_env = False
+            try:
+                setattr(expert, "_codex_accepts_env_arg", bool(accepts_env))
+            except Exception:
+                pass
+        if accepts_env:
+            return expert.compute_delta_q_target(obs, current_q, env=env)
+    return expert.compute_delta_q_target(obs, current_q)
+
+
 # ==============================================================================
 # Descent: PID base + RL residual delta_q 合并
 # ==============================================================================
@@ -1799,7 +2335,8 @@ def _apply_descent_pid_residual(expert, rl_act, obs, env, config, current_q,
     """
     if pid_dq is None:
         try:
-            pid_dq = expert.compute_delta_q_target(obs, current_q.astype(np.float64))
+            pid_dq = compute_descent_base_delta_q(
+                expert, obs, current_q, env=env)
         except Exception:
             pid_dq = np.zeros(7, dtype=np.float32)
     pid_dq = np.asarray(pid_dq, dtype=np.float32)
@@ -2020,6 +2557,23 @@ def _apply_episode_wind_vec(vec, idx, pert):
 # PPO 训练
 # ==============================================================================
 
+def make_phase_base_expert(phase, config, ik_solver):
+    """Create the base controller used by residual training/evaluation."""
+    if phase == "descent":
+        kind = str(config.get("descent_rl", {}).get(
+            "base_expert", "joint_space")).strip().lower()
+        if kind in ("mpc", "traditional_mpc", "descent_mpc"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("mpc", config, ik_solver)
+        if kind in ("traditional_pid", "paper_pid"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("pid", config, ik_solver)
+        if kind in ("damped_pd", "traditional_damped_pd"):
+            from traditional_experts import make_traditional_expert
+            return make_traditional_expert("damped_pd", config, ik_solver)
+    return JointSpaceExpert(config, ik_solver)
+
+
 def make_phase_env_and_controllers(phase, config, worker_id=0):
     """[v11 Path 3] 工厂函数: 构造 env + 所有 base controllers (按 phase).
 
@@ -2033,14 +2587,16 @@ def make_phase_env_and_controllers(phase, config, worker_id=0):
         (env, controllers_dict, config) — controllers 中含 'phase' 键, worker 可读
     """
     import copy as _copy
-    cfg = _copy.deepcopy(config) if worker_id > 0 else config
-    if worker_id > 0:
-        cfg["train"]["seed"] = int(cfg["train"].get("seed", 42)) + worker_id * 1000
-        set_global_seed(cfg["train"]["seed"])
+    cfg = _copy.deepcopy(config)
+    base_seed = int(config.get("train", {}).get("seed", 42))
+    cfg.setdefault("train", {})["seed"] = base_seed + int(worker_id) * 1000
+    set_global_seed(cfg["train"]["seed"])
     env = CableRobotEnvWithObstacles(config=cfg)
+    expert = make_phase_base_expert(phase, cfg, env.ik_solver)
     controllers = {
         "phase":   phase,                       # [v11 fix] worker 读取 phase 用
-        "expert":  JointSpaceExpert(cfg, env.ik_solver),
+        "expert":  expert,
+        "expert":  expert,
         "ee_ctrl": EEAccController(cfg, env.ik_solver),
         "z_pid":   CruiseZYawPID(cfg)          if phase == "cruise" else None,
         "swing_d": SwingDampingController(cfg) if phase == "cruise" else None,
@@ -2495,7 +3051,10 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
     logger = Logger(log_dir, project=f"phase_rl_v9", run_name=f"{phase}_ppo")
     logger.update_config(config)
     stats = _make_episode_stats(config)
-    ep = 0; ts = 0; best = 0.0; t0 = time.time()
+    intrinsic_rewarder = UnsupervisedIntrinsicReward(config, phase)
+    if intrinsic_rewarder.enabled:
+        print(f"  [UnsupervisedPretrain] {intrinsic_rewarder.describe()}")
+    ep = 0; ts = 0; best = 0.0; best_l8 = -1.0; t0 = time.time()
     _ppo_update_count = 0
 
     lf = os.path.join(log_dir, f"{phase}_ppo_log.csv")
@@ -2521,6 +3080,11 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                    "sr", "steps", "pol_loss", "val_loss", "ent",
                    "lvl", "wind_speed", "wind_speed_min",
                    "wind_speed_max", "cur_sr", "cur_eps"]
+    if intrinsic_rewarder.enabled:
+        _ppo_header.extend([
+            "env_reward", "intrinsic_reward", "unsup_safety_penalty",
+            "unsup_memory_size", "unsup_last_knn_dist",
+        ])
     _init_csv_log(lf, _ppo_header, append_existing=(
         resume_ckpt and os.path.abspath(_progress_log or "") == os.path.abspath(lf)))
 
@@ -2562,7 +3126,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             # [v12.2] lift 时只把"lift 段"喂给 tracker, 防止 look-ahead 跨段拉走 xy
             expert.set_path(pp)
             plp = env.data.body('prefab').xpos.copy()
-            _advance_expert_to_nearest_wp(expert, pp, plp)
+            _advance_expert_to_nearest_wp(
+                expert, pp, plp, force_descent=(phase == "descent"))
         ectl.reset(env._get_ee_pos(), cq)
 
         if z_pid is not None:
@@ -2594,6 +3159,7 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
         # [v12.6] 细粒度 RL 评估指标 tracker
         stab = StabilityMetrics()
         er = 0.0; es = 0; suc = False; term_reason = "running"
+        env_er = 0.0; intrinsic_er = 0.0; unsup_safety_er = 0.0
         mx = int(config[f"{phase}_rl"]["max_steps"])
         obs_pred_loss_sum = 0.0
         obs_pred_nll_sum = 0.0
@@ -2626,10 +3192,12 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
         while not rd:
             cq = env.data.qpos[:7].copy().astype(np.float32)
             base_dq_for_obs = None
-            if phase == "descent" and _descent_pid_residual:
+            if (phase == "descent" and
+                    (_descent_pid_residual or
+                     _descent_include_pid_base_obs(config))):
                 try:
-                    base_dq_for_obs = expert.compute_delta_q_target(
-                        obs, cq.astype(np.float64))
+                    base_dq_for_obs = compute_descent_base_delta_q(
+                        expert, obs, cq, env=env)
                 except Exception:
                     base_dq_for_obs = np.zeros(7, dtype=np.float32)
             elif phase == "cruise" and _cruise_nmpc_residual:
@@ -2787,6 +3355,24 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             # [v12 fix] 用 expert.compute_delta_q_target(..., residual_acc=...)
             # 这样积分器/速度限制/锚定/IK 都和 test_phase expert-only 完全一致.
             # 修复了之前 expert.tracker + EEAccController 拼接的"双积分器漂移"问题.
+            elif phase == "descent":
+                act, lp, val = agent.act(
+                    no_noisy, deterministic=False)
+                _vmax_z_d = float(config.get("ee_control", {}).get(
+                    "vel_max_z_descent", 0.03))
+                _no_up_z = bool(config.get("descent_rl", {}).get(
+                    "no_pid_no_upward_z", True))
+                dq = ectl.compute_delta_q(
+                    act, cq, ree, vel_max_z=_vmax_z_d,
+                    no_upward_z=_no_up_z)
+
+                dq = _add_act_noise(dq, pert["act_noise"])
+                no2, _, _, _, ei = _env_step_with_obs_predictor(dq)
+                rw, dn, sc, ri = compute_descent_reward(
+                    env, no2, config, rs,
+                    tracker=rew_tracker, rl_action=act)
+                rew_tracker.step()
+
             else:
                 raise ValueError(f"Unsupported phase: {phase}")
 
@@ -2835,6 +3421,40 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             if sc: suc = True
             if done and ri.get("termination"):
                 term_reason = ri["termination"]
+            env_rw = float(rw)
+            intrinsic_rw = 0.0
+            unsup_safety = 0.0
+            if intrinsic_rewarder.enabled:
+                try:
+                    _wobs_intr = build_wind_obs(env, _wf_max)
+                    _base_intr = None
+                    if (phase == "descent" and
+                            (_descent_pid_residual or
+                             _descent_include_pid_base_obs(config))):
+                        try:
+                            _cq_intr = env.data.qpos[:7].copy().astype(np.float32)
+                            _base_intr = compute_descent_base_delta_q(
+                                expert, no2, _cq_intr, env=env)
+                        except Exception:
+                            _base_intr = np.zeros(7, dtype=np.float32)
+                    elif phase == "cruise" and _cruise_nmpc_residual:
+                        _base_intr = get_last_nmpc_action(expert)
+                    _core_intr, _cable_intr, _wobs_intr, _tilt_intr, _yaw_intr = (
+                        build_phase_obs(
+                            phase, no2, env, sxy, txy, pt, py,
+                            wind_obs=_wobs_intr, base_action=_base_intr))
+                    _phase_intr = (
+                        _core_intr, _cable_intr, _wobs_intr,
+                        _tilt_intr, _yaw_intr, _base_intr)
+                    _phase_intr = _phase_obs_for_policy(
+                        phase, _phase_intr, config)
+                except Exception:
+                    _phase_intr = obs_pred_phase_obs
+                intrinsic_rw = intrinsic_rewarder.compute(_phase_intr)
+                unsup_safety = intrinsic_rewarder.terminal_penalty(
+                    term_reason, done, suc)
+                rw = intrinsic_rewarder.mix_reward(
+                    env_rw, intrinsic_rw, unsup_safety)
 
             # [v12.6] 细粒度 RL 评估指标更新 (no2 是 env._get_obs() raw 输出)
             stab.update_step(no2_true, config, env=env, rl_action=act)
@@ -2845,6 +3465,9 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                                 cable_raw=_buffer_cable_for_agent(
                                     agent, cable_for_policy))
 
+            env_er += env_rw
+            intrinsic_er += intrinsic_rw
+            unsup_safety_er += unsup_safety
             er += rw; es += 1; ts += 1; agent.total_steps = ts
             obs = no2
             agent._update_entropy_coef(global_ts=ts)
@@ -2859,8 +3482,8 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
                     if phase == "descent" and _descent_pid_residual:
                         try:
                             _cq2 = env.data.qpos[:7].copy().astype(np.float32)
-                            _base2 = expert.compute_delta_q_target(
-                                no2, _cq2.astype(np.float64))
+                            _base2 = compute_descent_base_delta_q(
+                                expert, no2, _cq2, env=env)
                         except Exception:
                             _base2 = np.zeros(7, dtype=np.float32)
                     elif phase == "cruise" and _cruise_nmpc_residual:
@@ -2962,6 +3585,11 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
               f"[{cur_str}] | {term_reason}")
         print(f"       PPO PL:{r.policy_loss:6.3f} VL:{r.value_loss:6.3f} "
               f"E:{r.entropy_loss:6.3f} KL:{r.approx_kl:.4f}")
+        if intrinsic_rewarder.enabled:
+            print(f"       APT I:{intrinsic_er:.2f} Env:{env_er:.2f} "
+                  f"Safe:{unsup_safety_er:.2f} "
+                  f"mem:{intrinsic_rewarder.memory_size} "
+                  f"knn_d:{intrinsic_rewarder.last_knn_dist:.4f}")
         if obs_predictor is not None:
             print(f"       ObsPred loss:{obs_pred_metrics[f'obs_pred/{phase}/loss']:.4f} "
                   f"rmse_raw:{obs_pred_metrics[f'obs_pred/{phase}/rmse_raw']:.4f} "
@@ -2997,6 +3625,15 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             f"diag/{phase}/actor_std_mean": _actor_std_mean,
             f"diag/{phase}/actor_std_max":  _actor_std_max,
         }
+        if intrinsic_rewarder.enabled:
+            log_metrics.update({
+                f"unsup/{phase}/env_reward": env_er,
+                f"unsup/{phase}/intrinsic_reward": intrinsic_er,
+                f"unsup/{phase}/safety_penalty": unsup_safety_er,
+                f"unsup/{phase}/memory_size": intrinsic_rewarder.memory_size,
+                f"unsup/{phase}/last_knn_dist":
+                    intrinsic_rewarder.last_knn_dist,
+            })
         # 课程指标
         log_metrics.update(cur_info)
         log_metrics.update(lucky_metrics)
@@ -3011,15 +3648,22 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
         log_metrics.update(stats.wandb_trends(phase))
         logger.log(ep, log_metrics)
 
+        _csv_row = [ep, ts, f"{er:.3f}", f"{ar:.3f}", f"{sr:.3f}", es,
+                    f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
+                    f"{r.entropy_loss:.4f}",
+                    cur.level_idx, f"{pert.get('wind_speed', 0.0):.4f}",
+                    f"{pert.get('wind_min', cur_info['cur/%s/wind_min' % phase]):.4f}",
+                    f"{pert.get('wind_max', cur_info['cur/%s/wind_max' % phase]):.4f}",
+                    f"{cur_info['cur/%s/sr_window' % phase]:.3f}",
+                    cur.eps_at_level]
+        if intrinsic_rewarder.enabled:
+            _csv_row.extend([
+                f"{env_er:.3f}", f"{intrinsic_er:.3f}",
+                f"{unsup_safety_er:.3f}", intrinsic_rewarder.memory_size,
+                f"{intrinsic_rewarder.last_knn_dist:.6f}",
+            ])
         with open(lf, "a", newline="") as f:
-            csv.writer(f).writerow([ep, ts, f"{er:.3f}", f"{ar:.3f}", f"{sr:.3f}", es,
-                                    f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
-                                    f"{r.entropy_loss:.4f}",
-                                    cur.level_idx, f"{pert.get('wind_speed', 0.0):.4f}",
-                                    f"{pert.get('wind_min', cur_info['cur/%s/wind_min' % phase]):.4f}",
-                                    f"{pert.get('wind_max', cur_info['cur/%s/wind_max' % phase]):.4f}",
-                                    f"{cur_info['cur/%s/sr_window' % phase]:.3f}",
-                                    cur.eps_at_level])
+            csv.writer(f).writerow(_csv_row)
         if ep > 0 and ep % SI == 0:
             save_checkpoint(agent, log_dir, ep, tag="latest",
                             obs_predictor=obs_predictor)
@@ -3027,12 +3671,21 @@ def _train_ppo_single(phase, log_dir, config, resume_ckpt=None):
             best = sr
             save_checkpoint(agent, log_dir, ep, tag="best",
                             obs_predictor=obs_predictor)
+        if (_best_l8_checkpoint_ready(cur, cur_info, phase) and
+                sr > best_l8):
+            best_l8 = sr
+            save_checkpoint(agent, log_dir, ep, tag="best_l8",
+                            obs_predictor=obs_predictor)
+            _write_best_l8_record(
+                log_dir, ep, ts, sr,
+                cur_info.get(f"cur/{phase}/sr_window", sr),
+                cur.level_idx, cur.eps_at_level)
         ep += 1
 
     save_checkpoint(agent, log_dir, ep, tag="final",
                     obs_predictor=obs_predictor)
     print(f"\n[{phase.upper()}-PPO] Done: {ts} steps, {(time.time()-t0)/60:.1f} min, "
-          f"best_sr={best*100:.0f}%")
+          f"best_sr={best*100:.0f}%, best_l8_sr={max(best_l8, 0.0)*100:.0f}%")
     logger.close(); env.close()
     return agent
 
@@ -3114,6 +3767,9 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
     shared_cur = CurriculumManager(config, phase)
     curs = [shared_cur for _ in range(n_envs)]
     ep_rewards = [0.0] * n_envs; ep_steps = [0] * n_envs
+    ep_env_rewards = [0.0] * n_envs
+    ep_intrinsic_rewards = [0.0] * n_envs
+    ep_unsup_safety = [0.0] * n_envs
     ep_suc     = [False] * n_envs
     ep_term    = ["running"] * n_envs
     obs_list   = [None] * n_envs
@@ -3246,6 +3902,9 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
         cable_histories[i].clear(); adaptation_states[i].reset()
         delay_states[i].reset(obs_list[i])
         ep_rewards[i] = 0.0; ep_steps[i] = 0
+        ep_env_rewards[i] = 0.0
+        ep_intrinsic_rewards[i] = 0.0
+        ep_unsup_safety[i] = 0.0
         ep_suc[i] = False; ep_term[i] = "running"
 
     if obs_predictor_enabled:
@@ -3272,11 +3931,14 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
     logger = Logger(log_dir, project=f"phase_rl_v11_vec", run_name=f"{phase}_ppo_vec")
     logger.update_config(config)
     stats = _make_episode_stats(config)
+    intrinsic_rewarder = UnsupervisedIntrinsicReward(config, phase)
+    if intrinsic_rewarder.enabled:
+        print(f"  [UnsupervisedPretrain-VEC] {intrinsic_rewarder.describe()}")
     timing_acc = {
         "rl_action_s": 0.0, "rl_action_calls": 0,
         "obs_pred_s": 0.0, "obs_pred_calls": 0,
     }
-    ts = 0; ep_count = 0; t0 = time.time(); best = 0.0
+    ts = 0; ep_count = 0; t0 = time.time(); best = 0.0; best_l8 = -1.0
 
     lf = os.path.join(log_dir, f"{phase}_ppo_vec_log.csv")
     _progress_ep, _progress_ts, _progress_log = (0, 0, None)
@@ -3314,6 +3976,11 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                        "rope_marker_camera_estimates_mean",
                        "rope_marker_cameras_mean",
                        "rope_marker_dropout_mean"]
+    if intrinsic_rewarder.enabled:
+        _ppo_vec_header.extend([
+            "env_reward", "intrinsic_reward", "unsup_safety_penalty",
+            "unsup_memory_size", "unsup_last_knn_dist",
+        ])
     _init_csv_log(lf, _ppo_vec_header, append_existing=(
         resume_ckpt and os.path.abspath(_progress_log or "") == os.path.abspath(lf)))
 
@@ -3326,7 +3993,8 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                 i, phase, obs_list[i], sxy_list[i], txy_list[i],
                 pt_list[i], py_list[i])
             critic_phase_obs_cache[i] = phase_obs_cache[i]
-            policy_phase_obs_cache[i] = phase_obs_cache[i]
+            policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                phase, phase_obs_cache[i], config)
             if cable_latent_use_rope_markers and hasattr(
                     vec, "get_rope_marker_features"):
                 rope_marker_feature_cache[i] = vec.get_rope_marker_features(i)
@@ -3367,6 +4035,8 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             target_phase_obs=critic_phase_obs_cache[i],
                             rope_marker_features=rope_marker_feature_cache[i]
                             if cable_latent_use_rope_markers else None))
+                    policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                        phase, policy_phase_obs_cache[i], config)
                     _accumulate_cable_latent_pred(
                         cable_latent_pred_acc[i], _clp_info)
 
@@ -3436,6 +4106,7 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
             # ── 处理每个 env 的结果 ─────────────────────────────────────────
             for i, res in enumerate(results):
                 rw = res['reward']; done = res['done']; suc_step = res['success']
+                env_rw = float(rw)
                 _update_vision_acc(vision_acc[i], res.get('info', {}))
                 if cable_latent_use_rope_markers:
                     _update_rope_marker_acc(
@@ -3514,6 +4185,7 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                 if suc_step: ep_suc[i] = True
                 if done and res['termination']:
                     ep_term[i] = res['termination']
+                env_rw = float(rw)
 
                 # [v14.0] 加入 buffer (用刚才 RL inference 时的 phase obs)
                 _core_prev, _cable_prev, _wind_prev, _, _, _ = (
@@ -3544,7 +4216,8 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             res['new_yaw'], res.get('new_base_dq'))
                     else:
                         next_critic_phase_obs = next_phase_obs
-                next_policy_phase_obs = next_phase_obs
+                next_policy_phase_obs = _phase_obs_for_policy(
+                    phase, next_phase_obs, config)
                 if (not done and next_phase_obs is not None and
                         cable_latent_predictors[i] is not None):
                     next_policy_phase_obs, _clp_info = (
@@ -3555,8 +4228,26 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             target_phase_obs=next_critic_phase_obs,
                             rope_marker_features=rope_marker_feature_cache[i]
                             if cable_latent_use_rope_markers else None))
+                    next_policy_phase_obs = _phase_obs_for_policy(
+                        phase, next_policy_phase_obs, config)
                     _accumulate_cable_latent_pred(
                         cable_latent_pred_acc[i], _clp_info)
+                intrinsic_rw = 0.0
+                unsup_safety = 0.0
+                if intrinsic_rewarder.enabled:
+                    feature_phase_obs = next_policy_phase_obs
+                    if feature_phase_obs is None and res.get('new_core_obs') is not None:
+                        feature_phase_obs = (
+                            res['new_core_obs'], res.get('new_cable_raw'),
+                            res.get('new_wind_obs'), res.get('new_tilt', 0.0),
+                            res.get('new_yaw', 0.0), res.get('new_base_dq'))
+                        feature_phase_obs = _phase_obs_for_policy(
+                            phase, feature_phase_obs, config)
+                    intrinsic_rw = intrinsic_rewarder.compute(feature_phase_obs)
+                    unsup_safety = intrinsic_rewarder.terminal_penalty(
+                        res.get('termination', ep_term[i]), done, ep_suc[i])
+                    rw = intrinsic_rewarder.mix_reward(
+                        env_rw, intrinsic_rw, unsup_safety)
                 next_val = 0.0
                 if (getattr(agent, "use_asymmetric_critic", False) and
                         next_critic_phase_obs is not None):
@@ -3606,6 +4297,9 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                             agent, "use_asymmetric_critic", False) else None),
                         critic_norm_obs=critic_obs_list[i])
 
+                ep_env_rewards[i] += env_rw
+                ep_intrinsic_rewards[i] += intrinsic_rw
+                ep_unsup_safety[i] += unsup_safety
                 ep_rewards[i] += rw; ep_steps[i] += 1; ts += 1
                 agent.total_steps = ts
                 if res.get('delta_q', None) is not None:
@@ -3657,6 +4351,13 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     print(f"[w{i}] Ep{ep_count:4d} [{ts:7d}] {mark} R:{ep_rewards[i]:6.2f}"
                           f"({ar:5.2f}) SR:{sr*100:4.0f}% S:{ep_steps[i]:3d} "
                           f"W:{perts[i].get('wind_speed', 0.0):.2f}m/s [{cur_str}] | {ep_term[i]}")
+                    if intrinsic_rewarder.enabled:
+                        print(f"       APT w{i} "
+                              f"I:{ep_intrinsic_rewards[i]:.2f} "
+                              f"Env:{ep_env_rewards[i]:.2f} "
+                              f"Safe:{ep_unsup_safety[i]:.2f} "
+                              f"mem:{intrinsic_rewarder.memory_size} "
+                              f"knn_d:{intrinsic_rewarder.last_knn_dist:.4f}")
                     if vision_summary:
                         _vf = str(vision_summary.get("top_failure", "") or "-")
                         print(f"       Vision w{i} "
@@ -3786,6 +4487,18 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                         "diag/ppo/actor_obs_dim": int(getattr(agent, "obs_dim", 0)),
                         "diag/ppo/critic_obs_dim": int(getattr(agent, "critic_obs_dim", 0)),
                     }
+                    if intrinsic_rewarder.enabled:
+                        log_metrics.update({
+                            f"unsup/{phase}/env_reward": ep_env_rewards[i],
+                            f"unsup/{phase}/intrinsic_reward":
+                                ep_intrinsic_rewards[i],
+                            f"unsup/{phase}/safety_penalty": ep_unsup_safety[i],
+                            f"unsup/{phase}/memory_size":
+                                intrinsic_rewarder.memory_size,
+                            f"unsup/{phase}/last_knn_dist":
+                                intrinsic_rewarder.last_knn_dist,
+                            f"unsup/{phase}/worker_id": i,
+                        })
                     log_metrics.update(obs_pred_metrics)
                     log_metrics.update(cable_latent_pred_metrics)
                     log_metrics.update(delay_mdp_metrics)
@@ -3803,34 +4516,43 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     log_metrics.update(stats.wandb_trends(phase))
                     logger.log(ep_count, log_metrics)
 
+                    _csv_row = [ep_count, ts, f"{ep_rewards[i]:.3f}",
+                        f"{ar:.3f}", f"{sr:.3f}", ep_steps[i],
+                        f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
+                        f"{r.entropy_loss:.4f}",
+                        curs[i].level_idx, f"{perts[i].get('wind_speed', 0.0):.4f}",
+                        f"{perts[i].get('wind_min', cur_info['cur/%s/wind_min' % phase]):.4f}",
+                        f"{perts[i].get('wind_max', cur_info['cur/%s/wind_max' % phase]):.4f}",
+                        f"{cur_info['cur/%s/sr_window' % phase]:.3f}",
+                        curs[i].eps_at_level, i,
+                        f"{_rl_ms:.4f}", f"{_pred_ms:.4f}",
+                        f"{_compute_hz:.1f}",
+                        f"{vision_summary.get('valid_rate', 0.0):.4f}",
+                        f"{vision_summary.get('active_cameras_mean', 0.0):.3f}",
+                        f"{vision_summary.get('reprojection_px_mean', 0.0):.4f}",
+                        f"{vision_summary.get('reprojection_px_p95', 0.0):.4f}",
+                        f"{vision_summary.get('depth_rmse_mm_mean', 0.0):.4f}",
+                        f"{vision_summary.get('depth_rmse_mm_p95', 0.0):.4f}",
+                        int(vision_summary.get('failure_steps', 0)),
+                        str(vision_summary.get('top_failure', "") or ""),
+                        str(rope_marker_summary.get('source', "") or ""),
+                        f"{rope_marker_summary.get('visible_rate', 0.0):.4f}",
+                        f"{rope_marker_summary.get('valid_rate', 0.0):.4f}",
+                        f"{rope_marker_summary.get('visible_mean', 0.0):.3f}",
+                        f"{rope_marker_summary.get('valid_after_noise_mean', 0.0):.3f}",
+                        f"{rope_marker_summary.get('camera_estimates_mean', 0.0):.3f}",
+                        f"{rope_marker_summary.get('cameras_mean', 0.0):.3f}",
+                        f"{rope_marker_summary.get('dropout_mean', 0.0):.3f}"]
+                    if intrinsic_rewarder.enabled:
+                        _csv_row.extend([
+                            f"{ep_env_rewards[i]:.3f}",
+                            f"{ep_intrinsic_rewards[i]:.3f}",
+                            f"{ep_unsup_safety[i]:.3f}",
+                            intrinsic_rewarder.memory_size,
+                            f"{intrinsic_rewarder.last_knn_dist:.6f}",
+                        ])
                     with open(lf, "a", newline="") as f:
-                        csv.writer(f).writerow([ep_count, ts, f"{ep_rewards[i]:.3f}",
-                            f"{ar:.3f}", f"{sr:.3f}", ep_steps[i],
-                            f"{r.policy_loss:.4f}", f"{r.value_loss:.4f}",
-                            f"{r.entropy_loss:.4f}",
-                            curs[i].level_idx, f"{perts[i].get('wind_speed', 0.0):.4f}",
-                            f"{perts[i].get('wind_min', cur_info['cur/%s/wind_min' % phase]):.4f}",
-                            f"{perts[i].get('wind_max', cur_info['cur/%s/wind_max' % phase]):.4f}",
-                            f"{cur_info['cur/%s/sr_window' % phase]:.3f}",
-                            curs[i].eps_at_level, i,
-                            f"{_rl_ms:.4f}", f"{_pred_ms:.4f}",
-                            f"{_compute_hz:.1f}",
-                            f"{vision_summary.get('valid_rate', 0.0):.4f}",
-                            f"{vision_summary.get('active_cameras_mean', 0.0):.3f}",
-                            f"{vision_summary.get('reprojection_px_mean', 0.0):.4f}",
-                            f"{vision_summary.get('reprojection_px_p95', 0.0):.4f}",
-                            f"{vision_summary.get('depth_rmse_mm_mean', 0.0):.4f}",
-                            f"{vision_summary.get('depth_rmse_mm_p95', 0.0):.4f}",
-                            int(vision_summary.get('failure_steps', 0)),
-                            str(vision_summary.get('top_failure', "") or ""),
-                            str(rope_marker_summary.get('source', "") or ""),
-                            f"{rope_marker_summary.get('visible_rate', 0.0):.4f}",
-                            f"{rope_marker_summary.get('valid_rate', 0.0):.4f}",
-                            f"{rope_marker_summary.get('visible_mean', 0.0):.3f}",
-                            f"{rope_marker_summary.get('valid_after_noise_mean', 0.0):.3f}",
-                            f"{rope_marker_summary.get('camera_estimates_mean', 0.0):.3f}",
-                            f"{rope_marker_summary.get('cameras_mean', 0.0):.3f}",
-                            f"{rope_marker_summary.get('dropout_mean', 0.0):.3f}"])
+                        csv.writer(f).writerow(_csv_row)
 
                     ep_count += 1
                     if ep_count > 0 and ep_count % SI == 0:
@@ -3844,6 +4566,17 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                                         obs_predictor=obs_predictors,
                                         cable_latent_predictor=(
                                             cable_latent_predictors))
+                    if (_best_l8_checkpoint_ready(curs[i], cur_info, phase) and
+                            sr > best_l8):
+                        best_l8 = sr
+                        save_checkpoint(agent, log_dir, ep_count, tag="best_l8",
+                                        obs_predictor=obs_predictors,
+                                        cable_latent_predictor=(
+                                            cable_latent_predictors))
+                        _write_best_l8_record(
+                            log_dir, ep_count, ts, sr,
+                            cur_info.get(f"cur/{phase}/sr_window", sr),
+                            curs[i].level_idx, curs[i].eps_at_level)
 
                     # 重置此 worker 的 env + 状态
                     obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
@@ -3860,13 +4593,17 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     vision_acc[i] = _new_vision_acc()
                     rope_marker_acc[i] = _new_rope_marker_acc()
                     ep_rewards[i] = 0.0; ep_steps[i] = 0
+                    ep_env_rewards[i] = 0.0
+                    ep_intrinsic_rewards[i] = 0.0
+                    ep_unsup_safety[i] = 0.0
                     ep_suc[i] = False; ep_term[i] = "running"
                     # 重新 build phase obs (新 episode 起点)
                     phase_obs_cache[i] = vec.build_phase_obs_remote(
                         i, phase, obs_list[i], sxy_list[i], txy_list[i],
                         pt_list[i], py_list[i])
                     critic_phase_obs_cache[i] = phase_obs_cache[i]
-                    policy_phase_obs_cache[i] = phase_obs_cache[i]
+                    policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                        phase, phase_obs_cache[i], config)
                     if cable_latent_use_rope_markers and hasattr(
                             vec, "get_rope_marker_features"):
                         rope_marker_feature_cache[i] = (
@@ -3887,6 +4624,8 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                                 target_phase_obs=critic_phase_obs_cache[i],
                                 rope_marker_features=rope_marker_feature_cache[i]
                                 if cable_latent_use_rope_markers else None))
+                        policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                            phase, policy_phase_obs_cache[i], config)
                         _accumulate_cable_latent_pred(
                             cable_latent_pred_acc[i], _clp_info)
 
@@ -3906,7 +4645,7 @@ def train_ppo_vec(phase, log_dir, config, resume_ckpt=None, n_envs=4):
                     obs_predictor=obs_predictors,
                     cable_latent_predictor=cable_latent_predictors)
     print(f"\n[{phase.upper()}-PPO-VEC] Done: {ts} steps, {(time.time()-t0)/60:.1f} min, "
-          f"best_sr={best*100:.0f}%")
+          f"best_sr={best*100:.0f}%, best_l8_sr={max(best_l8, 0.0)*100:.0f}%")
     return agent
 
 
@@ -4280,7 +5019,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
             # [v12.2] lift 时只把"lift 段"喂给 tracker, 防止 look-ahead 跨段拉走 xy
             expert.set_path(pp)
             plp = env.data.body('prefab').xpos.copy()
-            _advance_expert_to_nearest_wp(expert, pp, plp)
+            _advance_expert_to_nearest_wp(
+                expert, pp, plp, force_descent=(phase == "descent"))
         ectl.reset(env._get_ee_pos(), cq)
 
         if z_pid is not None:
@@ -4317,8 +5057,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
             base_dq_for_obs = cached_base_dq
             if phase == "descent" and _descent_pid_residual and base_dq_for_obs is None:
                 try:
-                    base_dq_for_obs = expert.compute_delta_q_target(
-                        obs, cq.astype(np.float64))
+                    base_dq_for_obs = compute_descent_base_delta_q(
+                        expert, obs, cq, env=env)
                 except Exception:
                     base_dq_for_obs = np.zeros(7, dtype=np.float32)
             elif phase == "cruise" and _cruise_nmpc_residual:
@@ -4448,8 +5188,8 @@ def train_sac(phase, log_dir, config, resume_ckpt=None):
             if phase == "descent" and _descent_pid_residual and not done:
                 try:
                     _cq3 = env.data.qpos[:7].copy().astype(np.float32)
-                    _base3 = expert.compute_delta_q_target(
-                        no2, _cq3.astype(np.float64))
+                    _base3 = compute_descent_base_delta_q(
+                        expert, no2, _cq3, env=env)
                 except Exception:
                     _base3 = np.zeros(7, dtype=np.float32)
                 cached_base_dq = _base3
@@ -4588,40 +5328,118 @@ def _distill_actor_step(agent, batch_obs, batch_actions):
     return float(loss.detach().cpu().item())
 
 
+@torch.no_grad()
+def _distill_student_action(agent, norm_obs, obs_history,
+                            deterministic=True):
+    norm_obs = np.asarray(norm_obs, dtype=np.float32)
+    if agent.use_lstm:
+        seq = obs_history.get_sequence()
+        obs_t = torch.as_tensor(seq, dtype=torch.float32,
+                                device=agent.device).unsqueeze(0)
+        action, _, _, _ = agent.actor.get_action(
+            obs_t, deterministic=deterministic)
+    else:
+        obs_t = torch.as_tensor(norm_obs.reshape(1, -1),
+                                dtype=torch.float32, device=agent.device)
+        action, _, _ = agent.actor.get_action(
+            obs_t, deterministic=deterministic)
+    return action.cpu().numpy().reshape(-1).astype(np.float32)
+
+
+def _distill_student_rollin_prob(dist_cfg, ts, total_steps):
+    final_prob = float(dist_cfg.get("student_rollin_prob", 0.0))
+    if final_prob <= 0.0:
+        return 0.0
+    start_prob = float(dist_cfg.get("student_rollin_start_prob", 0.0))
+    warmup = max(0, int(dist_cfg.get("student_rollin_warmup_steps", 0)))
+    ramp_steps = int(dist_cfg.get("student_rollin_ramp_steps", 0))
+    if ramp_steps <= 0:
+        ramp_frac = float(dist_cfg.get("student_rollin_ramp_frac", 0.5))
+        ramp_steps = max(1, int(max(total_steps, 1) * ramp_frac))
+    if ts < warmup:
+        return max(0.0, min(1.0, start_prob))
+    frac = min(1.0, max(0.0, (ts - warmup) / max(ramp_steps, 1)))
+    prob = start_prob + frac * (final_prob - start_prob)
+    return max(0.0, min(1.0, prob))
+
+
 def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
     """Distill a full-cable teacher policy into the current student config."""
     from vec_env import make_vec_env
 
     dist_cfg = config.setdefault("policy_distill", {})
+    teacher_kind = str(dist_cfg.get("teacher_kind", "policy")).lower()
+    if teacher_kind not in ("policy", "pid"):
+        raise ValueError(
+            "policy_distill.teacher_kind must be 'policy' or 'pid'")
     teacher_ckpt = teacher_ckpt or str(dist_cfg.get("teacher_ckpt", "") or "")
-    if not teacher_ckpt or not os.path.exists(teacher_ckpt):
+    if teacher_kind == "policy" and (not teacher_ckpt or not os.path.exists(teacher_ckpt)):
         raise ValueError("--teacher-ckpt is required for --algo distill")
 
     T = int(config["train"].get("total_timesteps", 300_000))
     SI = int(config["train"].get("save_interval", 50))
     batch_size = max(1, int(dist_cfg.get("batch_size", 1024)))
     deterministic_teacher = bool(dist_cfg.get("deterministic_teacher", True))
+    dist_cfg.setdefault("teacher_pid_base_rollout", True)
     start_method = config["train"].get("vec_env_start_method", "forkserver")
 
     print(f"\n{'='*60}\n  Policy DISTILL [VEC n_envs={n_envs}] | "
           f"{phase.upper()} | {T} samples | {log_dir}\n{'='*60}\n")
-    print(f"  Teacher: {teacher_ckpt}")
+    print(f"  Teacher kind: {teacher_kind}")
+    if teacher_kind == "policy":
+        print(f"  Teacher: {teacher_ckpt}")
+    else:
+        print("  Teacher: pure PID base (zero residual action, no policy ckpt)")
     print(f"  Student obs_dim={config[f'{phase}_rl']['obs_dim']} "
           f"cable_enabled={config.get('cable_encoder', {}).get('enabled', True)}")
+    target_mode = str(dist_cfg.get("student_action_target_mode", "auto"))
+    if target_mode == "auto" and phase == "descent":
+        target_mode = ("descent_stable_acc_plus_actor"
+                       if not _descent_pid_base_enabled(config)
+                       else "teacher_actor")
+    print(f"  Student action target: {target_mode} "
+          f"(teacher_actor_residual_coef="
+          f"{float(dist_cfg.get('teacher_actor_residual_coef', 0.35)):.2f})")
+    rollin_final_prob = float(dist_cfg.get("student_rollin_prob", 0.0))
+    if phase == "descent" and rollin_final_prob > 0.0:
+        max_rollin_ep = int(dist_cfg.get(
+            "student_rollin_max_steps_per_episode", 0))
+        recovery_steps = int(dist_cfg.get(
+            "student_rollin_recovery_steps", 0))
+        min_ep_step = int(dist_cfg.get(
+            "student_rollin_min_episode_step", 0))
+        print("  DAgger student roll-in: "
+              f"p_final={rollin_final_prob:.2f}, "
+              f"p_start={float(dist_cfg.get('student_rollin_start_prob', 0.0)):.2f}, "
+              f"warmup={int(dist_cfg.get('student_rollin_warmup_steps', 0))} steps, "
+              f"max_ep={max_rollin_ep}, recovery={recovery_steps}, "
+              f"min_ep_step={min_ep_step}")
+
+    rollout_config = copy.deepcopy(config)
+    if (phase == "descent" and bool(dist_cfg.get(
+            "teacher_pid_base_rollout", True))):
+        rollout_config.setdefault("descent_rl", {})["pid_residual_mode"] = True
+        rollout_config.setdefault("descent_rl", {})["include_pid_base_obs"] = True
+        print("  Teacher rollout: PID base enabled; "
+              f"student PID base enabled={_descent_pid_base_enabled(config)}")
 
     student = PPOPhaseAgent(phase, config=config)
-    teacher_config = _make_policy_distill_teacher_config(config, phase)
-    teacher = PPOPhaseAgent(phase, config=teacher_config)
-    teacher.load(teacher_ckpt)
-    teacher.actor.eval()
-    teacher.critic.eval()
-    for p in teacher.actor.parameters():
-        p.requires_grad = False
-    for p in teacher.critic.parameters():
-        p.requires_grad = False
+    teacher = None
+    if teacher_kind == "policy":
+        teacher_config = _make_policy_distill_teacher_config(
+            rollout_config, phase)
+        teacher = PPOPhaseAgent(phase, config=teacher_config)
+        teacher.load(teacher_ckpt)
+        teacher.actor.eval()
+        teacher.critic.eval()
+        for p in teacher.actor.parameters():
+            p.requires_grad = False
+        for p in teacher.critic.parameters():
+            p.requires_grad = False
 
     def _make_one(wid):
-        return make_phase_env_and_controllers(phase, config, worker_id=wid)
+        return make_phase_env_and_controllers(
+            phase, rollout_config, worker_id=wid)
 
     vec = make_vec_env(_make_one, n_envs=n_envs, start_method=start_method)
     curs = [CurriculumManager(config, phase) for _ in range(n_envs)]
@@ -4636,8 +5454,14 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
     ep_steps = [0] * n_envs
     ep_suc = [False] * n_envs
     ep_term = ["running"] * n_envs
+    ep_student_rollin_steps = [0] * n_envs
+    ep_rollin_prob_sum = [0.0] * n_envs
+    student_rollin_recovery_left = [0] * n_envs
     student_histories = [student.make_obs_history() for _ in range(n_envs)]
-    teacher_histories = [teacher.make_obs_history() for _ in range(n_envs)]
+    teacher_histories = [
+        teacher.make_obs_history() if teacher is not None else None
+        for _ in range(n_envs)
+    ]
     adaptation_states = [AdaptationHistoryState(config) for _ in range(n_envs)]
     cable_latent_predictor_enabled = bool(config.get(
         "cable_latent_predictor", {}).get("enabled", False))
@@ -4691,7 +5515,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
             obs_list[i], sxy_list[i], txy_list[i], rstate_list[i], perts[i] = \
                 _reset_one_env(i)
             student_histories[i].reset()
-            teacher_histories[i].reset()
+            if teacher_histories[i] is not None:
+                teacher_histories[i].reset()
             adaptation_states[i].reset()
 
         logger = Logger(log_dir, project="phase_policy_distill",
@@ -4706,6 +5531,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
             "vision_active_cameras_mean", "vision_reproj_px_mean",
             "vision_reproj_px_p95", "vision_depth_rmse_mm_mean",
             "vision_depth_rmse_mm_p95", "vision_failure_steps",
+            "student_rollin_steps", "student_rollin_frac",
+            "student_rollin_prob",
         ], append_existing=False)
 
         phase_obs_cache = [None] * n_envs
@@ -4713,7 +5540,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
             phase_obs_cache[i] = vec.build_phase_obs_remote(
                 i, phase, obs_list[i], sxy_list[i], txy_list[i],
                 pt_list[i], py_list[i])
-            policy_phase_obs_cache[i] = phase_obs_cache[i]
+            policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                phase, phase_obs_cache[i], config)
             if cable_latent_use_rope_markers and hasattr(
                     vec, "get_rope_marker_features"):
                 rope_marker_feature_cache[i] = vec.get_rope_marker_features(i)
@@ -4758,6 +5586,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                             target_phase_obs=phase_obs_cache[i],
                             rope_marker_features=rope_marker_feature_cache[i]
                             if cable_latent_use_rope_markers else None))
+                    policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                        phase, policy_phase_obs_cache[i], config)
                     if _clp_info is not None and _clp_info.trained:
                         cable_latent_pred_updates[i] += 1
                         cable_latent_pred_rmse[i] += float(_clp_info.rmse)
@@ -4772,14 +5602,20 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
 
         while ts < T:
             teacher_actions = []
+            rollout_actions = []
+            rollout_sources = []
+            rollin_prob = _distill_student_rollin_prob(dist_cfg, ts, T)
             for i in range(n_envs):
                 _core, _cable, _wind, _, _, _base = phase_obs_cache[i]
 
-                teacher_po = teacher.encode_obs(_core, _cable, _wind)
-                teacher_no = teacher.normalize_obs(teacher_po, update=False)
-                t_act, _, _ = teacher.act_with_history(
-                    teacher_no, teacher_histories[i],
-                    deterministic=deterministic_teacher)
+                if teacher_kind == "pid":
+                    t_act = np.zeros(student.action_dim, dtype=np.float32)
+                else:
+                    teacher_po = teacher.encode_obs(_core, _cable, _wind)
+                    teacher_no = teacher.normalize_obs(teacher_po, update=False)
+                    t_act, _, _ = teacher.act_with_history(
+                        teacher_no, teacher_histories[i],
+                        deterministic=deterministic_teacher)
 
                 _score, _scable, _swind, _, _, _ = policy_phase_obs_cache[i]
                 student_po = student.encode_obs(_score, _scable, _swind)
@@ -4790,7 +5626,38 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                     batch_obs.append(student_histories[i].get_sequence())
                 else:
                     batch_obs.append(student_no.copy())
-                batch_actions.append(np.asarray(t_act, dtype=np.float32).copy())
+                batch_actions.append(_distill_target_action(
+                    phase, phase_obs_cache[i], t_act, config))
+                s_act = _distill_student_action(
+                    student, student_no, student_histories[i],
+                    deterministic=bool(dist_cfg.get(
+                        "student_rollin_deterministic", True)))
+                max_rollin_ep = max(0, int(dist_cfg.get(
+                    "student_rollin_max_steps_per_episode", 0)))
+                recovery_steps = max(0, int(dist_cfg.get(
+                    "student_rollin_recovery_steps", 0)))
+                min_ep_step = max(0, int(dist_cfg.get(
+                    "student_rollin_min_episode_step", 0)))
+                rollin_allowed = True
+                if ep_steps[i] < min_ep_step:
+                    rollin_allowed = False
+                if (max_rollin_ep > 0 and
+                        ep_student_rollin_steps[i] >= max_rollin_ep):
+                    rollin_allowed = False
+                if student_rollin_recovery_left[i] > 0:
+                    student_rollin_recovery_left[i] -= 1
+                    rollin_allowed = False
+                use_student = (
+                    phase == "descent" and rollin_prob > 0.0 and
+                    rollin_allowed and np.random.random() < rollin_prob)
+                if use_student:
+                    rollout_actions.append(s_act)
+                    rollout_sources.append("student")
+                    ep_student_rollin_steps[i] += 1
+                    student_rollin_recovery_left[i] = recovery_steps
+                else:
+                    rollout_actions.append(t_act)
+                    rollout_sources.append("teacher")
                 teacher_actions.append(t_act)
 
             if len(batch_obs) >= batch_size:
@@ -4802,9 +5669,10 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
 
             payloads = []
             for i in range(n_envs):
+                ep_rollin_prob_sum[i] += rollin_prob
                 payloads.append({
                     'phase': phase,
-                    'rl_action': teacher_actions[i],
+                    'rl_action': rollout_actions[i],
                     'obs': obs_list[i],
                     'current_q': vec.get_qpos(i),
                     'start_xy': sxy_list[i],
@@ -4814,6 +5682,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                     'rstate': rstate_list[i],
                     'act_noise': perts[i]["act_noise"],
                     'base_dq': phase_obs_cache[i][5],
+                    'descent_pid_residual_mode': (
+                        rollout_sources[i] == "teacher"),
                     'train_reject_lucky_rebar_insert':
                         _lucky_reject_enabled(config),
                 })
@@ -4865,7 +5735,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                     phase_obs_cache[i] = next_phase_obs
                     pt_list[i] = next_phase_obs[3]
                     py_list[i] = next_phase_obs[4]
-                    policy_phase_obs_cache[i] = next_phase_obs
+                    policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                        phase, next_phase_obs, config)
                     if cable_latent_predictors[i] is not None:
                         policy_phase_obs_cache[i], _clp_info = (
                             _phase_obs_with_predicted_cable_latent(
@@ -4875,6 +5746,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                                 target_phase_obs=next_phase_obs,
                                 rope_marker_features=rope_marker_feature_cache[i]
                                 if cable_latent_use_rope_markers else None))
+                        policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                            phase, policy_phase_obs_cache[i], config)
                         if _clp_info is not None and _clp_info.trained:
                             cable_latent_pred_updates[i] += 1
                             cable_latent_pred_rmse[i] += float(_clp_info.rmse)
@@ -4895,12 +5768,17 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                     vision_summary = _summarize_vision_acc(vision_acc[i])
                     loss_avg = float(np.mean(loss_window)) if loss_window else 0.0
                     last_loss = float(loss_window[-1]) if loss_window else 0.0
+                    rollin_frac = (
+                        ep_student_rollin_steps[i] / max(ep_steps[i], 1))
+                    rollin_prob_avg = (
+                        ep_rollin_prob_sum[i] / max(ep_steps[i], 1))
                     mark = "✅" if ep_suc[i] else "❌"
                     print(f"[distill w{i}] Ep{ep_count:4d} [{ts:7d}] "
                           f"{mark} R:{ep_rewards[i]:6.2f} "
                           f"L:{last_loss:.5f}/{loss_avg:.5f} "
                           f"S:{ep_steps[i]:3d} W:{perts[i].get('wind_speed', 0.0):.2f} "
-                          f"L{curs[i].level_idx}/{curs[i].n_levels-1} | {ep_term[i]}")
+                          f"L{curs[i].level_idx}/{curs[i].n_levels-1} "
+                          f"RI:{rollin_frac:.2f} | {ep_term[i]}")
                     if cable_latent_predictors[i] is not None:
                         print(f"       CableLatPred w{i} "
                               f"rmse:{(cable_latent_pred_rmse[i] / max(cable_latent_pred_updates[i], 1)):.4f} "
@@ -4923,6 +5801,9 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                             f"{vision_summary.get('depth_rmse_mm_mean', 0.0):.4f}",
                             f"{vision_summary.get('depth_rmse_mm_p95', 0.0):.4f}",
                             int(vision_summary.get('failure_steps', 0)),
+                            ep_student_rollin_steps[i],
+                            f"{rollin_frac:.4f}",
+                            f"{rollin_prob_avg:.4f}",
                         ])
                     logger.log(ep_count, {
                         f"distill/{phase}/loss": last_loss,
@@ -4933,6 +5814,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                         f"distill/{phase}/level": curs[i].level_idx,
                         f"distill/{phase}/wind_speed":
                             perts[i].get('wind_speed', 0.0),
+                        f"distill/{phase}/student_rollin_frac": rollin_frac,
+                        f"distill/{phase}/student_rollin_prob": rollin_prob_avg,
                         f"distill/{phase}/vision_valid_rate":
                             vision_summary.get('valid_rate', 0.0),
                         f"cable_latent_pred/{phase}/rmse":
@@ -4959,14 +5842,19 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                     ep_steps[i] = 0
                     ep_suc[i] = False
                     ep_term[i] = "running"
+                    ep_student_rollin_steps[i] = 0
+                    ep_rollin_prob_sum[i] = 0.0
+                    student_rollin_recovery_left[i] = 0
                     student_histories[i].reset()
-                    teacher_histories[i].reset()
+                    if teacher_histories[i] is not None:
+                        teacher_histories[i].reset()
                     adaptation_states[i].reset()
                     vision_acc[i] = _new_vision_acc()
                     phase_obs_cache[i] = vec.build_phase_obs_remote(
                         i, phase, obs_list[i], sxy_list[i], txy_list[i],
                         pt_list[i], py_list[i])
-                    policy_phase_obs_cache[i] = phase_obs_cache[i]
+                    policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                        phase, phase_obs_cache[i], config)
                     if cable_latent_use_rope_markers and hasattr(
                             vec, "get_rope_marker_features"):
                         rope_marker_feature_cache[i] = (
@@ -4989,6 +5877,8 @@ def train_policy_distill(phase, log_dir, config, teacher_ckpt=None, n_envs=4):
                                 target_phase_obs=phase_obs_cache[i],
                                 rope_marker_features=rope_marker_feature_cache[i]
                                 if cable_latent_use_rope_markers else None))
+                        policy_phase_obs_cache[i] = _phase_obs_for_policy(
+                            phase, policy_phase_obs_cache[i], config)
                         if _clp_info is not None and _clp_info.trained:
                             cable_latent_pred_updates[i] += 1
                             cable_latent_pred_rmse[i] += float(_clp_info.rmse)
@@ -5029,6 +5919,9 @@ def train(phase, log_dir, algo="ppo", custom_config=None, resume_ckpt=None):
         ins_cfg["lucky_reject_auto_enable"] = False
     set_global_seed(config["train"].get("seed", 42))
     os.makedirs(log_dir, exist_ok=True)
+    config_snapshot = save_resolved_config_snapshot(
+        log_dir, config, phase, algo, resume_ckpt=resume_ckpt)
+    print(f"  [config] resolved snapshot: {config_snapshot}")
     _cf = float(config.get("sim", {}).get("control_freq_hz", 10.0))
     print(f"  [control] {phase}: {_cf:.1f}Hz, "
           f"action_dt={1.0 / max(_cf, 1e-6):.3f}s, "
@@ -5095,8 +5988,42 @@ if __name__ == "__main__":
                         help="[v11] 断点续训 checkpoint 路径 (替代旧 --bc-ckpt)")
     parser.add_argument("--teacher-ckpt", type=str, default=None,
                         help="teacher policy checkpoint for --algo distill")
+    parser.add_argument("--distill-teacher-kind", type=str, default=None,
+                        choices=["policy", "pid"],
+                        help="distillation teacher source: policy ckpt or pure PID base")
     parser.add_argument("--distill-batch-size", type=int, default=None,
                         help="supervised policy distillation batch size")
+    parser.add_argument("--distill-action-target-mode", type=str, default=None,
+                        choices=[
+                            "auto", "teacher_actor", "descent_base_acc",
+                            "descent_base_acc_plus_actor",
+                            "descent_stable_acc",
+                            "descent_stable_acc_plus_actor"],
+                        help="student action target used by --algo distill")
+    parser.add_argument("--distill-teacher-residual-coef", type=float,
+                        default=None,
+                        help="coef for teacher actor residual in *_plus_actor distill targets")
+    parser.add_argument("--distill-student-rollin-prob", type=float,
+                        default=None,
+                        help="final probability of student-controlled DAgger roll-in")
+    parser.add_argument("--distill-student-rollin-start-prob", type=float,
+                        default=None,
+                        help="initial probability of student-controlled roll-in")
+    parser.add_argument("--distill-student-rollin-warmup-steps", type=int,
+                        default=None,
+                        help="number of teacher-only distill samples before roll-in ramp")
+    parser.add_argument("--distill-student-rollin-ramp-steps", type=int,
+                        default=None,
+                        help="number of samples over which student roll-in ramps up")
+    parser.add_argument("--distill-student-rollin-max-steps-per-episode",
+                        type=int, default=None,
+                        help="cap student-controlled DAgger probe steps per episode")
+    parser.add_argument("--distill-student-rollin-recovery-steps", type=int,
+                        default=None,
+                        help="force this many teacher steps after each student roll-in")
+    parser.add_argument("--distill-student-rollin-min-episode-step", type=int,
+                        default=None,
+                        help="do not roll in student before this episode step")
     parser.add_argument("--reset-optimizer-on-resume", action="store_true",
                         help="reset Adam state after loading --resume-ckpt")
     parser.add_argument("--seed",      type=int, default=42)
@@ -5147,6 +6074,14 @@ if __name__ == "__main__":
                         help="keep cable latent dims but feed zeros for ablation")
     parser.add_argument("--disable-cable-obs", action="store_true",
                         help="remove cable latent dims; requires matching obs_dim/checkpoint")
+    parser.add_argument("--cable-encoder-output-dim", type=int, default=None,
+                        help="override CableEncoder output dimension and matching phase obs_dim")
+    parser.add_argument("--trainable-cable-encoder", action="store_true",
+                        help="train CableEncoder end-to-end through PPO update")
+    parser.add_argument("--frozen-cable-encoder", action="store_true",
+                        help="force the legacy frozen CableEncoder path")
+    parser.add_argument("--cable-encoder-lr", type=float, default=None,
+                        help="override trainable CableEncoder learning rate")
     parser.add_argument("--asymmetric-critic", action="store_true",
                         help="train actor on deploy obs while critic sees full cable-latent obs")
     parser.add_argument("--critic-cable-encoder-ckpt", type=str, default=None,
@@ -5271,6 +6206,8 @@ if __name__ == "__main__":
                         help="override PPO actor learning rate, also after checkpoint resume")
     parser.add_argument("--ppo-lr-critic", type=float, default=None,
                         help="override PPO critic learning rate, also after checkpoint resume")
+    parser.add_argument("--disable-ppo-lstm", action="store_true",
+                        help="matched PPO architecture ablation: use feed-forward MLP actor/critic instead of LSTM")
     parser.add_argument("--freeze-obs-norm", action="store_true",
                         help="keep checkpoint observation normalization fixed during PPO")
     parser.add_argument("--descent-residual-dq-scale", type=float, default=None,
@@ -5293,6 +6230,10 @@ if __name__ == "__main__":
                         help="outer XY gate where descent z trickle tapers to zero")
     parser.add_argument("--descent-base-v-max-z", type=float, default=None,
                         help="override descent PID maximum payload z descent speed")
+    parser.add_argument("--disable-descent-pid-base", action="store_true",
+                        help="descent ablation: execute RL action directly without adding PID base")
+    parser.add_argument("--keep-descent-base-obs", action="store_true",
+                        help="with --disable-descent-pid-base, keep PID base in policy observations")
     parser.add_argument("--descent-alignment-z-gate", type=float, default=None,
                         help="XY gate for descent z-progress reward")
     parser.add_argument("--descent-premature-descent-xy-gate", type=float, default=None,
@@ -5354,9 +6295,46 @@ if __name__ == "__main__":
     cc.setdefault("train", {})["seed"] = args.seed
     if args.teacher_ckpt is not None:
         cc.setdefault("policy_distill", {})["teacher_ckpt"] = str(args.teacher_ckpt)
+    if args.distill_teacher_kind is not None:
+        cc.setdefault("policy_distill", {})["teacher_kind"] = str(
+            args.distill_teacher_kind)
     if args.distill_batch_size is not None:
         cc.setdefault("policy_distill", {})["batch_size"] = int(
             args.distill_batch_size)
+    if args.distill_action_target_mode is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_action_target_mode"] = str(args.distill_action_target_mode)
+    if args.distill_teacher_residual_coef is not None:
+        cc.setdefault("policy_distill", {})[
+            "teacher_actor_residual_coef"] = float(
+                args.distill_teacher_residual_coef)
+    if args.distill_student_rollin_prob is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_prob"] = float(args.distill_student_rollin_prob)
+    if args.distill_student_rollin_start_prob is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_start_prob"] = float(
+                args.distill_student_rollin_start_prob)
+    if args.distill_student_rollin_warmup_steps is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_warmup_steps"] = int(
+                args.distill_student_rollin_warmup_steps)
+    if args.distill_student_rollin_ramp_steps is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_ramp_steps"] = int(
+                args.distill_student_rollin_ramp_steps)
+    if args.distill_student_rollin_max_steps_per_episode is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_max_steps_per_episode"] = int(
+                args.distill_student_rollin_max_steps_per_episode)
+    if args.distill_student_rollin_recovery_steps is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_recovery_steps"] = int(
+                args.distill_student_rollin_recovery_steps)
+    if args.distill_student_rollin_min_episode_step is not None:
+        cc.setdefault("policy_distill", {})[
+            "student_rollin_min_episode_step"] = int(
+                args.distill_student_rollin_min_episode_step)
     if args.no_curriculum:
         cc.setdefault("curriculum", {})["enabled"] = False
     task_cc = cc.setdefault("task", {})
@@ -5390,6 +6368,8 @@ if __name__ == "__main__":
         cc.setdefault("ppo", {})["lr_actor"] = float(args.ppo_lr_actor)
     if args.ppo_lr_critic is not None:
         cc.setdefault("ppo", {})["lr_critic"] = float(args.ppo_lr_critic)
+    if args.disable_ppo_lstm:
+        cc.setdefault("ppo", {})["use_lstm"] = False
     if args.freeze_obs_norm:
         cc.setdefault("ppo", {})["freeze_obs_norm"] = True
     if args.obs_predictor:
@@ -5429,11 +6409,38 @@ if __name__ == "__main__":
         cc.setdefault("vision", {})["position_noise_std"] = [_vn, _vn, _vn * 1.5]
     if args.vision_dropout is not None:
         cc.setdefault("vision", {})["dropout_prob"] = float(args.vision_dropout)
+    def _set_phase_cable_obs_dim(out_dim):
+        out_dim = max(0, int(out_dim))
+        if args.phase == "descent":
+            cc.setdefault("descent_rl", {})["obs_dim"] = 44 + out_dim
+        elif args.phase == "cruise":
+            cc.setdefault("cruise_rl", {})["obs_dim"] = 45 + out_dim
+        if bool(cc.get("asymmetric_critic", {}).get("enabled", False)):
+            if args.phase == "descent":
+                cc.setdefault("asymmetric_critic", {})["critic_obs_dim"] = 44 + out_dim
+            elif args.phase == "cruise":
+                cc.setdefault("asymmetric_critic", {})["critic_obs_dim"] = 45 + out_dim
+            cc.setdefault("asymmetric_critic", {})["cable_output_dim"] = out_dim
+
+    if args.cable_encoder_output_dim is not None:
+        ce_cc = cc.setdefault("cable_encoder", {})
+        ce_cc["enabled"] = int(args.cable_encoder_output_dim) > 0
+        ce_cc["zero_obs"] = False
+        ce_cc["output_dim"] = max(0, int(args.cable_encoder_output_dim))
+        _set_phase_cable_obs_dim(ce_cc["output_dim"])
+    if args.trainable_cable_encoder:
+        cc.setdefault("cable_encoder", {})["trainable"] = True
+    if args.frozen_cable_encoder:
+        cc.setdefault("cable_encoder", {})["trainable"] = False
+    if args.cable_encoder_lr is not None:
+        cc.setdefault("cable_encoder", {})["lr"] = float(args.cable_encoder_lr)
     if args.zero_cable_obs:
         ce_cc = cc.setdefault("cable_encoder", {})
         ce_cc["enabled"] = True
         ce_cc["zero_obs"] = True
-        ce_cc.setdefault("output_dim", 32)
+        ce_cc.setdefault("output_dim", int(DEFAULT_CONFIG.get(
+            "cable_encoder", {}).get("output_dim", 16)))
+        _set_phase_cable_obs_dim(ce_cc["output_dim"])
     if args.disable_cable_obs:
         ce_cc = cc.setdefault("cable_encoder", {})
         ce_cc["enabled"] = False
@@ -5463,12 +6470,11 @@ if __name__ == "__main__":
         ce_cc = cc.setdefault("cable_encoder", {})
         ce_cc["enabled"] = True
         ce_cc["zero_obs"] = False
-        ce_cc["output_dim"] = int(DEFAULT_CONFIG.get(
-            "cable_encoder", {}).get("output_dim", 32))
+        ce_cc["output_dim"] = int(ce_cc.get(
+            "output_dim", DEFAULT_CONFIG.get(
+                "cable_encoder", {}).get("output_dim", 16)))
         if args.phase in ("descent", "cruise"):
-            cc.setdefault(f"{args.phase}_rl", {})["obs_dim"] = int(
-                DEFAULT_CONFIG.get(f"{args.phase}_rl", {}).get(
-                    "obs_dim", cc.get(f"{args.phase}_rl", {}).get("obs_dim", 0)))
+            _set_phase_cable_obs_dim(ce_cc["output_dim"])
         cc.setdefault("adaptation_history", {})["enabled"] = False
         if args.adapt_history_action_dim is not None:
             clp_cc["action_dim"] = int(args.adapt_history_action_dim)
@@ -5639,6 +6645,11 @@ if __name__ == "__main__":
             cur_cc[f"{args.phase}_{_cfg_suffix}"] = _cast(_val)
     if args.phase == "descent":
         drl_cc = cc.setdefault("descent_rl", {})
+        if args.disable_descent_pid_base:
+            drl_cc["pid_residual_mode"] = False
+            drl_cc["include_pid_base_obs"] = bool(args.keep_descent_base_obs)
+        elif args.keep_descent_base_obs:
+            drl_cc["include_pid_base_obs"] = True
         if args.descent_residual_dq_scale is not None:
             drl_cc["residual_dq_scale"] = float(args.descent_residual_dq_scale)
         if args.descent_residual_acc_xy is not None:

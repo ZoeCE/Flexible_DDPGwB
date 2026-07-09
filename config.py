@@ -429,7 +429,7 @@ DEFAULT_CONFIG = {
     # 17c. [v14.0] Cable Encoder — 压缩 240 维绳索 obs 到低维隐特征
     # ==========================================================================
     # 问题: 240 维 cable obs 占 obs 总维的 ~90%, 淹没其他关键信号
-    # 方案: 用 2 层 MLP encoder 压缩到 32 维, 再与其他 obs concat
+    # 方案: 用 2 层 MLP encoder 压缩到 8 维, 再与其他 obs concat
     # 文献: Peng et al. 2017 (privileged info), Miki et al. 2022 (encoder for terrain)
     "cable_encoder": {
         "enabled":               True,
@@ -439,9 +439,14 @@ DEFAULT_CONFIG = {
         # inputs are neutral zeros instead of an out-of-distribution constant.
         "zero_obs":              False,
         "zero_obs_fill":         "obs_norm_mean",
+        # Current mainline (2026-07-05): trainable 8D CableEncoder.
+        # Legacy default before this promotion was frozen 32D; reproduce it
+        # explicitly with --cable-encoder-output-dim 32 --frozen-cable-encoder.
+        "trainable":             True,
+        "lr":                    1e-4,
         "raw_dim":               240,   # 4 根 × 10 段 × 6 维
         "hidden_dim":            128,   # encoder 隐藏层
-        "output_dim":            32,    # encoder 输出维度 (接入 actor/critic)
+        "output_dim":            8,     # encoder 输出维度 (接入 actor/critic)
         "n_layers":              2,     # encoder 深度
         "normalize_input":       True,  # 对 raw cable obs 做 LayerNorm
     },
@@ -576,12 +581,12 @@ DEFAULT_CONFIG = {
         # target_mode:
         #   raw: predict the full raw env observation (old 294D path).
         #   non_cable_latent: predict env raw obs before the cable block
-        #      (0:54) plus CableEncoder(cable_raw) latent (32D). This reduces
-        #      target width from 294 to 86 and gives important non-cable state a
+        #      (0:54) plus CableEncoder(cable_raw) latent (8D). This reduces
+        #      target width from 294 to 62 and gives important non-cable state a
         #      larger loss share.
         "target_mode":           "raw",
         "non_cable_dim":         54,
-        "cable_latent_dim":      32,
+        "cable_latent_dim":      8,
         "non_cable_loss_weight": 2.0,
         "cable_latent_loss_weight": 1.0,
         "cable_latent_scale":    1.0,
@@ -608,8 +613,8 @@ DEFAULT_CONFIG = {
     },
     "asymmetric_critic": {
         "enabled":                  False,
-        "critic_obs_dim":           76,
-        "cable_output_dim":         32,
+        "critic_obs_dim":           52,
+        "cable_output_dim":         8,
         "cable_encoder_ckpt":       "",
     },
     "adaptation_history": {
@@ -619,11 +624,11 @@ DEFAULT_CONFIG = {
     },
     "cable_latent_predictor": {
         # Separate from observation_predictor. ObsPred fills missing/low-rate
-        # visible observations; CableLatPred estimates the frozen 32D
-        # CableEncoder latent from deployable visible observations/history.
+        # visible observations; CableLatPred estimates the 8D CableEncoder
+        # latent from deployable visible observations/history.
         "enabled":                  False,
         "train_enabled":            True,
-        "latent_dim":               32,
+        "latent_dim":               8,
         "action_dim":               7,
         "hidden_dim":               128,
         "n_layers":                 1,
@@ -667,8 +672,8 @@ DEFAULT_CONFIG = {
     # ==========================================================================
     "cruise_rl": {
         # [nmpc-residual] obs_dim: core 42 incl. nmpc_action(4)
-        # + cable_encoder(32) + wind_obs(3) = 77
-        "obs_dim":            77,
+        # + trainable cable_encoder(8) + wind_obs(3) = 53
+        "obs_dim":            53,
         "action_dim":         3,    # [v13.0] 2 → 3 (xy + z), 因为合并了 lift 的 z 残差
         "init_xy_range":      0.01,
         "init_z_range":       0.01,
@@ -790,9 +795,9 @@ DEFAULT_CONFIG = {
     # 20. Phase 3: Descent RL (PID base + RL residual delta_q)
     # ==========================================================================
     "descent_rl": {
-        # [v15.4] obs_dim: 原始 29 + normalized insertion-state(5)
-        # + base_dq_norm(7) + cable_encoder(32) + wind_obs(3) = 76
-        "obs_dim":            76,
+        # [v15.5] obs_dim: 原始 29 + normalized insertion-state(5)
+        # + base_dq_norm(7) + trainable cable_encoder(8) + wind_obs(3) = 52
+        "obs_dim":            52,
         "action_dim":         3,
         "init_xy_range":      0.030,
         "init_z_range":       0.005,
@@ -829,6 +834,7 @@ DEFAULT_CONFIG = {
 
         # 架构: PID + residual RL
         "pid_residual_mode":   True,
+        "include_pid_base_obs": True,
         # [v14.2b] 加大残差权威
         # 诊断: 成功案例都在 rl_action_mag_peak ≥ 0.25 时出现
         # 说明 RL 需要足够大的残差才能完成最后 5mm 精度修正
@@ -870,6 +876,7 @@ DEFAULT_CONFIG = {
         "acc_max_xy":         0.60,
         "acc_max_z":          0.90,
         "vel_max_z":          0.05,
+        "no_pid_no_upward_z": True,
 
         "reward": {
             # v15 simplified descent reward:
@@ -1048,6 +1055,763 @@ DEFAULT_CONFIG = {
                 "train": {
                     "total_timesteps": 6_000_000,
                     "n_envs": 8,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_no_pid_insert_task_distill": {
+            "description": "No-PID-base full-action ablation pretrain: pure PID rollout/labels with insertion-task reward semantics.",
+            "phase": "descent",
+            "algo": "distill",
+            "log_dir": "saves/descent_ablation_no_pid_pid_distill_insert_task",
+            "config": {
+                "train": {
+                    "total_timesteps": 1_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "pid_residual_mode": False,
+                    "include_pid_base_obs": False,
+                    "early_stop_enabled": False,
+                    "acc_max_xy": 0.60,
+                    "acc_max_z": 0.90,
+                    "residual_acc_max_xy": 0.60,
+                    "residual_acc_max_z": 0.90,
+                    "reward": {
+                        "mode": "no_pid_insert_task",
+                        "task_xy_sigma": 0.050,
+                        "task_z_sigma": 0.050,
+                        "task_tilt_sigma": 0.20,
+                        "task_yaw_sigma": 0.30,
+                        "task_proximity_coef": 1.20,
+                        "task_pose_coef": 0.20,
+                        "task_progress_coef": 0.60,
+                        "task_progress_clip": 0.20,
+                        "swing_energy_thresh": 0.010,
+                        "swing_energy_coef": 2.0,
+                        "swing_energy_penalty_max": 0.12,
+                        "cable_ke_thresh": 0.08,
+                        "cable_ke_penalty_coef": 0.08,
+                        "cable_ke_penalty_max": 0.02,
+                        "action_smoothness_coef": 0.006,
+                        "action_penalty_max": 0.010,
+                        "timeout_penalty": 0.0,
+                        "late_step_penalty_coef": 0.0,
+                        "failure_miss_penalty_coef": 0.0,
+                        "stuck_fail_penalty": -6.0,
+                        "instability_penalty": -20.0,
+                        "crash_penalty": -20.0,
+                        "lucky_insert_bonus": 25.0,
+                        "success_bonus": 100.0,
+                    },
+                },
+                "policy_distill": {
+                    "teacher_kind": "pid",
+                    "teacher_pid_base_rollout": True,
+                    "student_action_target_mode": "descent_base_acc",
+                    "teacher_actor_residual_coef": 0.0,
+                    "batch_size": 1024,
+                    "student_rollin_prob": 0.0,
+                    "deterministic_teacher": True,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_no_pid_insert_task_ppo": {
+            "description": "No-PID-base full-action PPO ablation with insertion-task reward, matched to the 8M-step true-observation pretrain.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_no_pid_insert_task_ppo",
+            "config": {
+                "train": {
+                    "total_timesteps": 8_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "descent_rl": {
+                    "pid_residual_mode": False,
+                    "include_pid_base_obs": False,
+                    "early_stop_enabled": False,
+                    "acc_max_xy": 0.60,
+                    "acc_max_z": 0.90,
+                    "residual_acc_max_xy": 0.60,
+                    "residual_acc_max_z": 0.90,
+                    "reward": {
+                        "mode": "no_pid_insert_task",
+                        "task_xy_sigma": 0.050,
+                        "task_z_sigma": 0.050,
+                        "task_tilt_sigma": 0.20,
+                        "task_yaw_sigma": 0.30,
+                        "task_proximity_coef": 1.20,
+                        "task_pose_coef": 0.20,
+                        "task_progress_coef": 0.60,
+                        "task_progress_clip": 0.20,
+                        "swing_energy_thresh": 0.010,
+                        "swing_energy_coef": 2.0,
+                        "swing_energy_penalty_max": 0.12,
+                        "cable_ke_thresh": 0.08,
+                        "cable_ke_penalty_coef": 0.08,
+                        "cable_ke_penalty_max": 0.02,
+                        "action_smoothness_coef": 0.006,
+                        "action_penalty_max": 0.010,
+                        "timeout_penalty": 0.0,
+                        "late_step_penalty_coef": 0.0,
+                        "failure_miss_penalty_coef": 0.0,
+                        "stuck_fail_penalty": -6.0,
+                        "instability_penalty": -20.0,
+                        "crash_penalty": -20.0,
+                        "lucky_insert_bonus": 25.0,
+                        "success_bonus": 100.0,
+                    },
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_no_pid_unsup_apt_pretrain": {
+            "description": "A1-U no-PID reward-free PPO pretrain with APT/RE3-style kNN state-entropy intrinsic reward.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_no_pid_unsup_apt_pretrain",
+            "config": {
+                "train": {
+                    "total_timesteps": 1_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "pid_residual_mode": False,
+                    "include_pid_base_obs": False,
+                    "early_stop_enabled": False,
+                    "acc_max_xy": 0.60,
+                    "acc_max_z": 0.90,
+                    "residual_acc_max_xy": 0.60,
+                    "residual_acc_max_z": 0.90,
+                    "reward": {
+                        "mode": "no_pid_insert_task",
+                        "task_xy_sigma": 0.050,
+                        "task_z_sigma": 0.050,
+                        "task_tilt_sigma": 0.20,
+                        "task_yaw_sigma": 0.30,
+                        "task_proximity_coef": 1.20,
+                        "task_pose_coef": 0.20,
+                        "task_progress_coef": 0.60,
+                        "task_progress_clip": 0.20,
+                        "swing_energy_thresh": 0.010,
+                        "swing_energy_coef": 2.0,
+                        "swing_energy_penalty_max": 0.12,
+                        "cable_ke_thresh": 0.08,
+                        "cable_ke_penalty_coef": 0.08,
+                        "cable_ke_penalty_max": 0.02,
+                        "action_smoothness_coef": 0.006,
+                        "action_penalty_max": 0.010,
+                        "timeout_penalty": 0.0,
+                        "late_step_penalty_coef": 0.0,
+                        "failure_miss_penalty_coef": 0.0,
+                        "stuck_fail_penalty": -6.0,
+                        "instability_penalty": -20.0,
+                        "crash_penalty": -20.0,
+                        "lucky_insert_bonus": 25.0,
+                        "success_bonus": 100.0,
+                    },
+                },
+                "unsupervised_pretrain": {
+                    "enabled": True,
+                    "method": "apt_knn",
+                    "reward_mode": "replace",
+                    "feature_source": "descent_task_core",
+                    "include_wind": False,
+                    "knn_k": 12,
+                    "min_memory": 512,
+                    "memory_size": 50_000,
+                    "sample_size": 4096,
+                    "distance_temperature": 0.10,
+                    "reward_scale": 1.0,
+                    "reward_clip": 2.0,
+                    "warmup_reward": 0.0,
+                    "failure_penalty": -2.0,
+                    "stuck_penalty": -0.5,
+                    "timeout_penalty": 0.0,
+                    "success_reward": 0.0,
+                    "feature_clip": 10.0,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_no_pid_unsup_apt_finetune": {
+            "description": "A1-U no-PID PPO finetune after APT/RE3-style unsupervised pretrain; resume from the pretrain ckpt.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_no_pid_unsup_apt_finetune",
+            "config": {
+                "train": {
+                    "total_timesteps": 8_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "descent_rl": {
+                    "pid_residual_mode": False,
+                    "include_pid_base_obs": False,
+                    "early_stop_enabled": False,
+                    "acc_max_xy": 0.60,
+                    "acc_max_z": 0.90,
+                    "residual_acc_max_xy": 0.60,
+                    "residual_acc_max_z": 0.90,
+                    "reward": {
+                        "mode": "no_pid_insert_task",
+                        "task_xy_sigma": 0.050,
+                        "task_z_sigma": 0.050,
+                        "task_tilt_sigma": 0.20,
+                        "task_yaw_sigma": 0.30,
+                        "task_proximity_coef": 1.20,
+                        "task_pose_coef": 0.20,
+                        "task_progress_coef": 0.60,
+                        "task_progress_clip": 0.20,
+                        "swing_energy_thresh": 0.010,
+                        "swing_energy_coef": 2.0,
+                        "swing_energy_penalty_max": 0.12,
+                        "cable_ke_thresh": 0.08,
+                        "cable_ke_penalty_coef": 0.08,
+                        "cable_ke_penalty_max": 0.02,
+                        "action_smoothness_coef": 0.006,
+                        "action_penalty_max": 0.010,
+                        "timeout_penalty": 0.0,
+                        "late_step_penalty_coef": 0.0,
+                        "failure_miss_penalty_coef": 0.0,
+                        "stuck_fail_penalty": -6.0,
+                        "instability_penalty": -20.0,
+                        "crash_penalty": -20.0,
+                        "lucky_insert_bonus": 25.0,
+                        "success_bonus": 100.0,
+                    },
+                },
+                "unsupervised_pretrain": {
+                    "enabled": False,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_trueobs_no_cable_latent_pretrain": {
+            "description": "True-observation PID+Residual PPO ablation with the cable latent module removed from the policy network.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_trueobs_no_cable_latent_pretrain",
+            "config": {
+                "train": {
+                    "total_timesteps": 8_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "obs_dim": 44,
+                },
+                "cable_encoder": {
+                    "enabled": False,
+                    "zero_obs": True,
+                    "output_dim": 0,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_mpc_base_residual_ppo": {
+            "description": "A0 paper ablation: MPC base + residual PPO, matched 8M-step true-observation training budget.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_mpc_base_residual_ppo",
+            "config": {
+                "train": {
+                    "total_timesteps": 8_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "base_expert": "mpc",
+                    "pid_residual_mode": True,
+                    "include_pid_base_obs": True,
+                },
+                "traditional_experts": {
+                    "mpc": {
+                        "N": 14,
+                        "model_damping_xy": 1.15,
+                        "kp_feedback_xy": 1.85,
+                        "kd_feedback_xy": 0.60,
+                        "k_swing_feedback_xy": 0.35,
+                        "q_stage_xy": 180.0,
+                        "q_terminal_xy": 850.0,
+                        "q_payload_vel_xy": 24.0,
+                        "q_swing_xy": 38.0,
+                        "r_cmd_vel_xy": 6.0,
+                        "vel_max_xy": 0.16,
+                        "vel_max_z": 0.020,
+                        "cmd_rate_limit_xy": 0.050,
+                    },
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_obs_pred_fullobs_pretrain": {
+            "description": "P-FULL paper ablation: supervised ObsPred pretrain under the full true-observation PID+Residual foundation policy.",
+            "phase": "descent",
+            "algo": "obs_pred",
+            "log_dir": "saves/descent_ablation_obs_pred_fullobs_pretrain",
+            "resume_ckpt": "saves/descent_ppo_paper_trueobs_residual_pretrain_online_20260627_010320/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 1_000_000,
+                    "n_envs": 8,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "target_mode": "non_cable_latent",
+                    "lr": 2e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                    "pretrain_policy_deterministic": True,
+                    "pretrain_final_curriculum": True,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_fullobs_obspred_p2_ft": {
+            "description": "A1 paper ablation: full true-observation foundation + ObsPred finetune with R,P observation schedule.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_fullobs_obspred_p2_ft",
+            "resume_ckpt": "saves/descent_ppo_paper_trueobs_residual_pretrain_online_20260627_010320/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 4_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "target_mode": "non_cable_latent",
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_fullobs_obspred_p3_ft": {
+            "description": "A2 paper ablation: full true-observation foundation + same ObsPred pretrain, R,P,P observation schedule.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_fullobs_obspred_p3_ft",
+            "resume_ckpt": "saves/descent_ppo_paper_trueobs_residual_pretrain_online_20260627_010320/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 4_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 3,
+                    "target_mode": "non_cable_latent",
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 1.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_obs_pred_nocable_pretrain": {
+            "description": "P-NOCABLE paper ablation: supervised ObsPred pretrain under the no-cable true-observation PID+Residual foundation policy.",
+            "phase": "descent",
+            "algo": "obs_pred",
+            "log_dir": "saves/descent_ablation_obs_pred_nocable_pretrain",
+            "resume_ckpt": "saves/descent_ablation_trueobs_no_cable_latent_pretrain_20260627_224522/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 1_000_000,
+                    "n_envs": 8,
+                },
+                "descent_rl": {
+                    "obs_dim": 44,
+                },
+                "cable_encoder": {
+                    "enabled": False,
+                    "zero_obs": True,
+                    "output_dim": 0,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "target_mode": "non_cable_latent",
+                    "cable_latent_dim": 0,
+                    "lr": 2e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 0.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                    "pretrain_policy_deterministic": True,
+                    "pretrain_final_curriculum": True,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_nocable_obspred_p2_ft": {
+            "description": "A3 paper ablation: no-cable true-observation foundation + ObsPred finetune with R,P observation schedule.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_nocable_obspred_p2_ft",
+            "resume_ckpt": "saves/descent_ablation_trueobs_no_cable_latent_pretrain_20260627_224522/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 4_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "descent_rl": {
+                    "obs_dim": 44,
+                },
+                "cable_encoder": {
+                    "enabled": False,
+                    "zero_obs": True,
+                    "output_dim": 0,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 2,
+                    "target_mode": "non_cable_latent",
+                    "cable_latent_dim": 0,
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 0.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_nocable_obspred_p3_ft": {
+            "description": "A4 paper ablation: no-cable true-observation foundation + same ObsPred pretrain, R,P,P observation schedule.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_nocable_obspred_p3_ft",
+            "resume_ckpt": "saves/descent_ablation_trueobs_no_cable_latent_pretrain_20260627_224522/ckpt_final.pt",
+            "config": {
+                "train": {
+                    "total_timesteps": 4_000_000,
+                    "n_envs": 8,
+                    "reset_optimizer_on_resume": True,
+                },
+                "descent_rl": {
+                    "obs_dim": 44,
+                },
+                "cable_encoder": {
+                    "enabled": False,
+                    "zero_obs": True,
+                    "output_dim": 0,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": True,
+                    "train_enabled": True,
+                    "measurement_period_steps": 3,
+                    "target_mode": "non_cable_latent",
+                    "cable_latent_dim": 0,
+                    "lr": 1e-5,
+                    "non_cable_loss_weight": 4.0,
+                    "cable_latent_loss_weight": 0.0,
+                    "log_std_min": -3.0,
+                    "nll_coef": 0.25,
+                    "huber_coef": 1.0,
+                    "nll_error_clip": 6.0,
+                    "grad_clip": 0.5,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
+                },
+                "wind": {
+                    "speed_max": 10.0,
+                    "test_wind_variable": True,
+                    "test_speed_band_abs": 0.50,
+                    "test_speed_band_frac": 0.15,
+                    "test_speed_rate_std": 0.25,
+                    "test_dir_band_rad": 0.35,
+                    "test_dir_rate_std": 0.08,
+                },
+                "wind_obs": {
+                    "wind_speed_max": 10.0,
+                },
+            },
+        },
+        "descent_ablation_fullobs_mlp_trueobs": {
+            "description": "A5 paper ablation: full true-observation PID+Residual PPO from scratch with the recurrent policy disabled.",
+            "phase": "descent",
+            "algo": "ppo",
+            "log_dir": "saves/descent_ablation_fullobs_mlp_trueobs",
+            "config": {
+                "train": {
+                    "total_timesteps": 8_000_000,
+                    "n_envs": 8,
+                },
+                "ppo": {
+                    "use_lstm": False,
+                },
+                "descent_rl": {
+                    "obs_dim": 76,
+                    "pid_residual_mode": True,
+                    "include_pid_base_obs": True,
+                },
+                "cable_encoder": {
+                    "enabled": True,
+                    "zero_obs": False,
+                    "output_dim": 32,
+                },
+                "vision": {
+                    "enabled": False,
+                },
+                "observation_predictor": {
+                    "enabled": False,
+                },
+                "cable_latent_predictor": {
+                    "enabled": False,
                 },
                 "wind": {
                     "speed_max": 10.0,

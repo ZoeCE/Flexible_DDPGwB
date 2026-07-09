@@ -730,8 +730,271 @@ class DescentRewardState:
         self._bad_rebar_contact_counter = 0
 
 
+def _descent_training_tolerances(config, rstate):
+    """Return curriculum-aware descent success tolerances."""
+    cfg_ins = config.get("insertion", {})
+    cur_level = getattr(rstate, 'current_descent_level', 0)
+    cur_nlevels = getattr(rstate, 'descent_n_levels', 5)
+    steps_at_max = getattr(rstate, 'steps_at_max_level', 0)
+    xy_tol_final = float(cfg_ins.get("xy_tolerance_train_end", 0.005))
+
+    injected_xy_tol = getattr(rstate, 'current_xy_tol', None)
+    if injected_xy_tol is not None:
+        xy_tol = float(injected_xy_tol)
+        if cur_level >= cur_nlevels - 1:
+            fine_steps = int(cfg_ins.get("xy_tolerance_anneal_steps", 500_000))
+            fine_frac = min(steps_at_max / max(fine_steps, 1), 1.0)
+            xy_tol = xy_tol + fine_frac * (xy_tol_final - xy_tol)
+    else:
+        xy_tol = xy_tol_final
+
+    total_ts = getattr(rstate, 'total_steps_global', 0)
+    anneal_steps = int(cfg_ins.get("xy_tolerance_anneal_steps", 500_000))
+    frac = min(total_ts / max(anneal_steps, 1), 1.0)
+    tilt_tol = (
+        float(cfg_ins.get("tilt_tolerance_train_start", 0.12)) +
+        frac * (float(cfg_ins.get("tilt_tolerance_train_end", 0.05)) -
+                float(cfg_ins.get("tilt_tolerance_train_start", 0.12))))
+    yaw_tol = (
+        float(cfg_ins.get("yaw_tolerance_train_start", 0.15)) +
+        frac * (float(cfg_ins.get("yaw_tolerance_train_end", 0.08)) -
+                float(cfg_ins.get("yaw_tolerance_train_start", 0.15))))
+    z_tol = float(cfg_ins.get("success_z_tolerance", 0.020))
+    return xy_tol, z_tol, tilt_tol, yaw_tol
+
+
+def _compute_descent_insert_task_reward(env, obs, config, rstate,
+                                        tracker=None, rl_action=None):
+    """No-PID full-action reward: insertion progress first, safety second.
+
+    This branch is intentionally not residual-shaped: no per-step time penalty,
+    no timeout penalty, and only small dense penalties relative to sparse clean
+    insertion success. It follows the common robotics-RL recipe of smooth
+    task-space proximity shaping plus sparse terminal bonuses, with bounded
+    swing/contact penalties used only as guardrails.
+    """
+    rcfg = config["descent_rl"]["reward"]
+    cfg_ins = config.get("insertion", {})
+    target_xy = env.target_pos.copy()
+    target_pz = float(cfg_ins.get("target_payload_z", 0.10))
+
+    pl_xy = np.array([env.data.body('prefab').xpos[0],
+                      env.data.body('prefab').xpos[1]])
+    payload_z = float(env.data.body('prefab').xpos[2])
+    dtf = float(np.linalg.norm(pl_xy - target_xy))
+
+    pl_mat = env.data.body('prefab').xmat.reshape(3, 3)
+    pl_euler = R.from_matrix(pl_mat).as_euler('xyz')
+    tilt = float(np.sqrt(pl_euler[0]**2 + pl_euler[1]**2))
+    abs_yaw = abs(float(pl_euler[2]))
+
+    reward = 0.0
+    done = False
+    success = False
+    info = {}
+
+    unstable, reason = _check_instability(env, obs, config, grace_steps=20)
+    if unstable:
+        r = float(rcfg.get("instability_penalty", -20.0))
+        if tracker:
+            tracker.add("instability_penalty", r)
+        return r, True, False, {"termination": reason}
+
+    dof_idx = env.model.jnt_dofadr[env.prefab_jnt_id]
+    pl_vz = float(env.data.qvel[dof_idx + 2])
+    if payload_z < 0.03 and pl_vz < -0.3:
+        r = float(rcfg.get("crash_penalty", -20.0))
+        if tracker:
+            tracker.add("crash_penalty", r)
+        return r, True, False, {"termination": "crash"}
+
+    try:
+        swing_energy, swing_ke, swing_pe, swing_angle = _get_swing_energy(
+            env, obs, config)
+    except Exception:
+        swing_energy = swing_ke = swing_pe = swing_angle = 0.0
+
+    # Bounded anti-sway terms. They should shape stability, not dominate task
+    # reward, because full-action no-PID must actively move the payload.
+    e_thresh = float(rcfg.get("swing_energy_thresh", 0.010))
+    e_coef = float(rcfg.get("swing_energy_coef", 2.0))
+    e_max = float(rcfg.get("swing_energy_penalty_max", 0.12))
+    r_swing = -min(e_coef * max(0.0, swing_energy - e_thresh), e_max)
+    reward += r_swing
+
+    cable_ke = _get_cable_kinetic_energy(env)
+    ce_thresh = float(rcfg.get("cable_ke_thresh", 0.08))
+    ce_coef = float(rcfg.get("cable_ke_penalty_coef", 0.08))
+    ce_max = float(rcfg.get("cable_ke_penalty_max", 0.02))
+    r_cable = -min(ce_coef * max(0.0, cable_ke - ce_thresh), ce_max)
+    reward += r_cable
+
+    xy_tol, z_tol, tilt_tol, yaw_tol = _descent_training_tolerances(
+        config, rstate)
+    z_abs_err = abs(payload_z - target_pz)
+    xy_sigma = max(float(rcfg.get("task_xy_sigma", 0.050)), xy_tol * 3.0)
+    z_sigma = max(float(rcfg.get("task_z_sigma", 0.050)), z_tol * 2.0)
+    tilt_sigma = max(float(rcfg.get("task_tilt_sigma", 0.20)), tilt_tol * 2.0)
+    yaw_sigma = max(float(rcfg.get("task_yaw_sigma", 0.30)), yaw_tol * 2.0)
+
+    xy_score = float(np.exp(-0.5 * (dtf / max(xy_sigma, 1e-6)) ** 2))
+    z_score = float(np.exp(-0.5 * (z_abs_err / max(z_sigma, 1e-6)) ** 2))
+    tilt_score = float(np.exp(-0.5 * (tilt / max(tilt_sigma, 1e-6)) ** 2))
+    yaw_score = float(np.exp(-0.5 * (abs_yaw / max(yaw_sigma, 1e-6)) ** 2))
+    pos_score = xy_score * z_score
+    pose_score = tilt_score * yaw_score
+
+    r_prox = float(rcfg.get("task_proximity_coef", 1.20)) * pos_score
+    r_pose = float(rcfg.get("task_pose_coef", 0.20)) * pos_score * pose_score
+    reward += r_prox + r_pose
+
+    insert_error = float(np.sqrt(
+        (dtf / max(xy_sigma, 1e-6)) ** 2 +
+        (z_abs_err / max(z_sigma, 1e-6)) ** 2 +
+        0.25 * (tilt / max(tilt_sigma, 1e-6)) ** 2 +
+        0.25 * (abs_yaw / max(yaw_sigma, 1e-6)) ** 2))
+    r_progress = 0.0
+    if rstate.prev_insert_error is not None:
+        delta_err = np.clip(
+            rstate.prev_insert_error - insert_error,
+            -float(rcfg.get("task_progress_clip", 0.20)),
+            float(rcfg.get("task_progress_clip", 0.20)))
+        r_progress = float(rcfg.get("task_progress_coef", 0.60)) * delta_err
+        reward += r_progress
+    rstate.prev_insert_error = insert_error
+    rstate.prev_dtf = dtf
+    rstate.prev_z = payload_z
+
+    # Full-action smoothness is only a guardrail. There is deliberately no
+    # action-magnitude penalty because the policy must replace the PID base.
+    r_smooth = 0.0
+    action_rms = 0.0
+    if rl_action is not None:
+        a = np.asarray(rl_action, np.float32).reshape(-1)
+        drl = config.get("descent_rl", {})
+        scale = np.array([
+            float(drl.get("acc_max_xy", drl.get("residual_acc_max_xy", 0.60))),
+            float(drl.get("acc_max_xy", drl.get("residual_acc_max_xy", 0.60))),
+            float(drl.get("acc_max_z", drl.get("residual_acc_max_z", 0.90))),
+        ], dtype=np.float32)[:len(a)]
+        scale = np.maximum(scale, 1e-6)
+        action_rms = float(np.sqrt(np.mean(np.square(a / scale))))
+        if rstate.prev_rl_action is not None:
+            prev = np.asarray(rstate.prev_rl_action, np.float32).reshape(-1)[:len(a)]
+            diff = (a - prev) / scale
+            r_smooth = -min(
+                float(rcfg.get("action_smoothness_coef", 0.006)) *
+                float(np.mean(np.square(diff))),
+                float(rcfg.get("action_penalty_max", 0.010)))
+            reward += r_smooth
+        rstate.prev_rl_action = a.copy()
+
+    if tracker:
+        tracker.add("swing_energy_penalty", r_swing)
+        tracker.add("swing_energy_J", swing_energy)
+        tracker.add("swing_ke_J", swing_ke)
+        tracker.add("swing_pe_J", swing_pe)
+        tracker.add("swing_angle_deg", float(np.degrees(swing_angle)))
+        tracker.add("cable_ke_penalty", r_cable)
+        tracker.add("cable_ke", cable_ke)
+        tracker.add("task_proximity_reward", r_prox)
+        tracker.add("task_pose_reward", r_pose)
+        tracker.add("task_progress_reward", r_progress)
+        tracker.add("task_pos_score", pos_score)
+        tracker.add("task_pose_score", pose_score)
+        tracker.add("xy_dist_mm", dtf * 1000)
+        tracker.add("z_dist_mm", (payload_z - target_pz) * 1000)
+        tracker.add("action_rms_norm", action_rms)
+        tracker.add("action_smoothness_penalty", r_smooth)
+
+    physical_success, physical_detail, physical_parts = (
+        _physical_insertion_status(
+            env, config, target_pz, payload_z, dtf, tilt, abs_yaw,
+            xy_tol, z_tol, tilt_tol, yaw_tol))
+    if tracker:
+        tracker.add("physical_floor_contact",
+                    1.0 if physical_parts["floor_contact"] else 0.0)
+        tracker.add("physical_insert_depth", physical_parts["insert_depth"])
+        tracker.add("physical_rebar_error", physical_parts["worst_rebar_err"])
+
+    if bool(cfg_ins.get("train_reject_lucky_rebar_insert", True)):
+        try:
+            _, hit_rebar_now = env._check_prefab_collision_with_obstacles()
+        except Exception:
+            hit_rebar_now = False
+        bad_contact_depth = float(cfg_ins.get(
+            "clean_insert_bad_contact_depth", 0.004))
+        bad_rebar_contact = (
+            bool(hit_rebar_now) and
+            not bool(physical_parts.get("floor_contact", False)) and
+            (not bool(physical_parts.get("ok_rebar", False)) or
+             physical_parts.get("insert_depth", 0.0) < bad_contact_depth))
+        if bad_rebar_contact:
+            rstate._bad_rebar_contact_counter = (
+                int(getattr(rstate, "_bad_rebar_contact_counter", 0)) + 1)
+        else:
+            rstate._bad_rebar_contact_counter = 0
+        bad_contact_patience = max(
+            1, int(cfg_ins.get("clean_insert_bad_contact_patience", 1)))
+        if int(getattr(rstate, "_bad_rebar_contact_counter", 0)) >= bad_contact_patience:
+            rstate._bad_rebar_contact_seen = True
+        if tracker:
+            tracker.add("bad_rebar_contact_seen",
+                        1.0 if getattr(rstate, "_bad_rebar_contact_seen", False) else 0.0)
+
+    if physical_success:
+        if (bool(cfg_ins.get("train_reject_lucky_rebar_insert", True)) and
+                bool(getattr(rstate, "_bad_rebar_contact_seen", False))):
+            r_lucky = float(rcfg.get("lucky_insert_bonus", 25.0))
+            reward += r_lucky
+            if tracker:
+                tracker.add("lucky_insert_bonus", r_lucky)
+            done = True
+            info["termination"] = (
+                f"lucky_rebar_insert_reward:{physical_detail},"
+                f"bad_rebar_contact_seen=1")
+            return reward, done, success, info
+
+        r_bonus = float(rcfg.get("success_bonus", 100.0))
+        reward += r_bonus
+        if tracker:
+            tracker.add("success_bonus", r_bonus)
+        success = True
+        done = True
+        info["termination"] = (
+            f"insertion_success:{physical_detail},"
+            f"xy_tol={xy_tol*1000:.1f}mm")
+        return reward, done, success, info
+
+    stuck_fail, stuck_detail = _check_insertion_stuck_failure(
+        env, config, rstate, target_pz, payload_z, dtf)
+    if stuck_fail:
+        r_stuck = float(rcfg.get("stuck_fail_penalty", -6.0))
+        reward += r_stuck
+        if tracker:
+            tracker.add("stuck_fail_penalty", r_stuck)
+        done = True
+        info["termination"] = stuck_detail
+        return reward, done, success, info
+
+    current_step = int(getattr(
+        rstate, 'phase_step', getattr(env, 'current_step', 0)))
+    max_steps = int(config["descent_rl"]["max_steps"])
+    if current_step >= max_steps - 1:
+        done = True
+        info["termination"] = (
+            f"timeout:dtf={dtf*1000:.1f}mm,z={payload_z*1000:.0f}mm,"
+            f"tilt={tilt:.3f},yaw={abs_yaw:.3f}")
+
+    return float(reward), done, success, info
+
+
 def compute_descent_reward(env, obs, config, rstate, tracker=None, rl_action=None):
     rcfg    = config["descent_rl"]["reward"]
+    mode = str(rcfg.get("mode", "residual")).lower()
+    if mode in ("insert_task", "no_pid_insert_task"):
+        return _compute_descent_insert_task_reward(
+            env, obs, config, rstate, tracker=tracker, rl_action=rl_action)
     cfg_ins = config.get("insertion", {})
     dense_scale = float(rcfg.get("dense_dt_scale", 1.0))
     if not np.isfinite(dense_scale) or dense_scale <= 0.0:

@@ -301,7 +301,8 @@ class EEAccController:
                         vel_max_xy=None, vel_max_z=None,
                         lock_z=False, z_lock_height=None,
                         z_pid_correction=0.0, target_yaw=0.0,
-                        base_acc_xy=None, residual_mode=False):
+                        base_acc_xy=None, residual_mode=False,
+                        no_upward_z=False):
         """
         将加速度指令转换为 delta_q。
 
@@ -333,6 +334,8 @@ class EEAccController:
         if vxy > vmax_xy and vxy > 1e-8:
             self._ee_vel[:2] *= vmax_xy / vxy
         self._ee_vel[2] = np.clip(self._ee_vel[2], -vmax_z, vmax_z)
+        if no_upward_z and not lock_z:
+            self._ee_vel[2] = min(self._ee_vel[2], 0.0)
         self._ee_pos   += self._ee_vel * self.dt
 
         # ── Z 锁定 ────────────────────────────────────────────────────────────

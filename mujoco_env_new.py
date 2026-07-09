@@ -127,7 +127,7 @@ class CableRobotEnvWithObstacles:
         current_dir      = os.path.dirname(os.path.abspath(__file__))
         self._assets_dir = os.path.join(current_dir, "assets")
         from assets.generate_four_cables_with_plate import main as gen_rope
-        gen_rope()
+        gen_rope(self.config)
         base_xml_path = os.path.join(
             self._assets_dir,
             "demo_fourCable_withSteel_withSensor_cylinder.xml"
@@ -863,22 +863,52 @@ class CableRobotEnvWithObstacles:
         anchor_world = self._get_ee_pos()   # 简化: 用 ee site 作 anchor
 
         out = np.zeros(self.CABLE_OBS_TOTAL, np.float32)
-        idx = 0
+        max_slots_per_rope = self.CABLE_OBS_TOTAL // (
+            len(self.CABLE_NAMES) * self.CABLE_OBS_PER_SEG)
+        # The policy-side cable encoder was trained on ten equally spaced
+        # samples per rope.  Keep that observation contract for every physical
+        # rope discretization by resampling 4/6/etc. MuJoCo segments to 10 slots.
+        target_s = (np.arange(max_slots_per_rope, dtype=np.float64) + 0.5) / float(max_slots_per_rope)
         for ci in range(4):
-            for si in range(self._cable_n_segs):
+            rope_base = ci * max_slots_per_rope * self.CABLE_OBS_PER_SEG
+            sample_s = []
+            sample_rel = []
+            sample_vel = []
+            n_phys = max(1, int(self._cable_n_segs))
+            for si in range(min(self._cable_n_segs, len(self._cable_body_ids[ci]))):
                 bid = self._cable_body_ids[ci][si]
                 if bid < 0:
-                    idx += 6
                     continue
-                # 段 com 位置 (世界系)
+                sample_s.append((float(si) + 0.5) / float(n_phys))
                 p_seg = self.data.body(bid).xpos.copy()
-                rel = p_seg - anchor_world
-                out[idx:idx+3] = rel.astype(np.float32)
-                # 段 com 线速度 (cvel: 6=angular(3)+linear(3), 世界系)
+                sample_rel.append(p_seg - anchor_world)
                 cvel = self.data.cvel[bid]
-                lin_vel = cvel[3:6]
-                out[idx+3:idx+6] = lin_vel.astype(np.float32)
-                idx += 6
+                sample_vel.append(cvel[3:6].copy())
+
+            if not sample_s:
+                continue
+
+            sample_s = np.asarray(sample_s, dtype=np.float64)
+            sample_rel = np.asarray(sample_rel, dtype=np.float64)
+            sample_vel = np.asarray(sample_vel, dtype=np.float64)
+            if sample_s.size == max_slots_per_rope and np.allclose(
+                    sample_s, target_s, rtol=0.0, atol=1e-12):
+                rel_resampled = sample_rel
+                vel_resampled = sample_vel
+            else:
+                rel_resampled = np.column_stack([
+                    np.interp(target_s, sample_s, sample_rel[:, k])
+                    for k in range(3)
+                ])
+                vel_resampled = np.column_stack([
+                    np.interp(target_s, sample_s, sample_vel[:, k])
+                    for k in range(3)
+                ])
+
+            for si in range(max_slots_per_rope):
+                idx = rope_base + si * self.CABLE_OBS_PER_SEG
+                out[idx:idx+3] = rel_resampled[si].astype(np.float32)
+                out[idx+3:idx+6] = vel_resampled[si].astype(np.float32)
         return out
 
     def _get_cable_energy(self):
@@ -1672,16 +1702,14 @@ class CableRobotEnvWithObstacles:
                 out[45] = 1.0
             rebar_errors = np.zeros(4, dtype=np.float32)
             if float(np.linalg.norm(pos[:2] - self.target_pos)) < 0.05:
-                local = np.array([
-                    [0.035, 0.035], [0.035, -0.035],
-                    [-0.035, 0.035], [-0.035, -0.035]], dtype=np.float32)
                 cy = float(np.cos(meas["yaw"]))
                 sy = float(np.sin(meas["yaw"]))
-                R2 = np.array([[cy, -sy], [sy, cy]], dtype=np.float32)
-                for i in range(4):
-                    hole_w = pos[:2] + R2 @ local[i]
-                    rebar_w = self.target_pos.astype(np.float32) + local[i]
-                    rebar_errors[i] = float(np.linalg.norm(hole_w - rebar_w))
+                R2 = np.array([[cy, -sy], [sy, cy]], dtype=np.float64)
+                vals, _, _ = self._compute_rebar_errors_from_rot(
+                    pos[:2].astype(np.float64), R2)
+                n = min(4, len(vals))
+                if n > 0:
+                    rebar_errors[:n] = vals[:n].astype(np.float32)
             out[50:54] = rebar_errors
         return out
 
@@ -2546,18 +2574,37 @@ class CableRobotEnvWithObstacles:
         """对数势能: Φ(d) = k * log(d + eps)"""
         return k * np.log(d + eps)
     
-    def _compute_rebar_errors(self, payload_xy, payload_mat):
-        """计算4根钢筋与对应方孔的XY偏差。"""
-        rebar_pos = np.array([
-            [ 0.035,  0.035], [ 0.035, -0.035],
-            [-0.035,  0.035], [-0.035, -0.035]], dtype=np.float64)
-        R_pl = payload_mat[:2, :2]
-        errors = np.zeros(4)
-        for i in range(4):
-            hole_w = payload_xy + R_pl @ rebar_pos[i]
-            rebar_w = self.target_pos + rebar_pos[i]
+    def _configured_rebar_pairs(self):
+        """Return paired payload-hole and target-rebar offsets from config."""
+        cfg_pref = self.config.get("prefab", {})
+        cfg_tgt = self.config.get("target", {})
+        holes = np.asarray(cfg_pref.get("socket_hole_positions", [
+            [0.035, 0.035], [0.035, -0.035],
+            [-0.035, 0.035], [-0.035, -0.035],
+        ]), dtype=np.float64).reshape(-1, 2)
+        rebars = np.asarray(cfg_tgt.get("rebar_positions", holes),
+                            dtype=np.float64).reshape(-1, 2)
+        n = min(len(holes), len(rebars))
+        if n <= 0:
+            return np.zeros((0, 2), dtype=np.float64), np.zeros((0, 2), dtype=np.float64)
+        return holes[:n], rebars[:n]
+
+    def _compute_rebar_errors_from_rot(self, payload_xy, R_pl_xy):
+        holes, rebars = self._configured_rebar_pairs()
+        if len(holes) == 0:
+            return np.zeros(0, dtype=np.float64), 0.0, 0.0
+        payload_xy = np.asarray(payload_xy, dtype=np.float64).reshape(2)
+        R_pl_xy = np.asarray(R_pl_xy, dtype=np.float64).reshape(2, 2)
+        errors = np.zeros(len(holes), dtype=np.float64)
+        for i in range(len(holes)):
+            hole_w = payload_xy + R_pl_xy @ holes[i]
+            rebar_w = self.target_pos + rebars[i]
             errors[i] = float(np.linalg.norm(hole_w - rebar_w))
         return errors, float(np.max(errors)), float(np.mean(errors))
+
+    def _compute_rebar_errors(self, payload_xy, payload_mat):
+        """计算配置中每根钢筋与对应方孔的XY偏差。"""
+        return self._compute_rebar_errors_from_rot(payload_xy, payload_mat[:2, :2])
 
     def _compute_reward(self, action, current_q, prev_q, obs):
         """
@@ -2788,14 +2835,9 @@ class CableRobotEnvWithObstacles:
         payload_xy_arr = np.array([payload_x, payload_y])
         dtf_obs = float(np.linalg.norm(payload_xy_arr - self.target_pos))
         if dtf_obs < 0.05:
-            rebar_pos = np.array([
-                [ 0.035,  0.035], [ 0.035, -0.035],
-                [-0.035,  0.035], [-0.035, -0.035]], dtype=np.float64)
-            R_pl = pl_mat[:2, :2]
-            for i in range(4):
-                hole_w = payload_xy_arr + R_pl @ rebar_pos[i]
-                rebar_w = self.target_pos + rebar_pos[i]
-                rebar_errors[i] = float(np.linalg.norm(hole_w - rebar_w))
+            vals, _, _ = self._compute_rebar_errors(payload_xy_arr, pl_mat)
+            for i, err in enumerate(vals[:4]):
+                rebar_errors[i] = float(err)
 
         # [v12.3 修订] 绳索每段运动状态 (240 维): 4 根 × 10 段 × 6 维 (rel_pos + lin_vel)
         # 用户原话: "把四根绳索的每个链接点的运动状态(相对位移、速度、加速度)加入观测层"

@@ -1,0 +1,55 @@
+profile,profile_label,branch,added_factor,hole_ratio,rope_segments_design,wind_mps_design,init_xy_m_design,variant,method,missing,episodes,broad_success_pct,strict_success_pct,lucky_insert_pct,avg_reward,avg_steps,avg_ke_mJ,p95_ke_mJ,avg_angle,p95_angle,termination_counts,json_path
+ctrl-c0-base,C0 base,shared,base,8.0,4,0,0.0,PID,PID,False,32,100.0,0.0,100.0,-139.0584208465218,259.0,231.75099416606815,829.9407406859141,10.428533454924182,19.771152847952536,"{""lucky_rebar_insert_failure"": 32}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c0-base__PID.json
+ctrl-c0-base,C0 base,shared,base,8.0,4,0,0.0,DampedPD,Damped-PD,False,32,100.0,0.0,100.0,-133.26584828137618,246.0,256.37659887642144,784.1166654605848,10.450427218120867,21.74072411450288,"{""lucky_rebar_insert_failure"": 32}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c0-base__DampedPD.json
+ctrl-c0-base,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c0-base,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c0-base,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c0-base,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c1-init,C1 init,shared,init,8.0,4,0,0.0,PID,PID,False,32,53.125,0.0,53.125,-145.12656401337026,272.8125,230.5101211096606,805.4774346802169,9.421608791467515,17.086338444469597,"{""early_stop"": 1, ""lucky_rebar_insert_failure"": 17, ""stuck_on_rebar"": 1, ""timeout"": 13}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c1-init__PID.json
+ctrl-c1-init,C1 init,shared,init,8.0,4,0,0.0,DampedPD,Damped-PD,False,32,59.375,3.125,56.25,-141.3296314855754,264.96875,223.306944585309,738.3496154649013,9.23449376719655,17.59892727239431,"{""early_stop"": 1, ""insertion_success"": 1, ""lucky_rebar_insert_failure"": 18, ""stuck_on_rebar"": 4, ""timeout"": 8}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c1-init__DampedPD.json
+ctrl-c1-init,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c1-init,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c1-init,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c1-init,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c2-wind2,C2 wind2,shared,wind 2,8.0,4,2,0.016,PID,PID,False,32,62.5,0.0,62.5,-136.47780740324538,254.84375,219.77563831309857,777.5528528479495,9.352152945217046,17.65866948887428,"{""early_stop"": 1, ""lucky_rebar_insert_failure"": 20, ""stuck_on_rebar"": 3, ""timeout"": 8}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c2-wind2__PID.json
+ctrl-c2-wind2,C2 wind2,shared,wind 2,8.0,4,2,0.016,DampedPD,Damped-PD,False,32,68.75,0.0,68.75,-137.57483803131706,258.71875,231.0595932488504,761.3584913485732,8.545220149824882,15.375695632392343,"{""lucky_rebar_insert_failure"": 22, ""stuck_on_rebar"": 2, ""timeout"": 8}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c2-wind2__DampedPD.json
+ctrl-c2-wind2,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c2-wind2,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c2-wind2,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c2-wind2,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c3-wind6,C3 wind6,w6,wind 6,8.0,4,6,0.016,PID,PID,False,32,71.875,0.0,71.875,-136.14060730306193,258.625,223.8557139524621,773.7528872841676,8.88933347211047,15.972614154943827,"{""lucky_rebar_insert_failure"": 23, ""stuck_on_rebar"": 1, ""timeout"": 8}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c3-wind6__PID.json
+ctrl-c3-wind6,C3 wind6,w6,wind 6,8.0,4,6,0.016,DampedPD,Damped-PD,False,32,59.375,0.0,59.375,-138.30437600006718,251.875,236.7188643287094,759.7336155955921,8.811346888204419,16.47742080405683,"{""early_stop"": 2, ""lucky_rebar_insert_failure"": 19, ""stuck_on_rebar"": 5, ""timeout"": 6}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c3-wind6__DampedPD.json
+ctrl-c3-wind6,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c3-wind6,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c3-wind6,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c3-wind6,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c3-wind8,C3 wind8,w8,wind 8,8.0,4,8,0.016,PID,PID,False,32,56.25,0.0,56.25,-141.41617229436025,259.5,243.64539336144185,794.0994208009879,9.38711810141698,16.436260019400446,"{""early_stop"": 2, ""lucky_rebar_insert_failure"": 18, ""stuck_on_rebar"": 3, ""timeout"": 9}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c3-wind8__PID.json
+ctrl-c3-wind8,C3 wind8,w8,wind 8,8.0,4,8,0.016,DampedPD,Damped-PD,False,32,71.875,0.0,71.875,-131.24175735344454,241.1875,251.07492545941295,776.3112067017003,8.539979571668834,15.142740078545629,"{""lucky_rebar_insert_failure"": 23, ""stuck_on_rebar"": 4, ""timeout"": 5}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c3-wind8__DampedPD.json
+ctrl-c3-wind8,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c3-wind8,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c3-wind8,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c3-wind8,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w6,C4 rope10 w6,w6,rope 10,8.0,10,6,0.016,PID,PID,False,32,6.25,0.0,6.25,-167.09748936594474,297.4375,696.2953827410797,2382.133312225276,15.140416530934193,26.245149518929423,"{""early_stop"": 5, ""lucky_rebar_insert_failure"": 2, ""timeout"": 25}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c4-rope10-w6__PID.json
+ctrl-c4-rope10-w6,C4 rope10 w6,w6,rope 10,8.0,10,6,0.016,DampedPD,Damped-PD,False,32,28.125,0.0,28.125,-161.55541513864017,288.625,711.3688905751951,2280.945313237461,14.650213612955934,25.482604537962633,"{""early_stop"": 4, ""lucky_rebar_insert_failure"": 9, ""timeout"": 19}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c4-rope10-w6__DampedPD.json
+ctrl-c4-rope10-w6,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w6,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w6,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w6,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w8,C4 rope10 w8,w8,rope 10,8.0,10,8,0.016,PID,PID,False,32,34.375,0.0,34.375,-161.75496359891258,287.71875,754.4132819943006,2502.4081394578257,15.690731564733246,26.88987751107743,"{""early_stop"": 2, ""lucky_rebar_insert_failure"": 11, ""timeout"": 19}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c4-rope10-w8__PID.json
+ctrl-c4-rope10-w8,C4 rope10 w8,w8,rope 10,8.0,10,8,0.016,DampedPD,Damped-PD,False,32,18.75,0.0,18.75,-163.88664220284102,293.09375,688.2646709896912,2163.047133947351,14.803415722630836,24.977266248819426,"{""early_stop"": 3, ""lucky_rebar_insert_failure"": 6, ""timeout"": 23}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c4-rope10-w8__DampedPD.json
+ctrl-c4-rope10-w8,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w8,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w8,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c4-rope10-w8,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w6,C5 ratio4 w6,w6,ratio 4,4.0,10,6,0.016,PID,PID,False,32,0.0,0.0,0.0,-173.21028882625978,298.6875,636.3903254877828,2162.92668216081,15.012199005885881,24.991956272224137,"{""early_stop"": 3, ""stuck_on_rebar"": 1, ""timeout"": 28}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c5-ratio4-w6__PID.json
+ctrl-c5-ratio4-w6,C5 ratio4 w6,w6,ratio 4,4.0,10,6,0.016,DampedPD,Damped-PD,False,32,0.0,0.0,0.0,-172.20640091391687,297.3125,645.838647006496,2175.947357114524,14.336069876497195,24.968246951901207,"{""early_stop"": 4, ""stuck_on_rebar"": 1, ""timeout"": 27}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c5-ratio4-w6__DampedPD.json
+ctrl-c5-ratio4-w6,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w6,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w6,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w6,,,,,,,,MainlineP2,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w8,C5 ratio4 w8,w8,ratio 4,4.0,10,8,0.016,PID,PID,False,32,0.0,0.0,0.0,-173.34146990531735,296.59375,665.9572620164377,2253.123893306559,14.844825305343626,25.929114003242027,"{""early_stop"": 9, ""stuck_on_rebar"": 1, ""timeout"": 22}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c5-ratio4-w8__PID.json
+ctrl-c5-ratio4-w8,C5 ratio4 w8,w8,ratio 4,4.0,10,8,0.016,DampedPD,Damped-PD,False,32,0.0,0.0,0.0,-172.1354554078226,296.71875,641.1260771515857,2141.7507207940926,14.333077134818051,24.54182171528554,"{""early_stop"": 4, ""stuck_on_rebar"": 3, ""timeout"": 25}",test_results/paper_controlled_ladder/smoke/controlled_variable_smoke32_tuned_pidpd_20260702_n32/json/ctrl-c5-ratio4-w8__DampedPD.json
+ctrl-c5-ratio4-w8,,,,,,,,MPC,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w8,,,,,,,,Mainline,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w8,,,,,,,,NoCable,,True,,,,,,,,,,,,
+ctrl-c5-ratio4-w8,,,,,,,,MainlineP2,,True,,,,,,,,,,,,

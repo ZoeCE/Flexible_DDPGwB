@@ -1,0 +1,73 @@
+{
+  "step": 80,
+  "sim_time": 8.219999999999414,
+  "camera": "rgbd_right",
+  "camera_config": {
+    "euler": [
+      0.0,
+      1.1,
+      0.0
+    ],
+    "fovy": 58.0,
+    "max_range": 1.2,
+    "name": "rgbd_right",
+    "pos": [
+      0.02,
+      0.68,
+      0.46
+    ]
+  },
+  "files": {
+    "rgb": "test_results/figure_assets/policy_snapshots_clean/obs_step0080_rgbd_right_rgb.png"
+  },
+  "render_ok": true,
+  "action_mode": "policy",
+  "config_json": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/saves/descent_ablation_fullobs_mlp_trainable8_seed270627_20260705/resolved_config.json",
+  "clean_render": {
+    "render_markers": false,
+    "rope_markers_enabled": false,
+    "show_camera_models": false,
+    "hide_sites_in_vision": false,
+    "show_connection_sites": true,
+    "hide_tendons_in_vision": true,
+    "hidden_debug_geoms": []
+  },
+  "policy": {
+    "phase": "descent",
+    "checkpoint": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/saves/descent_ablation_fullobs_mlp_trainable8_seed270627_20260705/ckpt_best.pt"
+  },
+  "last_policy_action": [
+    0.19108931720256805,
+    -0.22534433007240295,
+    -0.17541134357452393
+  ],
+  "last_pid_dq": [
+    -0.010679483413696289,
+    0.01726984977722168,
+    0.04517686367034912,
+    0.0017659664154052734,
+    -0.014890670776367188,
+    -0.01371145248413086,
+    0.01674371212720871
+  ],
+  "last_delta_q": [
+    0.006972590461373329,
+    -0.0035465676337480545,
+    0.03437432646751404,
+    0.0017659664154052734,
+    -0.014890670776367188,
+    -0.01371145248413086,
+    0.01674371212720871
+  ],
+  "payload_pos": [
+    -0.3028193172663799,
+    0.20404241712856805,
+    0.13564297696032224
+  ],
+  "target_pos_xy": [
+    -0.3,
+    0.2
+  ],
+  "vision_debug": {},
+  "rope_marker_debug": {}
+}

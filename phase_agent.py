@@ -817,8 +817,11 @@ class PPOPhaseAgent:
         self._zero_cable_fill = str(ce_cfg.get("zero_obs_fill", "obs_norm_mean"))
         self._cable_obs_enabled = bool(ce_cfg.get("enabled", True))
         self._cable_out_dim = int(ce_cfg.get("output_dim", 32))
+        self._trainable_cable_encoder = bool(ce_cfg.get("trainable", False))
+        self._cable_encoder_lr = float(ce_cfg.get("lr", self._lr_actor))
         if not self._cable_obs_enabled:
             self._cable_out_dim = 0
+            self._trainable_cable_encoder = False
         self._wind_dim = 3
         self._use_cable_encoder = (
             self._cable_obs_enabled and self._cable_out_dim > 0 and
@@ -832,8 +835,11 @@ class PPOPhaseAgent:
                 normalize_input=bool(ce_cfg.get("normalize_input", True)),
             ).to(self.device)
             for p in self.cable_encoder.parameters():
-                p.requires_grad = False
-            self.cable_encoder.eval()
+                p.requires_grad = self._trainable_cable_encoder
+            if self._trainable_cable_encoder:
+                self.cable_encoder.train()
+            else:
+                self.cable_encoder.eval()
         else:
             self.cable_encoder = None
 
@@ -851,16 +857,29 @@ class PPOPhaseAgent:
                     hidden_dim=int(ce_cfg.get("hidden_dim", 128)),
                     output_dim=self._critic_cable_out_dim,
                     n_layers=int(ce_cfg.get("n_layers", 2)),
-                    normalize_input=bool(ce_cfg.get("normalize_input", True)),
-                ).to(self.device)
-                for p in self.critic_cable_encoder.parameters():
-                    p.requires_grad = False
+                normalize_input=bool(ce_cfg.get("normalize_input", True)),
+            ).to(self.device)
+            for p in self.critic_cable_encoder.parameters():
+                p.requires_grad = self._trainable_cable_encoder
+            if self._trainable_cable_encoder:
+                self.critic_cable_encoder.train()
+            else:
                 self.critic_cable_encoder.eval()
         else:
             self.critic_cable_encoder = None
 
         self.opt_actor  = torch.optim.Adam(self.actor.parameters(),  lr=self._lr_actor,  eps=1e-5)
         self.opt_critic = torch.optim.Adam(self.critic.parameters(), lr=self._lr_critic, eps=1e-5)
+        cable_params = []
+        if self._trainable_cable_encoder and self.cable_encoder is not None:
+            cable_params += list(self.cable_encoder.parameters())
+        if (self._trainable_cable_encoder and
+                self.critic_cable_encoder is not None and
+                self.critic_cable_encoder is not self.cable_encoder):
+            cable_params += list(self.critic_cable_encoder.parameters())
+        self.opt_cable_encoder = (
+            torch.optim.Adam(cable_params, lr=self._cable_encoder_lr, eps=1e-5)
+            if cable_params else None)
         self.total_steps = 0; self._last_result = PPO_ZERO
 
         # ── [v9] Cruise 残差: actor 输出层硬零初始化, 完全替代 BC ──────────────
@@ -1138,7 +1157,7 @@ class PPOPhaseAgent:
     def _maybe_reset_plasticity(self):
         if self._plasticity_reset_interval <= 0: return
         if self.total_steps - self._last_plasticity_reset < self._plasticity_reset_interval: return
-        for opt in [self.opt_actor, self.opt_critic]:
+        for opt in self._active_optimizers():
             for group in opt.param_groups:
                 for p in group['params']:
                     if p in opt.state and 'exp_avg' in opt.state[p]:
@@ -1153,7 +1172,7 @@ class PPOPhaseAgent:
         即使梯度方向正确, 学习率被抑制无法快速恢复。
         来源: Ashley et al. 2021 (arXiv:2102.07686), Asadi et al. 2023.
         """
-        for opt in [self.opt_actor, self.opt_critic]:
+        for opt in self._active_optimizers():
             for group in opt.param_groups:
                 for p in group['params']:
                     state = opt.state.get(p, {})
@@ -1174,6 +1193,75 @@ class PPOPhaseAgent:
         self.entropy_coef = self.entropy_coef_start + \
             frac * (self.entropy_coef_end - self.entropy_coef_start)
 
+    def _active_optimizers(self):
+        opts = [self.opt_actor, self.opt_critic]
+        if getattr(self, "opt_cable_encoder", None) is not None:
+            opts.append(self.opt_cable_encoder)
+        return opts
+
+    def _cable_params_for_clip(self):
+        params = []
+        if self.cable_encoder is not None:
+            params += [p for p in self.cable_encoder.parameters()
+                       if p.requires_grad]
+        if (self.critic_cable_encoder is not None and
+                self.critic_cable_encoder is not self.cable_encoder):
+            params += [p for p in self.critic_cable_encoder.parameters()
+                       if p.requires_grad]
+        return params
+
+    def _normalize_cable_tensor(self, cable_feat, start, out_dim, critic=False):
+        if out_dim <= 0:
+            return cable_feat
+        norm = (self.critic_obs_norm if
+                (critic and self.use_asymmetric_critic)
+                else self.obs_norm)
+        use_norm = bool(self.use_obs_norm)
+        if not use_norm or int(getattr(norm, "n", 0)) < int(norm.warm_start):
+            return cable_feat
+        end = start + out_dim
+        mean = torch.as_tensor(
+            norm.mean[start:end], dtype=cable_feat.dtype,
+            device=cable_feat.device)
+        std = torch.as_tensor(
+            norm.std[start:end], dtype=cable_feat.dtype,
+            device=cable_feat.device)
+        return torch.clamp((cable_feat - mean) / (std + 1e-8),
+                           -float(norm.clip), float(norm.clip))
+
+    def _replace_cable_features_for_update(self, obs_b, cable_b, critic=False):
+        if not bool(getattr(self, "_trainable_cable_encoder", False)):
+            return obs_b
+        if cable_b is None:
+            return obs_b
+        if critic and self._critic_use_cable_encoder:
+            encoder = self.critic_cable_encoder
+            out_dim = int(self._critic_cable_out_dim)
+            base_dim = int(self.critic_base_obs_dim)
+        else:
+            encoder = self.cable_encoder
+            out_dim = int(self._cable_out_dim)
+            base_dim = int(self.base_obs_dim)
+        if encoder is None or out_dim <= 0:
+            return obs_b
+        core_dim = max(0, base_dim - out_dim - int(self._wind_dim))
+        end = core_dim + out_dim
+        if obs_b.shape[-1] < end:
+            return obs_b
+        if cable_b.shape[-1] != int(self._cable_raw_dim):
+            return obs_b
+
+        cable_feat = encoder(cable_b)
+        cable_feat = self._normalize_cable_tensor(
+            cable_feat, core_dim, out_dim, critic=critic)
+
+        out = obs_b.clone()
+        old_slice = out[..., core_dim:end]
+        valid = (cable_b.detach().abs().sum(dim=-1, keepdim=True) > 0)
+        cable_feat = torch.where(valid, cable_feat.to(old_slice.dtype), old_slice)
+        out[..., core_dim:end] = cable_feat
+        return out
+
     def update(self, global_ts=None):
         if not self.buffer.full: return PPO_ZERO
         self._maybe_reset_plasticity()
@@ -1184,27 +1272,55 @@ class PPOPhaseAgent:
         for epoch in range(self.n_epochs):
             if stop_early: break
             for batch in self.buffer.get_minibatches(self.batch_size, self.norm_adv):
-                obs_b, critic_obs_b, act_b, ret_b, adv_b, old_lp_b, _cable_b = batch
-                # [v14.2] encoder 冻结, obs_b 中的 cable_feat 已经是正确的
-                # _cable_b 不使用 (保留 buffer 接口兼容性)
+                obs_b, critic_obs_b, act_b, ret_b, adv_b, old_lp_b, cable_b = batch
 
-                value = self.critic(critic_obs_b)
+                trainable_cable = (
+                    self.opt_cable_encoder is not None and
+                    bool(getattr(self, "_trainable_cable_encoder", False)))
+                if trainable_cable:
+                    actor_obs_b = self._replace_cable_features_for_update(
+                        obs_b, cable_b, critic=False)
+                    critic_in_b = self._replace_cable_features_for_update(
+                        critic_obs_b, cable_b, critic=True)
+                else:
+                    actor_obs_b = obs_b
+                    critic_in_b = critic_obs_b
+
+                value = self.critic(critic_in_b)
                 value_loss = F.huber_loss(value, ret_b)
-                self.opt_critic.zero_grad()
-                (self.value_loss_coef * value_loss).backward()
-                nn.utils.clip_grad_norm_(self.critic.parameters(), self.max_grad_norm)
-                self.opt_critic.step()
 
-                new_lp, entropy = self.actor.evaluate_actions(obs_b, act_b)
+                new_lp, entropy = self.actor.evaluate_actions(actor_obs_b, act_b)
                 ratio = (new_lp - old_lp_b).exp()
                 surr1 = ratio * adv_b
                 surr2 = ratio.clamp(1-self.clip_eps, 1+self.clip_eps) * adv_b
                 policy_loss = -torch.min(surr1, surr2).mean()
                 entropy_loss = -entropy.mean()
                 actor_total = policy_loss + self.entropy_coef * entropy_loss
-                self.opt_actor.zero_grad(); actor_total.backward()
-                nn.utils.clip_grad_norm_(self.actor.parameters(), self.max_grad_norm)
-                self.opt_actor.step()
+                if trainable_cable:
+                    for opt in self._active_optimizers():
+                        opt.zero_grad()
+                    total_loss = actor_total + self.value_loss_coef * value_loss
+                    total_loss.backward()
+                    nn.utils.clip_grad_norm_(
+                        self.actor.parameters(), self.max_grad_norm)
+                    nn.utils.clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm)
+                    cable_params = self._cable_params_for_clip()
+                    if cable_params:
+                        nn.utils.clip_grad_norm_(cable_params, self.max_grad_norm)
+                    for opt in self._active_optimizers():
+                        opt.step()
+                else:
+                    self.opt_critic.zero_grad()
+                    (self.value_loss_coef * value_loss).backward()
+                    nn.utils.clip_grad_norm_(
+                        self.critic.parameters(), self.max_grad_norm)
+                    self.opt_critic.step()
+
+                    self.opt_actor.zero_grad(); actor_total.backward()
+                    nn.utils.clip_grad_norm_(
+                        self.actor.parameters(), self.max_grad_norm)
+                    self.opt_actor.step()
                 with torch.no_grad():
                     frac = min(self.total_steps / max(self._log_std_floor_steps, 1), 1.0)
                     floor = self._log_std_floor_init + \
@@ -1225,13 +1341,19 @@ class PPOPhaseAgent:
 
     def save(self, path):
         torch.save({
+            "config": copy.deepcopy(self.config),
             "actor": self.actor.state_dict(), "critic": self.critic.state_dict(),
             "opt_actor": self.opt_actor.state_dict(), "opt_critic": self.opt_critic.state_dict(),
+            "opt_cable_encoder": (
+                self.opt_cable_encoder.state_dict()
+                if self.opt_cable_encoder is not None else {}),
             "total_steps": self.total_steps,
             "obs_norm": self.obs_norm.state_dict(),
             "critic_obs_norm": self.critic_obs_norm.state_dict(),
             "phase_name": self.phase_name,
             "entropy_coef": self.entropy_coef, "use_lstm": self.use_lstm,
+            "trainable_cable_encoder": self._trainable_cable_encoder,
+            "cable_out_dim": self._cable_out_dim,
             "cable_encoder": (
                 self.cable_encoder.state_dict()
                 if self.cable_encoder is not None else {}),
@@ -1253,14 +1375,25 @@ class PPOPhaseAgent:
         critic_cable = int(getattr(self, "_critic_cable_out_dim", 0))
         core = max(0, int(self.base_obs_dim) - actor_cable - wind)
         no_base = core + wind
-        full_base = core + critic_cable + wind
         actor_extra = max(0, int(self.obs_dim) - int(self.base_obs_dim))
         critic_extra = max(0, int(self.critic_obs_dim) -
                            int(self.critic_base_obs_dim))
-        full_sizes = {full_base, full_base + actor_extra,
-                      full_base + critic_extra}
-        has_cable = critic_cable > 0 and cols in full_sizes
-        cable = critic_cable if has_cable else 0
+        candidate_cables = []
+        for c in (actor_cable, critic_cable,
+                  int(DEFAULT_CONFIG.get("cable_encoder", {}).get(
+                      "output_dim", 0)),
+                  32, 16, 8, 0):
+            if c >= 0 and c not in candidate_cables:
+                candidate_cables.append(c)
+        cable = 0
+        for cand in candidate_cables:
+            full_base = core + cand + wind
+            full_sizes = {full_base, full_base + actor_extra,
+                          full_base + critic_extra}
+            if cols in full_sizes:
+                cable = cand
+                break
+        has_cable = cable > 0
         base = core + cable + wind
         if cols < no_base:
             core = max(0, cols - wind)
@@ -1348,6 +1481,41 @@ class PPOPhaseAgent:
         self._copy_obs_norm_by_layout(
             state, self.critic_obs_norm, "critic_obs_norm")
 
+    def _load_cable_encoder_state_adapt_dim(self, module, state, label):
+        if module is None or not state:
+            return
+        target = module.state_dict()
+        adapted = {}
+        changed = False
+        skipped = []
+        for key, src in state.items():
+            if key not in target:
+                continue
+            dst = target[key]
+            if tuple(src.shape) == tuple(dst.shape):
+                adapted[key] = src.to(device=dst.device, dtype=dst.dtype)
+                continue
+            new_tensor = dst.clone()
+            if src.ndim == dst.ndim == 2:
+                rows = min(src.shape[0], dst.shape[0])
+                cols = min(src.shape[1], dst.shape[1])
+                new_tensor[:rows, :cols] = src[:rows, :cols].to(
+                    device=dst.device, dtype=dst.dtype)
+                adapted[key] = new_tensor
+                changed = True
+            elif src.ndim == dst.ndim == 1:
+                width = min(src.shape[0], dst.shape[0])
+                new_tensor[:width] = src[:width].to(
+                    device=dst.device, dtype=dst.dtype)
+                adapted[key] = new_tensor
+                changed = True
+            else:
+                skipped.append(key)
+        missing, unexpected = module.load_state_dict(adapted, strict=False)
+        if changed or skipped or missing or unexpected:
+            print(f"  [PPO load] {label}: adapted cable encoder tensors "
+                  f"for output_dim={getattr(module, 'output_dim', 'unknown')}.")
+
     def load(self, path, map_location=None):
         ck = torch.load(path, map_location=map_location or self.device, weights_only=False)
         adapted_actor = self._load_module_state_adapt_obs_dim(
@@ -1361,12 +1529,21 @@ class PPOPhaseAgent:
         if not adapted and "opt_critic" in ck:
             try: self.opt_critic.load_state_dict(ck["opt_critic"])
             except Exception as e: print(f"  [PPO load] skipped critic optimizer: {e}")
+        if (not adapted and self.opt_cable_encoder is not None and
+                ck.get("opt_cable_encoder")):
+            try:
+                self.opt_cable_encoder.load_state_dict(ck["opt_cable_encoder"])
+            except Exception as e:
+                print(f"  [PPO load] skipped cable optimizer: {e}")
         if adapted:
             print("  [PPO load] optimizer state reset because obs_dim changed.")
         for group in self.opt_actor.param_groups:
             group["lr"] = self._lr_actor
         for group in self.opt_critic.param_groups:
             group["lr"] = self._lr_critic
+        if self.opt_cable_encoder is not None:
+            for group in self.opt_cable_encoder.param_groups:
+                group["lr"] = self._cable_encoder_lr
         self.total_steps = ck.get("total_steps", 0)
         if "entropy_coef" in ck:
             self.entropy_coef = float(ck["entropy_coef"])
@@ -1375,16 +1552,16 @@ class PPOPhaseAgent:
             self._load_critic_obs_norm_adapt_obs_dim(ck["critic_obs_norm"])
         elif "obs_norm" in ck:
             self._load_critic_obs_norm_adapt_obs_dim(ck["obs_norm"])
-        # [v14.0] cable encoder 加载 (保持 frozen 投影一致性)
+        # [v15.5] cable encoder may change 32D->16D; adapt compatible tensors.
         if "cable_encoder" in ck and self.cable_encoder is not None and ck["cable_encoder"]:
-            self.cable_encoder.load_state_dict(ck["cable_encoder"])
+            self._load_cable_encoder_state_adapt_dim(
+                self.cable_encoder, ck["cable_encoder"], "cable_encoder")
         if self.critic_cable_encoder is not None:
             _cc_state = ck.get("critic_cable_encoder") or ck.get("cable_encoder") or {}
             if _cc_state:
-                try:
-                    self.critic_cable_encoder.load_state_dict(_cc_state)
-                except Exception as e:
-                    print(f"  [PPO load] skipped critic cable encoder: {e}")
+                self._load_cable_encoder_state_adapt_dim(
+                    self.critic_cable_encoder, _cc_state,
+                    "critic_cable_encoder")
 
 
 # ==============================================================================
@@ -1781,6 +1958,7 @@ class SACPhaseAgent:
 
     def save(self, path):
         torch.save({
+            "config": copy.deepcopy(self.config),
             "actor": self.actor.state_dict(), "critic": self.critic.state_dict(),
             "target_critic": self.target_critic.state_dict(),
             "opt_actor": self.opt_actor.state_dict(),
