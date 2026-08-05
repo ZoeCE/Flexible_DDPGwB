@@ -1,0 +1,19 @@
+{
+  "mode": "policy",
+  "step": 91,
+  "wind_speed_mps": 16.5,
+  "wind_pattern": "direction switches every 13 control steps",
+  "purpose": "three-frame swing silhouette under rapidly varying wind",
+  "checkpoint": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/saves/descent_ppo_paper_trueobs_residual_pretrain_trainable8_seed270627_20260704/ckpt_best_l8.pt",
+  "camera": {
+    "lookat": [
+      -0.33999999999999997,
+      0.2,
+      0.29
+    ],
+    "distance": 0.82,
+    "azimuth": 270.0,
+    "elevation": 0.0
+  },
+  "image": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/outputs/figure1_complete/closeups/wind_gust_closeup_2.png"
+}

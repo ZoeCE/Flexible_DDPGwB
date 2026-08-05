@@ -1,0 +1,26 @@
+{
+  "mode": "policy_plus_z_shake",
+  "step": 138,
+  "joint_pulse": {
+    "joint_2": "0.30*sin",
+    "joint_4": "-0.24*sin",
+    "joint_6": "0.18*cos",
+    "steps": [
+      122,
+      147
+    ]
+  },
+  "purpose": "cable deformation after end-effector z-direction excitation",
+  "checkpoint": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/saves/descent_ppo_paper_trueobs_residual_pretrain_trainable8_seed270627_20260704/ckpt_best_l8.pt",
+  "camera": {
+    "lookat": [
+      -0.33999999999999997,
+      0.2,
+      0.3
+    ],
+    "distance": 0.72,
+    "azimuth": 278.0,
+    "elevation": -6.0
+  },
+  "image": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/outputs/figure1_complete/closeups/rope_excitation_closeup.png"
+}

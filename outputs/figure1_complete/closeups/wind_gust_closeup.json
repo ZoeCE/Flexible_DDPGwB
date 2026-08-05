@@ -1,0 +1,19 @@
+{
+  "mode": "policy",
+  "step": 108,
+  "wind_speed_mps": 10.0,
+  "wind_pattern": "70-85 and 98-113 step gusts; calm otherwise",
+  "purpose": "intermittent large wind disturbance",
+  "checkpoint": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/saves/descent_ppo_paper_trueobs_residual_pretrain_trainable8_seed270627_20260704/ckpt_best_l8.pt",
+  "camera": {
+    "lookat": [
+      -0.38,
+      0.2,
+      0.28
+    ],
+    "distance": 1.04,
+    "azimuth": 265.0,
+    "elevation": -16.0
+  },
+  "image": "/mnt/d/ResearchProject/DDPG/Flexible_DDPGwB/outputs/figure1_complete/closeups/wind_gust_closeup.png"
+}
